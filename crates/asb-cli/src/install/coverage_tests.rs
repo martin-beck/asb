@@ -557,7 +557,7 @@ fn host_recipe_contract(root: &Path) {
 
 fn guest_bootstrap_contract(root: &Path) {
     let tools = root.join("tools");
-    let unknown = guest_bootstrap("fixture-unregistered-agent", root, &tools)
+    let unknown = guest_bootstrap("fixture-unregistered-agent", root, &tools, false)
         .err()
         .expect("unregistered agent must be rejected");
     assert!(unknown.to_string().contains("no installation adapter"));
@@ -567,7 +567,7 @@ fn guest_bootstrap_contract(root: &Path) {
     fs::write(&host_node, "preserved host runtime").unwrap();
     // curl is absent from the child PATH: prefetch must stop, not launch an
     // agent or substitute a host executable for its declared distribution.
-    let error = guest_bootstrap("codex", root, &tools)
+    let error = guest_bootstrap("codex", root, &tools, false)
         .err()
         .expect("missing prefetch transport must fail");
     assert!(error.to_string().contains("curl"), "{error}");
@@ -575,7 +575,7 @@ fn guest_bootstrap_contract(root: &Path) {
     assert!(tools.join(".asb-guest-bootstrap.lock").is_file());
     let blocked = root.join("blocked-tools");
     fs::write(&blocked, "preserved").unwrap();
-    assert!(guest_bootstrap("codex", root, &blocked).is_err());
+    assert!(guest_bootstrap("codex", root, &blocked, false).is_err());
     assert_eq!(fs::read(&blocked).unwrap(), b"preserved");
     let error = ensure_runtime_dependency(
         "fixture-unknown-runtime",

@@ -347,8 +347,12 @@ pub(crate) fn guest_bootstrap(
     id: &str,
     project_root: &Path,
     tools_root: &Path,
+    offline: bool,
 ) -> Result<GuestBootstrap, Error> {
-    let context = OperationContext::load(project_root).map_err(InstallFailure::into_public)?;
+    let mut context = OperationContext::load(project_root).map_err(InstallFailure::into_public)?;
+    if offline {
+        context = context.offline();
+    }
     guest_bootstrap_in(&context, id, tools_root).map_err(InstallFailure::into_public)
 }
 fn guest_bootstrap_in(
@@ -539,6 +543,12 @@ fn python_guest_package_tree_in(
         .stdin(Stdio::null());
     let mut found = scope.run(find)?;
     if !found.status.success() || found.stdout.is_empty() {
+        if context.is_offline() {
+            return Err(Error::Input(format!(
+                "replay needs portable Python {pinned}; prepare replay while online and retry"
+            ))
+            .into());
+        }
         let mut install = scope.prepare(&uv, Purpose::Configure, "portable Python installation")?;
         install
             .command_mut()
@@ -2029,6 +2039,9 @@ pub(crate) fn ensure_runtime_dependency_in(
     let context = &owned_context;
     if runtime_dependency_available_in(context, id, tools_root)? {
         return Ok(());
+    }
+    if context.is_offline() {
+        return Err(Error::Input(format!("replay needs the locally installed runtime `{id}`; prepare replay while online and retry")).into());
     }
     let destination = install_recipe_in(
         context,

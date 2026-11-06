@@ -210,6 +210,7 @@ impl<'a> PreparedSweep<'a> {
                         project_root: &root,
                         project_config: &project,
                         agent: &entry.configuration.agent,
+                        offline: options.mode == Some(crate::tape::Mode::Replay),
                     },
                 )?;
             }
