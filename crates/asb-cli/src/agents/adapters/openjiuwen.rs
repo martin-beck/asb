@@ -16,6 +16,11 @@ const ARTIFACTS: &[super::super::ArtifactSpec] = &[
         filename: "native-tool-pending.jsonl",
         format: super::super::ArtifactFormat::JsonLines,
     },
+    super::super::ArtifactSpec {
+        namespace: "openjiuwen",
+        filename: "native-replay-consumed.json",
+        format: super::super::ArtifactFormat::Json,
+    },
 ];
 
 // OpenJiuwen recreates a provider-wire tool-result id after replaying an
@@ -118,6 +123,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_deferred_native_recording(snapshot::finalize)
 .with_native_snapshot_check(snapshot::verify)
+.with_snapshot_replay_receipt(snapshot_replay_receipt)
 .with_artifact_specs(ARTIFACTS)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_collection(collect)
@@ -386,12 +392,32 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         "ASB_OPENJIUWEN_NATIVE_TOOL_RECORD",
         context.run_dir.join("openjiuwen/native-tool-sidecar.jsonl"),
     );
+    context.command.env(
+        "ASB_OPENJIUWEN_REPLAY_RECEIPT",
+        context
+            .run_dir
+            .join("openjiuwen/native-replay-consumed.json"),
+    );
     let workspace = std::fs::canonicalize(context.workspace)
         .unwrap_or_else(|_| context.workspace.to_path_buf());
     context
         .command
         .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", workspace);
     Ok(())
+}
+
+fn snapshot_replay_receipt(frozen: &super::super::FrozenArtifacts) -> Result<Option<bool>, Error> {
+    let receipt = frozen.bytes("native-replay-consumed.json").ok_or_else(|| {
+        Error::Run("OpenJiuwen did not report complete native replay consumption".into())
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(receipt)
+        .map_err(|_| Error::Run("OpenJiuwen native replay receipt is malformed".into()))?;
+    if value != serde_json::json!({"version":1,"consumed":true}) {
+        return Err(Error::Run(
+            "OpenJiuwen native replay receipt is invalid".into(),
+        ));
+    }
+    Ok(Some(true))
 }
 
 fn collect(context: &CollectionContext<'_>) -> AgentArtifacts {
@@ -613,6 +639,36 @@ for (const request of invalid) {
             Some(b"{\"event\":\"launch\"}\n".as_slice())
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_replay_consumption_requires_a_valid_frozen_receipt() {
+        for (index, content, expected) in [
+            (0, None, false),
+            (
+                1,
+                Some(br#"{"version":1,"consumed":false}"#.as_slice()),
+                false,
+            ),
+            (
+                2,
+                Some(br#"{"version":1,"consumed":true}"#.as_slice()),
+                true,
+            ),
+        ] {
+            let root = crate::fixture_namespace::allocate(
+                &std::env::temp_dir(),
+                &format!("openjiuwen-receipt-{index}"),
+            )
+            .unwrap();
+            let mut owner = ArtifactOwner::prepare(&root, super::ARTIFACTS).unwrap();
+            if let Some(bytes) = content {
+                std::fs::write(root.join("openjiuwen/native-replay-consumed.json"), bytes).unwrap();
+            }
+            let frozen = owner.freeze();
+            assert_eq!(super::snapshot_replay_receipt(&frozen).is_ok(), expected);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -982,6 +1038,20 @@ def configure_log_config(config):
         )
         .unwrap();
         std::fs::write(
+            package.join("harness/deep_agent.py"),
+            r#"
+from types import SimpleNamespace
+class DeepAgent:
+    def __init__(self, cwd=None, inherited=None):
+        self._deep_config = SimpleNamespace(cwd=cwd, project_root=None)
+        self._initialized = False
+        self._inherited_artifact_root = inherited
+    async def _ensure_initialized(self):
+        return self._deep_config.cwd, self._deep_config.project_root
+"#,
+        )
+        .unwrap();
+        std::fs::write(
             package.join("harness/cli/agent/factory.py"),
             r#"
 class Config:
@@ -1180,6 +1250,14 @@ from openjiuwen.core.single_agent.ability_manager import AbilityManager, ToolMes
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from openjiuwen.core.context_engine.context.context import Context
 async def main():
+    from openjiuwen.harness.deep_agent import DeepAgent
+    root = DeepAgent()
+    cwd, project = await root._ensure_initialized()
+    assert cwd == os.path.realpath(os.environ["ASB_TEST_WORKSPACE"]) and project == cwd
+    explicit = DeepAgent(cwd="/explicit")
+    assert (await explicit._ensure_initialized())[0] == "/explicit"
+    child = DeepAgent(inherited="/child")
+    assert (await child._ensure_initialized())[0] is None
     agent, _tracker = factory.create_agent(None)
     assert agent._deep_config.enable_read_image_multimodal is True
     assert agent._deep_config.parallel_tool_calls is True
@@ -1432,6 +1510,7 @@ asyncio.run(main())
             .env("ASB_TEST_WORKSPACE", &replay_workspace)
             .env("ASB_TEST_RENDER_PREFIX", "replay:")
             .env("ASB_FS_REPLAY_SOCKET", &socket)
+            .env("ASB_OPENJIUWEN_REPLAY_RECEIPT", root.join("consumed.json"))
             .env("ASB_OPENJIUWEN_NATIVE_TOOL_WORKSPACE", &replay_workspace)
             .output()
             .unwrap();
@@ -1485,6 +1564,9 @@ asyncio.run(main())
             .unwrap();
         assert!(!cancelled.status.success());
         assert!(String::from_utf8_lossy(&cancelled.stderr).contains("unconsumed"));
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("consumed.json")).unwrap()).unwrap();
+        assert_eq!(receipt, serde_json::json!({"version":1,"consumed":true}));
         assert!(!marker.exists(), "cancelled replay executed a direct tool");
         let cancelled_last = super::process(entry.to_str().unwrap())
             .unwrap()

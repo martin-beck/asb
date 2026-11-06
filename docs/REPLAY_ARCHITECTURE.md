@@ -23,11 +23,11 @@ does not change when a hop is added or removed.
 Workspace snapshot storage and execution environments are separate concerns.
 The snapshot backend receives an already provisioned guest transport, tool paths,
 selected roots, mode and lifecycle deadline. It starts a session and owns its
-settlement and cleanup; it does not select an execution environment. The Btrfs
-implementation currently uses the task container transport and supports ordinary
-or separate snapshot custody. A VM execution backend may supply its own guest
-transport and must implement its own compatible snapshot session; a QEMU disk
-used for Btrfs storage does not select or replace an execution VM.
+settlement and cleanup; it does not select an execution environment. Btrfs
+delegates startup to the selected transport. The Docker transport supports
+ordinary or separate snapshot custody; a VM adapter can implement the same
+transport contract and provide its own Btrfs session. A QEMU disk used for
+Btrfs storage does not select or replace an execution VM.
 
 Snapshot recording can be selected for any setup combination. Support and
 fidelity vary: a successful recording requires both a settled workspace archive

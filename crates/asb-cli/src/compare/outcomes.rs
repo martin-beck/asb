@@ -799,7 +799,7 @@ mod tests {
         let html =
             fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
         assert_eq!(
-            html.matches("broker consumed its recorded tool stream")
+            html.matches("agent adapter consumed its recorded native tool stream")
                 .count(),
             1
         );
@@ -849,6 +849,32 @@ mod tests {
         contradictory["summary"]["native_replay_consumed"] = json!(true);
         fixture.publish(1, &contradictory);
         assert!(fixture.compare().is_err());
+    }
+
+    #[test]
+    fn non_pi_native_consumption_survives_comparison() {
+        let fixture = Fixture::new("swe-bench", 1);
+        let config_path = fixture.root.join("one.toml");
+        let text = fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("agent='pi'", "agent='opencode'");
+        fs::write(&config_path, text).unwrap();
+        let plan_path = fixture.root.join("sweep-results/plan.json");
+        let mut plan = read_json(&plan_path).unwrap();
+        plan["entries"][0]["configuration"]["agent"] = json!("opencode");
+        fs::write(plan_path, plan.to_string()).unwrap();
+        let mut record = fixture.record(1, json!(true), true, true);
+        record["summary"]["agent"] = json!("opencode");
+        record["summary"]["native_replay_consumed"] = json!(true);
+        record["summary"]["replay_selection"] =
+            json!({"provider_replay":true,"tools":"native-snapshot","mcp_replay":false});
+        fixture.publish(1, &record);
+        let report = fixture.compare().unwrap();
+        assert_eq!(report["benchmarks"][0]["native_replay_consumed"], true);
+        assert_eq!(
+            report["benchmarks"][0]["replay_selection"]["tools"],
+            "native-snapshot"
+        );
     }
 
     #[test]

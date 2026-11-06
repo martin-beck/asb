@@ -35,9 +35,9 @@ def elf(interpreter=False):
 
 class SnapshotBackendTests(unittest.TestCase):
     def test_backend_passes_guest_transport_and_selects_custody(self):
-        from asb_snapshot_backend import BTRFS, SnapshotRequest
-        task, transport = object(), object()
-        request = SnapshotRequest(task, {'btrfs': 'tool'}, (1, 2), transport, 123,
+        from asb_snapshot_backend import BTRFS, DockerSnapshotTransport, SnapshotRequest
+        task, transport = object(), ['docker']
+        request = SnapshotRequest(task, {'btrfs': 'tool'}, (1, 2), DockerSnapshotTransport(transport), 123,
                                   target='/workspace/task', replay=True, extra_roots=('/tmp',))
         with patch('asb_snapshot_control.GuestSnapshot') as ordinary, \
              patch('asb_snapshot_independent.IndependentSnapshot') as separate:
@@ -50,9 +50,20 @@ class SnapshotBackendTests(unittest.TestCase):
             separate.assert_called_once_with(task, request.tools, (1, 2), transport, 123,
                                              target='/workspace/task', replay=True, extra_roots=['/tmp'])
 
-    def test_backend_propagates_startup_failure(self):
+    def test_alternate_transport_receives_backend_request_without_docker(self):
         from asb_snapshot_backend import BTRFS, SnapshotRequest
-        request = SnapshotRequest(object(), {}, None, object(), 0)
+        class OtherTransport:
+            def start_btrfs(self, request):
+                self.request = request
+                return 'other-session'
+        transport = OtherTransport()
+        request = SnapshotRequest(object(), {}, None, transport, 1, target='/guest/work')
+        self.assertEqual(BTRFS.start(request), 'other-session')
+        self.assertIs(transport.request, request)
+
+    def test_backend_propagates_startup_failure(self):
+        from asb_snapshot_backend import BTRFS, DockerSnapshotTransport, SnapshotRequest
+        request = SnapshotRequest(object(), {}, None, DockerSnapshotTransport(['docker']), 0)
         with patch('asb_snapshot_control.GuestSnapshot', side_effect=ExecutionError('failed')):
             with self.assertRaisesRegex(ExecutionError, 'failed'):
                 BTRFS.start(request)

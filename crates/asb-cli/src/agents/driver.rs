@@ -1049,11 +1049,13 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.observation,
         )
     };
-    let native_replay_selected = request.config.agent == "pi"
-        && request.tool_replay
+    let snapshot_replay = request.tool_replay
         && request.native_tool_launch.is_some()
         && request.snapshot_archive_sha256.is_some();
-    let native_replay_consumed = settle_auxiliary(&mut auxiliary, native_replay_selected)?;
+    let native_replay_selected = snapshot_replay
+        && super::find(&request.config.agent)
+            .is_some_and(|adapter| adapter.snapshot_replay_uses_settlement_service());
+    let mut native_replay_consumed = settle_auxiliary(&mut auxiliary, native_replay_selected)?;
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -1064,6 +1066,9 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let adapter = super::find(&request.config.agent).expect("validated agent");
     let frozen = artifact_owner.freeze();
+    if snapshot_replay && native_replay_consumed.is_none() {
+        native_replay_consumed = adapter.snapshot_replay_consumed(&frozen)?;
+    }
     let deferred_collection = frozen.deferred_collection_bytes()?;
     let mut sealed = vec![super::SealedArtifact {
         kind: DEFERRED_COLLECTION_ARTIFACT.into(),
@@ -1231,7 +1236,7 @@ fn settle_auxiliary(
 ) -> Result<Option<bool>, Error> {
     if native_replay_selected && auxiliary.is_none() {
         return Err(Error::Run(
-            "Pi native replay has no settlement service".into(),
+            "native snapshot replay has no settlement service".into(),
         ));
     }
     if let Some(service) = auxiliary.as_mut() {

@@ -311,6 +311,15 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertNotIn("kill", container.events)
 
+    def test_default_preparation_does_not_consume_command_execution_budget(self):
+        workspace, container, _, _ = self.workspace()
+        with workspace:
+            result = workspace.execute(["agent"], timeout=.02,
+                                       before_resume=lambda _: time.sleep(.05))
+            self.assertEqual(result["exit_code"], 0)
+            self.assertFalse(result["timed_out"])
+            self.assertTrue(container.resumed)
+
     def test_long_preparation_budget_does_not_change_agent_execution_timeout(self):
         workspace, container, _, _ = self.workspace()
         with workspace:

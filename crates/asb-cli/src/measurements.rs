@@ -189,7 +189,7 @@ pub struct RunMeasurement<'a> {
     /// Replay transports selected for this attempt; not a completeness claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) replay_selection: Option<crate::runner::ReplaySelection>,
-    /// Guest-attested consumption of the selected Pi native tool stream.
+    /// Guest-attested consumption of the selected native tool stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) native_replay_consumed: Option<bool>,
     /// Exact runtime identity inputs; independently usable without a run log.

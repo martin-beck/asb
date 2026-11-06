@@ -621,7 +621,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             format!("<p>Replay selection: {provider}; {tools}; {mcp}. Selection is not proof of complete tool or filesystem coverage.</p>")
         });
         let native_replay_details = if benchmark.native_replay_consumed == Some(true) {
-            "<p>Pi native snapshot broker consumed its recorded tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
+            "<p>The agent adapter consumed its recorded native tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
         } else {
             ""
         };

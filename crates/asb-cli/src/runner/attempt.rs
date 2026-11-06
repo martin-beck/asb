@@ -1562,7 +1562,8 @@ impl ResultFacts {
         }
         let result = RunResult {
             replay_selection: options.replay_selection(&config.agent),
-            native_replay_consumed: (config.agent == "pi" && options.native_snapshot_replay())
+            native_replay_consumed: options
+                .native_snapshot_replay()
                 .then(|| {
                     guest
                         .as_ref()

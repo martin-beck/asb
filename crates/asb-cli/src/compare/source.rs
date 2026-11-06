@@ -881,7 +881,7 @@ fn load_attempt(
         } else {
             match run_value.get("native_replay_consumed") {
                 None | Some(Value::Null) => None,
-                Some(Value::Bool(value)) if agent == "pi" => Some(*value),
+                Some(Value::Bool(value)) => Some(*value),
                 Some(_) => {
                     return Err(Error::Input(
                         "invalid native replay consumption evidence".into(),

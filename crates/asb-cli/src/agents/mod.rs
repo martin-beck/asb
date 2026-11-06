@@ -158,6 +158,14 @@ pub(crate) trait AgentAdapter: Sync {
     fn supports_native_tool_transport(&self) -> bool {
         false
     }
+    /// This adapter's snapshot replay broker proves complete consumption when settled.
+    fn snapshot_replay_uses_settlement_service(&self) -> bool {
+        false
+    }
+    /// Adapter-owned receipt after its client consumes the selected replay stream.
+    fn snapshot_replay_consumed(&self, _frozen: &FrozenArtifacts) -> Result<Option<bool>, Error> {
+        Ok(None)
+    }
     /// Whether this adapter provides a tool replay preparation hook.
     fn has_tool_replay_hook(&self) -> bool {
         false
@@ -575,6 +583,7 @@ type GuestServiceHook = fn(
 type DeferredNativeHook = fn(&[u8], &str) -> Result<Vec<u8>, Error>;
 type GuestReplayEvidenceHook = fn(&Path) -> Result<Vec<u8>, Error>;
 type NativeSnapshotHook = fn(&[u8], &mut std::fs::File, &str) -> Result<(), Error>;
+type SnapshotReplayReceiptHook = fn(&FrozenArtifacts) -> Result<Option<bool>, Error>;
 type ToolReplayHook = for<'a> fn(&mut PreparationContext<'a>, TapeContext<'a>) -> Result<(), Error>;
 type CollectionHook = for<'a> fn(&CollectionContext<'a>) -> AgentArtifacts;
 /// An adapter-selected extension which may attach its own bounded replay
@@ -637,6 +646,8 @@ pub(super) struct StaticAdapter {
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
+    snapshot_replay_settlement: bool,
+    snapshot_replay_receipt: Option<SnapshotReplayReceiptHook>,
     guest_service: Option<GuestServiceHook>,
     finalize_native_recording: Option<DeferredNativeHook>,
     native_snapshot_check: Option<NativeSnapshotHook>,
@@ -693,6 +704,8 @@ impl StaticAdapter {
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
+            snapshot_replay_settlement: false,
+            snapshot_replay_receipt: None,
             guest_service: None,
             finalize_native_recording: None,
             native_snapshot_check: None,
@@ -770,6 +783,20 @@ impl StaticAdapter {
     /// server with ASB's transport-only relay.
     pub(super) const fn with_mcp_relay(mut self) -> Self {
         self.mcp_relay = true;
+        self
+    }
+
+    /// Declares an adapter-owned receipt for snapshot replay consumption.
+    pub(super) const fn with_snapshot_replay_receipt(
+        mut self,
+        hook: SnapshotReplayReceiptHook,
+    ) -> Self {
+        self.snapshot_replay_receipt = Some(hook);
+        self
+    }
+
+    pub(super) const fn with_snapshot_replay_settlement(mut self) -> Self {
+        self.snapshot_replay_settlement = true;
         self
     }
 
@@ -1049,6 +1076,13 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supports_native_tool_transport(&self) -> bool {
         self.native_tool_transport
+    }
+    fn snapshot_replay_uses_settlement_service(&self) -> bool {
+        self.snapshot_replay_settlement
+    }
+    fn snapshot_replay_consumed(&self, frozen: &FrozenArtifacts) -> Result<Option<bool>, Error> {
+        self.snapshot_replay_receipt
+            .map_or(Ok(None), |hook| hook(frozen))
     }
     fn has_tool_replay_hook(&self) -> bool {
         self.tool_replay.is_some()
@@ -1498,6 +1532,23 @@ mod tests {
         assert!(find("goose").unwrap().has_tool_replay_hook());
         assert!(find("codex").unwrap().supports_mcp_servers());
         assert!(!find("pi").unwrap().supports_mcp_servers());
+    }
+
+    #[test]
+    fn snapshot_replay_consumption_is_owned_by_each_adapter() {
+        for agent in ["pi", "opencode", "claude-code"] {
+            assert!(
+                find(agent)
+                    .unwrap()
+                    .snapshot_replay_uses_settlement_service(),
+                "{agent}"
+            );
+        }
+        assert!(
+            !find("openjiuwen")
+                .unwrap()
+                .snapshot_replay_uses_settlement_service()
+        );
     }
 
     #[test]
