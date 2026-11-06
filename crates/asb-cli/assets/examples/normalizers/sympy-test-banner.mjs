@@ -6,7 +6,7 @@ export function normalizeToolResult({ text, tool }) {
       || !(command.includes('sympy.test(') || /(?:^|[\s;&|])(?:python(?:\d+(?:\.\d+)*)?\s+)?(?:\.\/|\/testbed\/)?bin\/test(?:\s|$)/.test(command))) return text;
   const starts = [...text.matchAll(/^=+ test process starts =+\r?$/gm)];
   const finishes = [...text.matchAll(/^=*[ \t]*tests finished: .+?(?:=+|seconds)[ \t]*\r?$/gm)];
-  const elapsed = /^=*[ \t]*tests finished: ((?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?)(?:, )?)+)in \d+(?:\.\d+)? seconds[ \t]*=*[ \t]*\r?$/;
+  const elapsed = /^=*[ \t]*tests finished: ((?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?|exceptions?)(?:, )?)+)in \d+(?:\.\d+)? seconds[ \t]*=*[ \t]*\r?$/;
   const seeds = [...text.matchAll(/^(random seed:[ \t]*)(?:\d+|<asb-seed>)(?=\r?$)/gm)];
   const seedLines = [...text.matchAll(/^random seed:/gm)];
   // tail may remove the start banner, but only accept an exact contiguous
@@ -24,7 +24,7 @@ export function normalizeToolResult({ text, tool }) {
   // Centering changes the count of '=' when the duration gains a digit. Bind
   // the original width and surrounding whitespace so other layout changes
   // remain significant, while the duration and its balancing padding vary.
-  return withSeed.replace(/^(=*)([ \t]*)tests finished: ((?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?)(?:, )?)+)in \d+(?:\.\d+)? seconds([ \t]*)(=*)([ \t]*)(\r?)$/m,
+  return withSeed.replace(/^(=*)([ \t]*)tests finished: ((?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?|exceptions?)(?:, )?)+)in \d+(?:\.\d+)? seconds([ \t]*)(=*)([ \t]*)(\r?)$/m,
     (line, _left, leading, counts, before, _right, trailing, cr) =>
       `${leading}<asb-sympy-width:${line.length - cr.length}>tests finished: ${counts}in <asb-elapsed> seconds${before}${trailing}${cr}`);
 }
