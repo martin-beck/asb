@@ -100,6 +100,8 @@ def main():
             if not (row.get('process_success') is True and row.get('workload_success') is True
                     and outcome.get('execution_success') is True and outcome.get('cleanup_confirmed') is True):
                 raise RuntimeError(f'{phase} did not fully resolve and clean up; inspect retained output')
+            if phase=='replay' and row.get('native_replay_consumed') is not True:
+                raise RuntimeError('replay lacks native tool stream consumption evidence')
         if phase=='record':
             publications=[line['publication'] for line in lines if isinstance(line.get('publication'),dict)]
             if (len(publications)!=1 or publications[0].get('status')!='published'
