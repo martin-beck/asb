@@ -21,6 +21,7 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         workload,
         provider,
         model,
+        native_snapshot_record,
         concurrency,
         trial_set,
         trial,
@@ -31,6 +32,7 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         mcp_servers,
     } = config;
     let _: &usize = concurrency;
+    let _: &bool = native_snapshot_record;
     let _: &bool = &retention.compact_completed_attempts;
     for value in [agent, workload, provider, model, workspace, log_file] {
         string(value)?;
@@ -252,6 +254,7 @@ mod tests {
     fn config() -> BenchmarkConfig {
         BenchmarkConfig {
             planning: None,
+            native_snapshot_record: false,
             agent: "pi".into(),
             workload: "bug-fix".into(),
             provider: "openrouter".into(),

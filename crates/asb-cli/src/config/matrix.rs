@@ -47,6 +47,15 @@ pub(super) fn setup_at(
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options, base)?;
     validate_concurrency_before_install(options.concurrency)?;
+    if options.native_snapshot_record
+        && (options.agent.iter().any(|agent| agent != "pi")
+            || options
+                .workload
+                .iter()
+                .any(|workload| !workload.starts_with("swe-bench")))
+    {
+        return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
+    }
     if !filter_incompatible {
         validate_before_install(&options)?;
     }
@@ -185,6 +194,7 @@ pub(super) fn setup_at(
                             agent: vec![agent.clone()],
                             provider: vec![provider.clone()],
                             model: vec![model.clone()],
+                            native_snapshot_record: options.native_snapshot_record,
                             workload: vec![workload.clone()],
                             trial: trial.iter().cloned().collect(),
                             trial_set: set
@@ -235,9 +245,14 @@ pub(super) fn setup_at(
             };
             writeln!(
                 output,
-                "Wrote {}\n{}",
+                "Wrote {}\n{}{}",
                 shown.display(),
-                run_command_message(&shown.to_string_lossy())
+                run_command_message(&shown.to_string_lossy()),
+                if config.native_snapshot_record {
+                    " --record"
+                } else {
+                    ""
+                }
             )
             .map_err(|error| publication::confirmation(&target, error))?;
         } else {
@@ -526,6 +541,7 @@ fn publish_sweep_with_progress_and_repeat(
     output: &mut dyn Write,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<(), Error> {
+    let native_snapshot_record = configs.iter().any(|config| config.native_snapshot_record);
     let prepared = prepared::Sweep::new_with_repeat(path, configs, repeat)?;
     if fs::symlink_metadata(path).is_ok() {
         return Err(Error::Input(format!(
@@ -537,10 +553,15 @@ fn publish_sweep_with_progress_and_repeat(
     publication::sweep_with_progress(path, &prepared, progress)?;
     writeln!(
         output,
-        "Wrote {} benchmarks and sweep {}\nRun it with: asb sweep '{}'",
+        "Wrote {} benchmarks and sweep {}\nRun it with: asb sweep '{}'{}",
         prepared.configurations.len(),
         path.display(),
-        path.display()
+        path.display(),
+        if native_snapshot_record {
+            " --record"
+        } else {
+            ""
+        }
     )
     .map_err(|error| publication::confirmation(path, error))
 }
@@ -548,6 +569,33 @@ fn publish_sweep_with_progress_and_repeat(
 #[cfg(test)]
 mod tests {
     use super::collector_installables;
+
+    #[test]
+    fn sweep_publication_preserves_snapshot_recording_in_every_config() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-snapshot-sweep-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='openrouter'\nmodel='model'\nworkload='swe-bench'\nnative_snapshot_record=true\n",
+        ).unwrap();
+        let mut second = config.clone();
+        second.trial = Some("another-trial".into());
+        let path = root.join("sweep.toml");
+        let mut output = Vec::new();
+        super::publish_sweep(&path, vec![config, second], &mut output).unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("--record"));
+        let sweep: crate::sweep::SweepFile =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(sweep.configs.len(), 2);
+        for reference in sweep.configs {
+            let saved: crate::benchmark::BenchmarkConfig =
+                toml::from_str(&std::fs::read_to_string(root.join(reference)).unwrap()).unwrap();
+            assert!(saved.native_snapshot_record);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn selected_collector_tools_are_installed_alongside_dependencies() {

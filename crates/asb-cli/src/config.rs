@@ -17,6 +17,7 @@ pub struct SetupOptions {
     pub trial_set: Vec<String>,
     pub provider: Vec<String>,
     pub model: Vec<String>,
+    pub native_snapshot_record: bool,
     pub measure: Vec<String>,
     pub concurrency: Option<usize>,
     pub workspace: Option<String>,
@@ -148,6 +149,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
         trial_set,
         provider,
         model,
+        native_snapshot_record,
         measure,
         concurrency,
         workspace,
@@ -198,6 +200,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
         workload: required(workload.into_iter().next())?,
         provider,
         model,
+        native_snapshot_record,
         concurrency,
         trial_set: trial_set.into_iter().next(),
         trial: trial.into_iter().next(),
@@ -428,6 +431,20 @@ mod tests {
     }
 
     #[test]
+    fn setup_carries_native_snapshot_choice_into_configuration() {
+        let mut selection = options("pi", "cli2key", "gpt-6.1-sol");
+        selection.workload = vec!["swe-bench".into()];
+        selection.native_snapshot_record = true;
+        let config = super::configuration(selection).expect("configuration succeeds");
+        assert!(config.native_snapshot_record);
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("native_snapshot_record = true")
+        );
+    }
+
+    #[test]
     fn setup_rejects_unbounded_concurrency_before_writing_configuration() {
         let mut selection = options("pi", "cli2key", "fixture");
         selection.concurrency = Some(usize::MAX);
@@ -443,6 +460,7 @@ mod tests {
 
     fn options(agent: &str, provider: &str, model: &str) -> SetupOptions {
         SetupOptions {
+            native_snapshot_record: false,
             agent: vec![agent.into()],
             workload: vec!["bug-fix".into()],
             trial: vec![],

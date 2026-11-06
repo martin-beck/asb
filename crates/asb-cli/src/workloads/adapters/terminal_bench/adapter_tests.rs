@@ -162,6 +162,7 @@ fn preparation_checks_selection_runtime_and_allocation_before_any_task_launch() 
             Err("fixture refuses allocation before process launch".to_owned())
         };
         let mut context = PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,

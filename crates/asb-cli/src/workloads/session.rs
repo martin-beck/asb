@@ -104,6 +104,8 @@ pub(crate) struct PreparationContext<'a> {
     pub tool_mode: Option<crate::tape::Mode>,
     /// The selected verified native tool track includes workspace snapshots.
     pub native_snapshot_replay: bool,
+    /// Explicit native snapshot capture selected in the recorded configuration.
+    pub native_snapshot_record: bool,
     pub verify_initial_material: bool,
     pub budgets: crate::planning::PhaseBudgets,
     pub on_allocation: Option<&'a super::recovery::AllocationObserver<'a>>,
@@ -654,6 +656,7 @@ mod tests {
         let project = crate::project::ProjectConfig::default();
         let root = std::path::Path::new("/nonexistent-snapshot-test");
         let context = super::PreparationContext {
+            native_snapshot_record: false,
             tool_mode: Some(crate::tape::Mode::Replay),
             native_snapshot_replay: true,
             verify_initial_material: false,
@@ -757,6 +760,7 @@ mod tests {
         std::fs::write(root.join("fixture.py"), "original material").unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -795,6 +799,7 @@ mod tests {
             ..Default::default()
         };
         let context = super::PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -915,6 +920,7 @@ mod tests {
         std::fs::create_dir_all(&workloads).unwrap();
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -945,6 +951,7 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -976,6 +983,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -1017,6 +1025,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -1055,6 +1064,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            native_snapshot_record: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,

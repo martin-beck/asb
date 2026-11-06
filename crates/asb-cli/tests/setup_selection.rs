@@ -179,7 +179,12 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
         }
         let path = format!("catalogs/{workload}/catalog.json");
         project.write(&path, &catalog.to_string());
-        let result = project.setup(workload, &["--trial", "fixture-0"]);
+        let arguments = if workload == "swe-bench" {
+            vec!["--trial", "fixture-0", "--native-snapshot-record"]
+        } else {
+            vec!["--trial", "fixture-0"]
+        };
+        let result = project.setup(workload, &arguments);
         assert!(
             result.status.success(),
             "{workload}: {}",
@@ -190,6 +195,14 @@ fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_bef
         assert_eq!(config["workload"].as_str(), Some(workload));
         assert_eq!(config["trial"].as_str(), Some("fixture-0"));
         assert_eq!(config["workspace"].as_str(), Some("workspaces"));
+        if workload == "swe-bench" {
+            assert_eq!(config["native_snapshot_record"].as_bool(), Some(true));
+            assert!(
+                String::from_utf8_lossy(&result.stdout).contains("asb run selected.toml --record")
+            );
+        } else {
+            assert!(config.get("native_snapshot_record").is_none());
+        }
         assert!(project.0.join("tools/pi/bin/pi").is_file());
         for arguments in [&[][..], &["--trial", "not-installed"][..]] {
             let result = project.setup(workload, arguments);

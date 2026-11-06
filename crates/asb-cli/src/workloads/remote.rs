@@ -894,6 +894,7 @@ pub(crate) fn launch(
         workload_tool_mode(context.tool_mode),
     );
     let snapshot = context.native_snapshot_replay
+        || context.native_snapshot_record
         || std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
             == Some(std::ffi::OsStr::new("1"));
     command.env(

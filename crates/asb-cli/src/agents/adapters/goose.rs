@@ -1101,6 +1101,7 @@ mod tests {
     #[test]
     fn default_launch_does_not_impose_turn_or_tool_limits() {
         let config = crate::benchmark::BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "goose".into(),
             workload: "bug-fix".into(),
@@ -1132,6 +1133,7 @@ mod tests {
     #[test]
     fn requested_step_budget_is_forwarded() {
         let config = crate::benchmark::BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "goose".into(),
             workload: "bug-fix".into(),

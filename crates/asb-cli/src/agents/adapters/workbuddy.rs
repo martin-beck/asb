@@ -591,6 +591,7 @@ mod tests {
     #[test]
     fn adapter_pins_the_documented_compaction_ceiling_for_replay_stability() {
         let config = crate::benchmark::BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "workbuddy".into(),
             workload: "bug-fix".into(),

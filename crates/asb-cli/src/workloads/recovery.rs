@@ -352,6 +352,7 @@ mod tests {
             &fixture.reference.workload,
             fixture.reference.dataset.clone(),
             &super::super::PreparationContext {
+                native_snapshot_record: false,
                 tool_mode: None,
                 native_snapshot_replay: false,
                 verify_initial_material: false,
