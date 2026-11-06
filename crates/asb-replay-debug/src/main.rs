@@ -1,9 +1,10 @@
-//! Standalone, read-only terminal viewer for retained ASB replay evidence.
+//! Standalone terminal viewer and project normalizer manager.
 
 mod app;
 mod artifacts;
 mod cassette_browser;
 mod diff;
+mod normalizers;
 #[cfg(test)]
 mod test_support;
 
@@ -14,14 +15,14 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Inspect ASB replay mismatches offline; never runs agents or tools"
+    about = "Inspect ASB replay evidence and manage project normalizers offline"
 )]
 struct Args {
     /// Campaign directory, batch directory, or retained .mismatch.json file.
     #[arg(
         value_name = "PATH",
-        required_unless_present_any = ["latest", "cassette"],
-        conflicts_with_all = ["latest", "cassette"]
+        required_unless_present_any = ["latest", "cassette", "normalizers"],
+        conflicts_with_all = ["latest", "cassette", "normalizers"]
     )]
     path: Option<PathBuf>,
     /// Open the newest campaign in PROJECT/results/asb-executions.
@@ -30,6 +31,15 @@ struct Args {
     /// Browse a recorded cassette bundle or legacy JSONL source offline.
     #[arg(long, value_name = "PATH")]
     cassette: Option<PathBuf>,
+    /// Manage normalizers for an initialized project.
+    #[arg(long, value_name = "PROJECT", conflicts_with_all = ["cassette", "latest"])]
+    normalizers: Option<PathBuf>,
+    /// Project whose normalizers should be available while inspecting evidence.
+    #[arg(long, value_name = "PROJECT")]
+    project: Option<PathBuf>,
+    /// Workload for a new normalizer, when it cannot be inferred from evidence.
+    #[arg(long, value_name = "NAME")]
+    workload: Option<String>,
     /// Select a cassette track by its recorded ID.
     #[arg(long, requires = "cassette", conflicts_with = "replica", value_parser = clap::value_parser!(u64).range(1..))]
     track: Option<u64>,
@@ -51,6 +61,9 @@ struct Args {
 }
 
 fn run(args: Args) -> Result<(), String> {
+    if let Some(project) = &args.normalizers {
+        return normalizers::run(project, args.workload, None);
+    }
     if let Some(path) = &args.cassette {
         return cassette_browser::open(
             path,
@@ -58,14 +71,18 @@ fn run(args: Args) -> Result<(), String> {
             args.native,
             args.artifact.as_deref(),
             args.print,
+            args.project.as_deref(),
+            args.workload.as_deref(),
         );
     }
+    let project = args.project.or_else(|| args.latest.clone());
     let path = match args.latest {
         Some(project) => artifacts::latest_campaign(&project)?,
         None => args.path.expect("clap requires an input"),
     };
     let set = artifacts::ArtifactSet::open(&path)?;
     let mut app = app::App::new(set, args.replica, args.all)?;
+    app.configure_normalizers(project, args.workload);
     if args.print {
         app.print(&mut std::io::stdout().lock())
             .map_err(|error| error.to_string())

@@ -1157,6 +1157,196 @@ fn llm_only_record_and_replay_do_not_require_tool_capture() {
 }
 
 #[test]
+fn recording_does_not_load_or_freeze_replay_normalizer_sources() {
+    let project = sweep_tests::registered_project(1);
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='missing-until-replay'\nmodule='not-installed.mjs'\nworkloads=['bug-fix']\n");
+    fs::write(path, config).unwrap();
+    let provider = RecordingProvider::new();
+    let output = record_to_with_mode(&project, &provider, None, Some("raw.zip"), "--llm-record");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let archive = asb_cli::cassette::Archive::open(
+        &project.0.join("raw.zip"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    assert!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_none()
+    );
+}
+
+#[test]
+fn changed_policy_rejects_legacy_normalized_track_before_agent_launch() {
+    let project = sweep_tests::registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("new-recording.jsonl"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    rewrite_bundle(&project, |manifest, payloads| {
+        for track in &mut manifest.tracks {
+            let payload = payloads.get_mut(&track.id).unwrap();
+            let rows = std::str::from_utf8(payload)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut row: Value = serde_json::from_str(line).unwrap();
+                    row["asb_request_policy"] = json!(2);
+                    format!("{row}\n")
+                })
+                .collect::<String>();
+            *payload = rows.into_bytes();
+            track.bytes = payload.len() as u64;
+            track.sha256 = asb_cli::cassette::digest(payload);
+        }
+    });
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }",
+    )
+    .unwrap();
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(
+        "\n[[replay.normalizers]]\nid='later'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n",
+    );
+    fs::write(path, config).unwrap();
+    let attempts_before = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    let replayed = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &[],
+        true,
+        "--llm-replay",
+    );
+    assert!(!replayed.status.success());
+    assert!(
+        String::from_utf8_lossy(&replayed.stderr).contains("does not contain raw requests"),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts_before
+    );
+}
+
+#[test]
+fn normalizer_added_after_raw_recording_enables_offline_replay() {
+    let project = sweep_tests::registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let agent = fs::read_to_string(&executable).unwrap().replace(
+        "'messages':[]}",
+        "'messages':[{'role':'tool','content':f'seed={replica}'}]}",
+    );
+    fixture_writer::write_file(&project.0, &executable, agent).unwrap();
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(&project, &provider, None, Some("raw.zip"), "--llm-record");
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    fs::write(project.0.join("normalizer.mjs"), "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>'); }").unwrap();
+    let path = project.0.join(".asb/project.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str("\n[[replay.normalizers]]\nid='added-after-recording'\nmodule='normalizer.mjs'\nworkloads=['bug-fix']\n");
+    fs::write(path, config).unwrap();
+    let mut archive = asb_cli::cassette::Archive::open(
+        &project.0.join("raw.zip"),
+        asb_cli::cassette::Limits::default(),
+    )
+    .unwrap();
+    let track_id = archive.manifest().tracks[0].id;
+    let raw_track = archive.read_track(track_id).unwrap();
+    fs::write(project.0.join("raw-track.jsonl"), &raw_track).unwrap();
+    let legacy_replay =
+        replay_using_mode(&project, Some("raw-track.jsonl"), &[], true, "--llm-replay");
+    assert!(
+        legacy_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&legacy_replay.stderr)
+    );
+    let old_track = std::str::from_utf8(&raw_track)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            row["asb_request_policy"] = json!(2);
+            format!("{row}\n")
+        })
+        .collect::<String>();
+    fs::write(project.0.join("old-track.jsonl"), old_track).unwrap();
+    let old_replay =
+        replay_using_mode(&project, Some("old-track.jsonl"), &[], true, "--llm-replay");
+    assert!(!old_replay.status.success());
+    assert!(String::from_utf8_lossy(&old_replay.stderr).contains("does not contain raw requests"));
+    let benchmark = project.0.join("benchmark.toml");
+    fs::write(
+        &benchmark,
+        fs::read_to_string(&benchmark)
+            .unwrap()
+            .replace("concurrency=1", "concurrency=4"),
+    )
+    .unwrap();
+    fs::write(project.0.join("expected-concurrency"), "4").unwrap();
+    let replayed = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(
+        records(&replayed.stdout)
+            .iter()
+            .filter(|row| row["execution"]["replica"].is_u64())
+            .count(),
+        4
+    );
+    let path = project.0.join(".asb/project.toml");
+    let enabled = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        enabled.replace(
+            "id='added-after-recording'",
+            "id='added-after-recording'\nenabled=false",
+        ),
+    )
+    .unwrap();
+    let disabled = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        !disabled.status.success(),
+        "different seed values must not match when the profile is disabled"
+    );
+    fs::write(&path, enabled).unwrap();
+    let reenabled = replay_using_mode(&project, Some("raw.zip"), &[], true, "--llm-replay");
+    assert!(
+        reenabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reenabled.stderr)
+    );
+}
+
+#[test]
 fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
     let project = sweep_tests::registered_project(1);
     let executable = project.0.join("tools/pi/bin/pi");
@@ -1191,16 +1381,14 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
         asb_cli::cassette::Limits::default(),
     )
     .unwrap();
-    let policy_digest = archive
-        .manifest()
-        .compatibility
-        .normalization_sha256
-        .clone()
-        .expect("policy identity recorded");
-    let artifact: Value =
-        serde_json::from_slice(&archive.read_artifact(1, "normalization-policy").unwrap()).unwrap();
-    assert_eq!(artifact["policy"]["sha256"], policy_digest);
-    assert_eq!(artifact["profiles"][0]["source"], module);
+    assert!(
+        archive
+            .manifest()
+            .compatibility
+            .normalization_sha256
+            .is_none()
+    );
+    assert!(archive.read_artifact(1, "normalization-policy").is_err());
     drop(provider);
     let benchmark = project.0.join("benchmark.toml");
     fs::write(
@@ -1225,6 +1413,10 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
     assert_eq!(summaries.len(), 4, "every replica must complete");
     let plan_path = campaign_plan(&replayed);
     let plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    let policy_digest = plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(plan["normalization_policy"]["sha256"], policy_digest);
     let completion_dir = plan_path.parent().unwrap().join("batch-1/.asb-completions");
     let completions = fs::read_dir(completion_dir)
@@ -1245,7 +1437,7 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
             .expect("normalizer observations must be bound into completion evidence");
         let evidence: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(evidence["policy_sha256"], policy_digest);
-        // Replay canonicalizes both the raw recorded request and the live request.
+        // Replay normalizes both the recorded and current request once.
         assert_eq!(evidence["profiles"][0]["changed"], 2);
         evidence_paths.push(PathBuf::from(path));
     }
@@ -1299,18 +1491,13 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
     .unwrap();
     let changed = replay_using_mode(&project, Some("policy.zip"), &[], true, "--llm-replay");
     assert!(
-        !changed.status.success(),
-        "changed source cannot replay an existing policy"
-    );
-    assert!(
-        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy differs"),
-        "{}",
+        changed.status.success(),
+        "raw cassette should allow a new replay policy: {}",
         String::from_utf8_lossy(&changed.stderr)
     );
-    assert_eq!(
+    assert_ne!(
         fs::read(project.0.join("attempts.jsonl")).unwrap(),
-        attempts_before,
-        "rejected policy must not launch an agent"
+        attempts_before
     );
 }
 

@@ -684,6 +684,20 @@ impl<'a> ReadyAttempt<'a> {
                         .initial_material_sha256()
                         .map_err(Error::Run)?;
                     let dataset_sha256 = batch::dataset_fingerprint(task.dataset.as_ref())?;
+                    let normalization = if options.mode == Some(tape::Mode::Replay) {
+                        options
+                            .preparation_gate
+                            .map(|gate| gate.expected_normalization())
+                            .transpose()?
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let normalization = normalization.unwrap_or_else(|| {
+                        options
+                            .custom_normalization
+                            .map(|custom| custom.policy.sha256.clone())
+                    });
                     Ok(crate::cassette::Compatibility {
                         agent: config.agent.clone(),
                         provider: config.provider.clone(),
@@ -695,13 +709,11 @@ impl<'a> ReadyAttempt<'a> {
                             workload_session.invocation().input.instructions.as_bytes(),
                         ),
                         material_sha256,
-                        protocol_sha256: Some(batch::replay_protocol_with_normalizers(
+                        protocol_sha256: Some(batch::replay_protocol_with_normalizer_digest(
                             &batch::replay_protocol_fingerprint(module.as_ref(), &metric_policy)?,
-                            options.custom_normalization.map(|custom| &custom.policy),
+                            normalization.as_deref(),
                         )?),
-                        normalization_sha256: options
-                            .custom_normalization
-                            .map(|custom| custom.policy.sha256.clone()),
+                        normalization_sha256: normalization,
                     })
                 })();
                 let identity = identity?;

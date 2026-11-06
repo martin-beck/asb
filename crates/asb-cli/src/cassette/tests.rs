@@ -5,6 +5,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
+#[test]
+fn changing_a_replay_policy_requires_only_raw_request_rows() {
+    let raw = b"{\"asb_request_policy\":3,\"request\":{\"body\":\"original\"}}\n{\"asb_request_policy\":3,\"request\":{}}\n";
+    require_raw_requests(std::io::BufReader::new(raw.as_slice())).unwrap();
+    for bytes in [
+        b"".as_slice(),
+        b"{}\n",
+        b"{\"asb_request_policy\":2,\"request\":{}}\n",
+        b"{\"asb_request_policy\":3,\"request\":{}}\n{}\n",
+        b"invalid\n",
+    ] {
+        assert!(require_raw_requests(std::io::BufReader::new(bytes)).is_err());
+    }
+}
+
 #[path = "proof_tests.rs"]
 mod proof;
 #[path = "provenance_tests.rs"]

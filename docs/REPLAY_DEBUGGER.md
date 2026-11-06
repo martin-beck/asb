@@ -1,8 +1,9 @@
 # Replay debugger tutorial
 
 `asb-replay-debug` is a separate Rust binary using Ratatui and Crossterm. It
-opens retained replay mismatch evidence offline. It reads files only: no agent,
-provider, tool command, container, or replay starts, and no artifact is rewritten.
+opens retained replay mismatch evidence offline. It does not start an agent,
+provider, container, or replay. Normalizer management changes project files only
+when requested; cassette and mismatch evidence remain unchanged.
 An initialized ASB project is not required to inspect an individual file.
 
 ## 1. Build the viewer
@@ -84,6 +85,7 @@ equality cannot be established. For example, the existing capture redacts
 | `c` | Expand/fold unchanged text context |
 | `/` | Filter field paths; Enter accepts, Escape clears |
 | `r` | Reload the same input from disk |
+| `m` | Manage project replay normalizers; create a suggestion from the selected difference |
 | `?` or F1 | Show help; any key closes it |
 | `q`, Escape, or Ctrl-C | Quit and restore the terminal |
 
@@ -152,6 +154,26 @@ Cassette contents may contain prompts, tool output and other sensitive data.
 The browser shows the recorded contents as stored; protect terminal history
 and redirected output accordingly. It reads only the selected track and does
 not execute agents, providers, tools or replay.
+
+## Manage normalizers
+
+Press `m` while viewing a mismatch or cassette. ASB finds the containing
+project, or use `--project /path/to/project` to select it. The manager lists
+profiles and their enabled state. Use Space to toggle, `e` to edit the module
+with `$VISUAL` or `$EDITOR`, `E` to edit project settings, `a` to add a blank
+starter, and `n` to draft one from the selected difference or tool result.
+New modules are disabled until reviewed and enabled. Suggestions match the
+observed complete text exactly; refine them for other cases as needed.
+The workload is inferred from a campaign plan or bundled cassette when
+available; `w` sets it otherwise. You can also open the manager directly:
+
+```sh
+asb-replay-debug --normalizers /path/to/project
+```
+
+Edits affect future replays. New raw-request recordings permit choosing a
+different policy afterward; older normalized recordings retain their original
+policy requirement. Editing a module never executes it.
 
 ## What this version can establish
 
