@@ -6,6 +6,12 @@ export function normalizeToolResult({ text, tool }) {
       || !(command.includes('sympy.test(') || /(?:^|[\s;&|])(?:python(?:\d+(?:\.\d+)*)?\s+)?(?:\.\/|\/testbed\/)?bin\/test(?:\s|$)/.test(command))) return text;
   const starts = [...text.matchAll(/^=+ test process starts =+\r?$/gm)];
   const finishes = [...text.matchAll(/^=*[ \t]*tests finished: .+?(?:=+|seconds)[ \t]*\r?$/gm)];
+  const wrappedElapsed = /^(=*[ \t]*tests finished: (?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?|exceptions?)(?:, )?)+\r?\n[ \t]*in )\d+(?:\.\d+)?( seconds[ \t]*=*[ \t]*\r?)$/gm;
+  const wrapped = [...text.matchAll(wrappedElapsed)];
+  if (finishes.length === 0 && wrapped.length === 1 && starts.length <= 1 &&
+      [...text.matchAll(/^=*[ \t]*tests finished:/gm)].length === 1) {
+    return text.replace(wrappedElapsed, '$1<asb-elapsed>$2');
+  }
   const elapsed = /^=*[ \t]*tests finished: ((?:\d+ (?:passed|failed|skipped|expected to fail|unexpectedly passed|errors?|exceptions?)(?:, )?)+)in \d+(?:\.\d+)? seconds[ \t]*=*[ \t]*\r?$/;
   const seeds = [...text.matchAll(/^(random seed:[ \t]*)(?:\d+|<asb-seed>)(?=\r?$)/gm)];
   const seedLines = [...text.matchAll(/^random seed:/gm)];
