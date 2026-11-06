@@ -261,7 +261,9 @@ class ManagedDockerWorkspace:
             raise ExecutionError("execution arguments and environment exceed 1 MiB")
         if not 0 < timeout <= 86400 or not 1 <= output_limit <= 16 * 1024**2:
             raise ExecutionError("invalid execution timeout or output limit")
-        preparation_timeout = min(timeout, 60) if preparation_timeout is None else preparation_timeout
+        # Starting an owned Docker exec can be slow on emulated guests. Its
+        # setup budget is independent of the command's execution timeout.
+        preparation_timeout = 600 if preparation_timeout is None else preparation_timeout
         if type(preparation_timeout) not in [int,float] or not math.isfinite(preparation_timeout) or not 0 < preparation_timeout <= 7200:
             raise ExecutionError("invalid execution preparation timeout")
         if cancelled is not None and cancelled.is_set():
