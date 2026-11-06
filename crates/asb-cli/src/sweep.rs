@@ -18,6 +18,7 @@ pub(crate) mod plan;
 mod presentation;
 pub(crate) mod recovered;
 mod resume;
+mod sampled;
 pub(crate) mod scheduler;
 mod spool;
 
@@ -206,7 +207,10 @@ pub(crate) fn run_with_options(
             "--prepare-replay requires a sweep created with --trial-count".into(),
         ));
     }
-    if !sweep.sampled_trials.is_empty() {
+    if options.prepare_replay {
+        return sampled::prepare(sweep_path, &sweep, options, output);
+    }
+    if !sweep.sampled_trials.is_empty() && options.mode == Some(crate::tape::Mode::Replay) {
         return Err(Error::Input(
             "sampled trial preparation is not yet available; no benchmark was started".into(),
         ));

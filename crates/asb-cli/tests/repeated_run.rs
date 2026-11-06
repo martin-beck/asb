@@ -541,6 +541,83 @@ fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
     sampled_candidate_fixture(true, true);
 }
 
+#[test]
+fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
+    let project = Project::new();
+    project.config(1);
+    let agent = project.0.join("fixture-agent");
+    let script = fs::read_to_string(&agent).unwrap().replace(
+        "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+        "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
+    );
+    fs::write(agent, script).unwrap();
+    fs::write(
+        project.0.join("workloads/sample.workload.toml"),
+        "workload='bug-fix'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+    )
+    .unwrap();
+    let order = asb_cli::cassette::TrialOrder::new(&["one".into(), "two".into()], 1, 7).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("provider='fixture'", "provider='openrouter'");
+    fs::write(
+        &config,
+        format!(
+            "{text}\ntrial='{}'\ntrial_set='sample.workload.toml'\n",
+            order.initial()[0]
+        ),
+    )
+    .unwrap();
+    let candidates = order
+        .candidates()
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(project.0.join("sample-sweep.toml"), format!("configs=['benchmark.toml']\n[[sampled_trials]]\nworkload='bug-fix'\ncount=1\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
+    let provider = RecordingProvider::new();
+    let run = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+        command.current_dir(&project.0).isolated_env();
+        retain_host_rust_toolchain(&mut command);
+        command
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("ASB_PROVIDER_BASE_URL", &provider.endpoint)
+            .env("OPENROUTER_API_KEY", "fixture-only-key")
+            .env("OPENROUTER_BASE_URL", format!("{}/v1", provider.endpoint))
+            .env(
+                "OPENROUTER_MODELS_URL",
+                format!("{}/models", provider.endpoint),
+            )
+            .args(["sweep", "sample-sweep.toml", "--prepare-replay"])
+            .output()
+            .unwrap()
+    };
+    for expected_calls in [2, 2] {
+        let result = run();
+        assert!(
+            !result.status.success(),
+            "publication remains intentionally unavailable"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("Prepared 1 replayable trials"),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("publication of the replay selection is not yet available")
+        );
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            expected_calls
+        );
+    }
+}
+
 fn sampled_candidate_fixture(mismatch: bool, retry: bool) {
     let project = Project::new();
     project.config(1);
