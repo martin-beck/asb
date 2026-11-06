@@ -110,6 +110,10 @@ fetch(url + '/responses', {method:'POST', headers:{'content-type':'application/j
             serde_json::from_str(std::fs::read_to_string(log).unwrap().trim()).unwrap();
         assert_eq!(value["status"], "completed");
         assert_eq!(value["provider_replay_consumed"], true);
+        let observation = asb_cli::cassette::ReplayObservation::from_summary(&value).unwrap();
+        assert_eq!(observation.replica, index);
+        assert_eq!(observation.provider_consumed, Some(true));
+        assert_eq!(observation.cleanup_confirmed, Some(true));
         let receipt: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.join(format!(
                 "sweep-results/.checkpoint/replicas/000000/{index:03}.json"

@@ -29,7 +29,7 @@ pub(crate) use source::SourceInspection;
 pub(crate) use source::take_observation_count;
 pub use source::{LegacyTrack, Source};
 use std::fmt;
-pub use trial_order::{TrialOrder, TrialPreparation};
+pub use trial_order::{ReplayObservation, TrialOrder, TrialPreparation};
 
 /// Current manifest format. Unknown versions are refused, not guessed.
 pub const SCHEMA_VERSION: u32 = 2;
