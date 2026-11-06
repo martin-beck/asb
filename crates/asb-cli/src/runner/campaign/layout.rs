@@ -108,7 +108,8 @@ impl Plan {
                 || self.ignore_agent
                 || self.ignore_collector
                 || self.ignore_provider_mismatch
-                || self.ignore_provider_unconsumed)
+                || self.ignore_provider_unconsumed
+                || self.ignore_tool_mismatch)
                 && self.mode != ExecutionMode::Replay)
             || self.source.as_os_str().is_empty()
         {

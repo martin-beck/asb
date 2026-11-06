@@ -56,6 +56,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_estimated_disk_mib(1024)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_native_tool_transport()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
@@ -669,6 +670,7 @@ mod tests {
         )
         .unwrap();
         let artifacts = super::collect(&super::super::CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: std::path::Path::new("."),

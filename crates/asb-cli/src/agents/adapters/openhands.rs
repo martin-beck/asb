@@ -575,6 +575,7 @@ if (JSON.stringify(norm('/v1/chat/completions',one,'one')) === JSON.stringify(no
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(super::super::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Record,
                     cassette: &tape,
                 }),
@@ -593,6 +594,7 @@ if (JSON.stringify(norm('/v1/chat/completions',one,'one')) === JSON.stringify(no
         let frozen = owner.freeze();
         assert!(!frozen.error);
         let artifacts = collect(&CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: &run,
@@ -737,6 +739,7 @@ except RuntimeError as error:
         let doc = r#"{"stats":{"usage_to_metrics":{"agent":{"response_latencies":[{}],"token_usages":[{"prompt_tokens":10,"completion_tokens":3,"cache_read_tokens":0}]}}}}"#;
         std::fs::write(conversations.join("first/base_state.json"), doc).unwrap();
         let context = CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &Default::default(),
             provider_capture: None,
             run_dir: &root,

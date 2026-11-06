@@ -123,7 +123,11 @@ fn fixture_prelude_rejects_invalid_oversized_and_missing_events() {
     }
 }
 
-fn sweep(project: &Project, provider: Option<&RecordingProvider>, arguments: &[&str]) -> Output {
+pub(super) fn sweep(
+    project: &Project,
+    provider: Option<&RecordingProvider>,
+    arguments: &[&str],
+) -> Output {
     sweep_command(project, provider, arguments)
         .output()
         .unwrap()

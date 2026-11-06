@@ -958,6 +958,7 @@ impl<'a> ReadyAttempt<'a> {
                     tape_cassette: tape_cassette
                         .as_ref()
                         .map(|(_, cassette)| cassette.as_path()),
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
                     tool_replay: tool_tape_cassette
                         .as_ref()
                         .is_some_and(|(mode, _)| *mode == tape::Mode::Replay),
@@ -1033,6 +1034,7 @@ impl<'a> ReadyAttempt<'a> {
                         tape_url,
                         tape_mode,
                         max_steps: effective_max_steps,
+                        ignore_tool_mismatch: options.ignore_tool_mismatch,
                         tool_tape_mode: tool_tape_cassette.as_ref().map(|(mode, _)| *mode),
                         tool_tape_cassette: tool_tape_cassette
                             .as_ref()
@@ -1138,6 +1140,7 @@ struct ResultFacts {
     agent_failure: Option<String>,
     provider_cleanup_error: Option<String>,
     artifact_evidence: Vec<String>,
+    ignored_tool_mismatches: Vec<agents::tool_replay::IgnoredToolMismatch>,
 }
 
 fn sealed_step_count(guest: Option<u64>, adapter: Option<u64>) -> Option<u64> {
@@ -1223,9 +1226,37 @@ impl<'a> CompletedAttempt<'a> {
             .ok()
             .and_then(Option::as_ref)
             .unwrap_or(&frozen);
+        let mut ignored_tool_mismatches = Vec::new();
+        if context.options.ignore_tool_mismatch {
+            match collection_frozen.bytes(agents::tool_replay_mcp::IGNORED_EVENTS_FILENAME) {
+                Some(bytes) => {
+                    for line in bytes
+                        .split(|byte| *byte == b'\n')
+                        .filter(|line| !line.is_empty())
+                    {
+                        match serde_json::from_slice(line) {
+                            Ok(agents::tool_replay::IgnoredToolMismatch::Fatal) => settled
+                                .issues
+                                .run_error(
+                                "local-tool replay could not safely supply its recorded response"
+                                    .into(),
+                            ),
+                            Ok(event) => ignored_tool_mismatches.push(event),
+                            Err(_) => settled.issues.run_error(
+                                "local-tool replay divergence journal is malformed".into(),
+                            ),
+                        }
+                    }
+                }
+                None => settled
+                    .issues
+                    .run_error("local-tool replay divergence journal is missing".into()),
+            }
+        }
         let mut adapter_artifacts = agents::find(&config.agent)
             .map(|adapter| {
                 adapter.collect(&agents::CollectionContext {
+                    ignore_tool_mismatch: context.options.ignore_tool_mismatch,
                     frozen: collection_frozen,
                     provider_capture,
                     run_dir: &settled.evidence.run_dir,
@@ -1242,6 +1273,25 @@ impl<'a> CompletedAttempt<'a> {
                 })
             })
             .unwrap_or_default();
+        if context.options.ignore_tool_mismatch {
+            let progress = collection_frozen
+                .document("pi-progress.json")
+                .or_else(|| collection_frozen.document("persistent-progress.json"))
+                .or_else(|| {
+                    collection_frozen.document(agents::tool_replay_mcp::IGNORED_PROGRESS_FILENAME)
+                });
+            match agents::tool_replay_mcp::ignored_persistent_completion(progress, None) {
+                Ok(Some(event)) if !adapter_artifacts.ignored_tool_mismatches.contains(&event) => {
+                    ignored_tool_mismatches.push(event)
+                }
+                Ok(None) if progress.is_none() => settled
+                    .issues
+                    .run_error("local-tool replay progress receipt is missing".into()),
+                Ok(_) => {}
+                Err(error) => settled.issues.run_error(error.to_string()),
+            }
+        }
+        ignored_tool_mismatches.append(&mut adapter_artifacts.ignored_tool_mismatches);
         if let Some(guest) = settled.evidence.guest.as_ref() {
             adapter_artifacts
                 .sealed_artifacts
@@ -1351,6 +1401,7 @@ impl<'a> CompletedAttempt<'a> {
                 agent_failure,
                 provider_cleanup_error,
                 artifact_evidence,
+                ignored_tool_mismatches,
             },
         })
     }
@@ -1393,6 +1444,7 @@ impl ResultFacts {
             agent_failure,
             provider_cleanup_error,
             artifact_evidence,
+            ignored_tool_mismatches,
         } = self;
         let WorkloadMetadata {
             workspace,
@@ -1430,6 +1482,7 @@ impl ResultFacts {
             issues,
             resource_disposition: workload_resource_disposition,
         } = finalized;
+        let cassette_usage_verified = cassette_usage_verified && ignored_tool_mismatches.is_empty();
         let workload_artifacts = workload_session.checkpoint_evidence();
         let workload_success = outcome.success();
         let grading_failure = RunFailure::evaluation(&outcome.evaluation);
@@ -1471,7 +1524,14 @@ impl ResultFacts {
                 divergence.reason.clone(),
             ));
         }
-        let approximate_replay = !proxy_evidence.replay_divergences.is_empty();
+        for event in &ignored_tool_mismatches {
+            disposition.ignored_failures.push(RunFailure::ignored(
+                FailureKind::ToolMismatch,
+                serde_json::to_string(event).expect("bounded replay divergence serializes"),
+            ));
+        }
+        let approximate_replay =
+            !proxy_evidence.replay_divergences.is_empty() || !ignored_tool_mismatches.is_empty();
         let success = disposition.success;
         let workload_failure =
             grading_failure

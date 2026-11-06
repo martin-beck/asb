@@ -260,6 +260,12 @@ pub(crate) fn run_with_interactive(
                     "provider replay ignore options require --replay or --llm-replay",
                 );
             }
+            if options.ignore_tool_mismatch && tape.tool != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-tool-mismatch requires local-tool replay (--replay or --tool-replay)",
+                );
+            }
             if (options.track.is_some() || options.seed.is_some())
                 && tape.llm != Some(tape::Mode::Replay)
             {
@@ -313,6 +319,7 @@ pub(crate) fn run_with_interactive(
                     ignore_collector: options.ignore_collector,
                     ignore_provider_mismatch: options.ignore_provider_mismatch,
                     ignore_provider_unconsumed: options.ignore_provider_unconsumed,
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -339,6 +346,12 @@ pub(crate) fn run_with_interactive(
                 return fail(
                     stderr,
                     "provider replay ignore options require --replay or --llm-replay",
+                );
+            }
+            if options.ignore_tool_mismatch && tape.tool != Some(tape::Mode::Replay) {
+                return fail(
+                    stderr,
+                    "--ignore-tool-mismatch requires local-tool replay (--replay or --tool-replay)",
                 );
             }
             if (options.track.is_some() || options.seed.is_some())
@@ -401,6 +414,7 @@ pub(crate) fn run_with_interactive(
                     ignore_collector: options.ignore_collector,
                     ignore_provider_mismatch: options.ignore_provider_mismatch,
                     ignore_provider_unconsumed: options.ignore_provider_unconsumed,
+                    ignore_tool_mismatch: options.ignore_tool_mismatch,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -1285,6 +1299,9 @@ struct RunArgs {
     /// Continue after a replay leaves recorded provider requests unconsumed.
     #[arg(long, requires = "replay-direction")]
     ignore_provider_unconsumed: bool,
+    /// Continue on a matching-tool request divergence using recorded evidence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_tool_mismatch: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1364,6 +1381,9 @@ struct SweepArgs {
     /// Continue after a replay leaves recorded provider requests unconsumed.
     #[arg(long, requires = "replay-direction")]
     ignore_provider_unconsumed: bool,
+    /// Continue on a matching-tool request divergence using recorded evidence; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_tool_mismatch: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.

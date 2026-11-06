@@ -380,6 +380,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
     )
     .unwrap();
     let mut execution = ExecutionContext {
+        ignore_tool_mismatch: false,
         launch: None,
         config: &config,
         connection: Some(&connection),

@@ -243,6 +243,7 @@ pub(crate) struct RunOptions<'a> {
     pub ignore_collector: bool,
     pub ignore_provider_mismatch: bool,
     pub ignore_provider_unconsumed: bool,
+    pub ignore_tool_mismatch: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,
@@ -314,6 +315,16 @@ fn validate_explicit_tool_transport(
     options: RunOptions<'_>,
 ) -> Result<(), Error> {
     validate_native_snapshot_record(config, options.mode, options.effective_tool_mode())?;
+    if options.ignore_tool_mismatch
+        && (options.effective_tool_mode() != Some(tape::Mode::Replay)
+            || options.native_snapshot_replay()
+            || !agents::find(&config.agent)
+                .is_some_and(|adapter| adapter.supports_approximate_local_tool_replay()))
+    {
+        return Err(Error::Input(
+            "--ignore-tool-mismatch requires the agent's semantic local-tool replay; native snapshot replay and unsupported agents cannot use it".into(),
+        ));
+    }
     if options.tool_mode_explicit
         && options.effective_tool_mode().is_some()
         && let Some(adapter) = agents::find(&config.agent)

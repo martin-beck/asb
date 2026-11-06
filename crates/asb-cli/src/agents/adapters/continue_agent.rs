@@ -38,6 +38,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_native_tool_transport()
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_replay_credential_vars(&["CONTINUE_API_KEY"])
 .with_state_environment_vars(&["CONTINUE_CONFIG", "CONTINUE_GLOBAL_DIR"])
 .with_artifact_specs(&[
@@ -767,6 +768,7 @@ if(!reads.has(f.realpathSync(process.env.FIXTURE_INPUT)))throw Error('Read state
         let frozen = owner.freeze();
         assert!(!frozen.error);
         let artifacts = super::collect(&crate::agents::CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: &run,
@@ -1068,6 +1070,7 @@ if (norm('tool', first.replace('@{0}', '@{1}')) === norm('tool', second)) throw 
                 mcp_servers: &[],
                 mcp_tape: None,
                 tape: Some(super::super::TapeContext {
+                    ignore_tool_mismatch: false,
                     mode: crate::tape::Mode::Record,
                     cassette: &root.join("recording.asb.zip"),
                 }),
@@ -1128,6 +1131,7 @@ if (norm('tool', first.replace('@{0}', '@{1}')) === norm('tool', second)) throw 
         let snapshot = serde_json::json!({"filename":format!("{id}.json"),"document":{"sessionId":id,"history":[{"message":{"role":"assistant","usage":{"prompt_tokens":10,"completion_tokens":3}}}]}});
         let frozen = super::super::super::FrozenArtifacts::for_test("session.json", snapshot);
         let context = CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &frozen,
             provider_capture: None,
             run_dir: std::path::Path::new("."),
@@ -1142,6 +1146,7 @@ if (norm('tool', first.replace('@{0}', '@{1}')) === norm('tool', second)) throw 
         );
         let missing = super::super::super::FrozenArtifacts::default();
         let context = CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &missing,
             ..context
         };
@@ -1151,6 +1156,7 @@ if (norm('tool', first.replace('@{0}', '@{1}')) === norm('tool', second)) throw 
             serde_json::json!({"filename":"other.json","document":{"sessionId":id,"history":[]}}),
         );
         let context = CollectionContext {
+            ignore_tool_mismatch: false,
             frozen: &bad,
             ..context
         };
