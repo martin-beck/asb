@@ -339,11 +339,12 @@ impl ExecutedAttempt {
                 captures: Vec::new(),
                 output_files: Vec::new(),
                 cleanup_confirmed: true,
+                replay_divergences: Vec::new(),
             },
         };
         // A partially served replay does not establish usage of its whole tape.
-        let cassette_usage_verified =
-            !matches!(cassette, Some((tape::Mode::Replay, _))) || proxy_validated;
+        let cassette_usage_verified = !matches!(cassette, Some((tape::Mode::Replay, _)))
+            || (proxy_validated && proxy_evidence.replay_divergences.is_empty());
         if let Some((tape::Mode::Record, cassette)) = cassette {
             match std::fs::metadata(cassette) {
                 Ok(metadata) if metadata.len() > 0 => {}
@@ -671,6 +672,7 @@ pub(super) fn finish_measurements(
         }
     }
     let measured = measurements::RunMeasurement {
+        approximate_replay: result.approximate_replay,
         ignored_failures: &result.disposition.ignored_failures,
         replay_selection: result.replay_selection,
         native_replay_consumed: result.native_replay_consumed,

@@ -252,6 +252,14 @@ pub(crate) fn run_with_interactive(
                 Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
+            if (options.ignore_provider_mismatch || options.ignore_provider_unconsumed)
+                && tape.llm != Some(tape::Mode::Replay)
+            {
+                return fail(
+                    stderr,
+                    "provider replay ignore options require --replay or --llm-replay",
+                );
+            }
             if (options.track.is_some() || options.seed.is_some())
                 && tape.llm != Some(tape::Mode::Replay)
             {
@@ -303,6 +311,8 @@ pub(crate) fn run_with_interactive(
                     ignore_evaluation: options.ignore_evaluation,
                     ignore_agent: options.ignore_agent,
                     ignore_collector: options.ignore_collector,
+                    ignore_provider_mismatch: options.ignore_provider_mismatch,
+                    ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -323,6 +333,14 @@ pub(crate) fn run_with_interactive(
                 Ok(selection) => selection,
                 Err(error) => return fail(stderr, &error.to_string()),
             };
+            if (options.ignore_provider_mismatch || options.ignore_provider_unconsumed)
+                && tape.llm != Some(tape::Mode::Replay)
+            {
+                return fail(
+                    stderr,
+                    "provider replay ignore options require --replay or --llm-replay",
+                );
+            }
             if (options.track.is_some() || options.seed.is_some())
                 && tape.llm != Some(tape::Mode::Replay)
             {
@@ -381,6 +399,8 @@ pub(crate) fn run_with_interactive(
                     ignore_evaluation: options.ignore_evaluation,
                     ignore_agent: options.ignore_agent,
                     ignore_collector: options.ignore_collector,
+                    ignore_provider_mismatch: options.ignore_provider_mismatch,
+                    ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -1259,6 +1279,12 @@ struct RunArgs {
     /// Ignore collector failures during replay when evidence publication and cleanup succeed.
     #[arg(long, requires = "replay-direction")]
     ignore_collector: bool,
+    /// Continue on a provider request mismatch using the next recorded response; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_mismatch: bool,
+    /// Continue after a replay leaves recorded provider requests unconsumed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_unconsumed: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1332,6 +1358,12 @@ struct SweepArgs {
     /// Ignore collector failures during replay when evidence publication and cleanup succeed.
     #[arg(long, requires = "replay-direction")]
     ignore_collector: bool,
+    /// Continue on a provider request mismatch using the next recorded response; replay is approximate.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_mismatch: bool,
+    /// Continue after a replay leaves recorded provider requests unconsumed.
+    #[arg(long, requires = "replay-direction")]
+    ignore_provider_unconsumed: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.

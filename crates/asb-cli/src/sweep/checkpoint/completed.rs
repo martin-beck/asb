@@ -833,9 +833,11 @@ pub(in crate::sweep) fn measurement_matches(measured: &Value, summary: &Value) -
             // campaign readers additionally require the planned typed identity.
             measured[*field] == summary[*field]
         }
-    }) && ["planning", "effective_budgets"]
-        .iter()
-        .all(|field| crate::planning::recorded_object(measured, Some(summary), field).is_ok())
+    }) && measured["approximate_replay"].as_bool().unwrap_or(false)
+        == summary["approximate_replay"].as_bool().unwrap_or(false)
+        && ["planning", "effective_budgets"]
+            .iter()
+            .all(|field| crate::planning::recorded_object(measured, Some(summary), field).is_ok())
 }
 
 fn invalid(reason: &str) -> Error {
