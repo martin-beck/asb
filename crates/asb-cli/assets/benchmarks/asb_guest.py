@@ -660,6 +660,8 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
         guest = dict(guest,inherit_working_directory=transport.inherit_working_directory)
     container = task.workspace.container
     network = request.get("network")
+    if network and getattr(task, 'tool_mode', None) == 'replay':
+        raise ExecutionError('replay cannot attach an external task network')
     if network:
         # Change only the task's owned container, never host network policy.
         container.reload()
