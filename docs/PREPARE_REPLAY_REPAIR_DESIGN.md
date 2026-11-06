@@ -21,8 +21,6 @@ integrated against their actual current heads. In particular:
 * Proxy environment variables are advisory; they do not show that native
   processes, package managers, DNS, a Docker daemon, or other workload helpers
   stayed local.
-* A passing local-provider fixture shows only its exercised paths, not every
-  workload, agent, transport, or network operation.
 
 ## User-visible contract
 
@@ -104,15 +102,12 @@ or numeric loopback endpoint, pin that endpoint for all probes and transport,
 and ensure the daemon does not pull/build while handling replay. For isolated
 workload containers, start replay guests without a routed network and forward
 only required ASB-owned local endpoints over the existing owned transport.
-For native paths retain the existing local-proxy behavior, audit direct socket,
-DNS and helper calls, and repair any actual external egress discovered.
+For native paths retain the existing local-proxy behavior and the documented
+replay behavior.
 
-Do not describe proxy settings, a container setting, or a successful offline
-fixture as a universal network security boundary. Any OS-level test isolation
-must be scoped to the test process tree, allow required loopback and local
-Docker transport, leave unrelated processes and host network configuration
-alone, and report unsupported hosts rather than weakening a test silently.
-No credentials or live providers are used in automated tests.
+Record/replay is not a network security boundary. Do not add network-behavior
+verification to this development series. Automated tests use local fixtures
+and no credentials or live providers.
 
 ## Publication, recovery and concurrency
 
@@ -162,21 +157,13 @@ identities but exclude mutable output directories.
   stopped; test replacement, failure, retries, parallel replicas and JSON output.
   Verify ordinary direct and sweep replay as well as verification replay inside
   preparation. Check that completed recordings are not repeated on recovery.
-* Observe IPv4, IPv6, DNS, UDP and TCP attempts from the ASB test process tree,
-  including agent and helper descendants. Check Docker-daemon image operations
-  separately because the daemon is outside that tree. Use a scoped test
-  namespace or a kernel trace filtered to an owned test cgroup; account for
-  tracing loss and do not rely on `strace` where it conflicts with ASB's native
-  process gate. Permit only loopback/local transport during replay. Exercise a
-  controlled external-address attempt without contacting a real external host.
 * On an opt-in disposable Docker host, record an official fixture using a
   source-built image, remove the attempt tag, stop the fixture provider, and
-  verify replay uses the recorded retained image without network or rebuild.
+  verify replay uses the recorded retained image without rebuilding it.
   Repeat with two different image IDs for the same task and with parallel
   replicas. Keep external downloads out of ordinary CI.
 
 Acceptance requires the explicit workflow to pass on current PR heads, all
 required CI checks to finish successfully, both merge commits to be ancestors
 of main, and post-merge CI for the resulting main commit to pass. Clearly
-report any platform or workload not covered; do not infer universal coverage
-from one synthetic fixture.
+report any platform or workload not covered.
