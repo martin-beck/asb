@@ -301,6 +301,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             .transpose()?;
         let normalization_evidence = custom_policy
             .as_ref()
+            .filter(|_| request.mode == Mode::Replay)
             .map(|_| scratch.normalization_destination())
             .transpose()?;
         let port = if builtin { 0 } else { free_port()? };
@@ -3676,14 +3677,8 @@ mod tests {
         );
         let normalized: serde_json::Value =
             serde_json::from_str(row["request"]["body"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            normalized["input"][0]["call_id"],
-            "<asb-codex-input-call-id>"
-        );
-        assert_eq!(
-            normalized["input"][1]["call_id"],
-            "<asb-codex-input-call-id>"
-        );
+        assert_eq!(normalized["input"][0]["call_id"], "call-a");
+        assert_eq!(normalized["input"][1]["call_id"], "call-b");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4258,10 +4253,11 @@ mod tests {
             family: None,
             task: "one".into(),
         };
+        std::fs::write(root.join("capture.jsonl"), "").unwrap();
         let error = match Session::start_for_agent_at(
-            Mode::Record,
+            Mode::Replay,
             &root.join("capture.jsonl"),
-            Some("http://127.0.0.1:1"),
+            None,
             false,
             crate::tape::AgentContext {
                 workspace: &root,

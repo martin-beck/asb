@@ -33,7 +33,7 @@ const agentWireExtension = process.env.ASB_TAPE_AGENT_WIRE_EXTENSION
   : null;
 // Adapter-owned normalizers are distinct from wire extensions. They receive
 // decoded requests and can change only recognized incidental rendering.
-const agentNormalizer = process.env.ASB_TAPE_AGENT_NORMALIZER
+const agentNormalizer = process.argv[2] === "replay" && process.env.ASB_TAPE_AGENT_NORMALIZER
   ? await import(pathToFileURL(process.env.ASB_TAPE_AGENT_NORMALIZER).href)
   : null;
 // The parent supplies frozen project policy explicitly; cassette contents are
@@ -50,7 +50,7 @@ const readyFile = process.env.ASB_TAPE_READY_FILE;
 if (customPolicy && !/^[0-9a-f]{64}$/.test(customPolicy.sha256 || "")) {
   throw new Error("invalid frozen normalizer policy identity");
 }
-const customSupervisor = customPolicy ? new NormalizerSupervisor(customPolicy.profiles) : null;
+const customSupervisor = customPolicy && process.argv[2] === "replay" ? new NormalizerSupervisor(customPolicy.profiles) : null;
 if (customSupervisor) {
   try { await customSupervisor.ready; }
   catch (error) {
@@ -218,14 +218,17 @@ async function replayResponse(response, interaction) {
   // recording workspace path. Materialize the current run's canonical path
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
+  const originalBody = workspace && interaction.asb_request_policy === 3 && interaction.recorded_workspace
+    ? normalizeRecordedResponse(interaction.response.body || "", interaction.recorded_workspace)
+    : interaction.response.body || "";
   const body = workspace
     ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
-        interaction.response.body || "",
+        originalBody,
         "<asb-workspace>",
         workspace,
         true,
       ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
-    : interaction.response.body || "";
+    : originalBody;
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
@@ -318,8 +321,7 @@ function normalizeRequestBody(url, body) {
 // Preserve provider response content exactly, apart from workspace paths that
 // must point into the replay replica. Request canonicalization is only for
 // matching and must never rewrite dates, UUIDs or other model-generated data.
-function normalizeRecordedResponse(body) {
-  const workspace = process.env.ASB_TAPE_WORKSPACE;
+function normalizeRecordedResponse(body, workspace) {
   const marker = "<asb-workspace>";
   // JSON may escape slashes, so rewrite decoded string values before
   // serializing rather than relying on bytewise path matching.
@@ -339,10 +341,10 @@ function normalizeRecordedResponse(body) {
   );
 }
 
-function normalizeCassetteBody(body, url = "") {
+function normalizeCassetteBody(body, url = "", recordedWorkspace = process.env.ASB_TAPE_WORKSPACE) {
   if (!body) return body;
   if (typeof body !== "string") body = JSON.stringify(body);
-  const workspace = process.env.ASB_TAPE_WORKSPACE;
+  const workspace = recordedWorkspace;
   const normalized = customSupervisor ? body : normalizeLegacyRaw(body, workspace, normalizeSseWorkspaceFragments);
   let normalizerInvoked = false;
   try {
@@ -442,7 +444,7 @@ function normalizeCassetteBody(body, url = "") {
           && key === "id") {
         return canonicalContentBlockIdentifier(value);
       }
-      if (typeof value === "string") return customSupervisor ? value : normalizeLegacyValue(value);
+      if (typeof value === "string") return customSupervisor ? replaceExactWorkspace(value, workspace, "<asb-workspace>") : normalizeLegacyValue(value);
       if (Array.isArray(value)) return value.map((item, index) => sort(item, String(index), [...path, String(index)]));
       if (value && typeof value === "object") {
         return Object.fromEntries(Object.keys(value).sort().map((child) => [child, sort(value[child], child, [...path, child])]));
@@ -527,10 +529,11 @@ const rawInteractions = mode === "replay"
 legacyRequestPolicy = mode === 'replay' && rawInteractions.length > 0 &&
   rawInteractions.every(interaction => interaction.asb_request_policy === undefined);
 if (mode === 'replay') agentWireExtension?.configureReplay?.({interactions:rawInteractions});
-if (mode === 'replay' && !legacyRequestPolicy && rawInteractions.some(interaction => interaction.asb_request_policy !== 2)) {
+if (mode === 'replay' && !legacyRequestPolicy && (rawInteractions.some(interaction => ![2, 3].includes(interaction.asb_request_policy)) || new Set(rawInteractions.map(interaction => interaction.asb_request_policy)).size !== 1)) {
   throw new Error('cassette request policy is inconsistent');
 }
-const interactions = rawInteractions.map((interaction) => {
+const interactions = [];
+for (const interaction of rawInteractions) {
     if (interaction.request) {
       interaction.request.url = requestPath(interaction.request.url);
       // Recordings already contain the policy's comparison copy. Never apply
@@ -539,13 +542,21 @@ const interactions = rawInteractions.map((interaction) => {
       if (recordedPolicy !== undefined && (!customPolicy || recordedPolicy !== customPolicy.sha256)) {
         throw new Error("recorded normalizer policy differs from the selected policy; record a new cassette");
       }
-      if (customPolicy && recordedPolicy === undefined && interaction.request.body) {
+      if (customPolicy && recordedPolicy === undefined && interaction.request.body && interaction.asb_request_policy !== 3) {
         throw new Error("recording has no normalizer policy identity; record a new cassette");
       }
-      interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
+      if (interaction.asb_request_policy === 3 && interaction.request.body) {
+        const body = normalizeRequestBody(interaction.request.url, interaction.request.body);
+        interaction.request.body = normalizeCassetteBody(await normalizeCustomToolResults(body, interaction.request.url), interaction.request.url, interaction.recorded_workspace);
+      } else {
+        interaction.request.body = normalizeCassetteBody(interaction.request.body, interaction.request.url);
+      }
     }
-    return interaction;
-});
+    interactions.push(interaction);
+}
+// Recorded and live requests must build independent session aliases in the
+// same encounter order. Preparing recorded keys must not seed the live side.
+agentWireExtension?.resetReplayComparison?.();
 let cursor = 0;
 let replayOrderWaiters = 0;
 // Optional probes advance the recorded cursor when omitted. Keep their exact
@@ -858,18 +869,16 @@ async function handle(request, response, recording) {
     }
     if (parsed !== undefined) agentRecordMetadata = agentWireExtension.recordMetadata({url: requestPath(request.url), body: parsed});
   }
-  const normalizedBody = normalizeRequestBody(request.url || "/", body.toString("utf8"));
+  const originalBody = body.toString("utf8");
+  const normalizedBody = mode === "replay" ? normalizeRequestBody(request.url || "/", originalBody) : originalBody;
   const recordedRequest = {
     method: request.method || "GET",
-    // Some SDKs send an absolute URL even when configured for a proxy. Keep
-    // only the path in the cassette and always route the request to the
-    // selected upstream; this prevents a client from bypassing the loopback
-    // recorder and makes separate-directory replay path-stable.
-    url: requestPath(request.url),
+    // Preserve the observed target in the cassette. Routing and replay
+    // comparisons independently derive a path so absolute-form requests
+    // cannot select a different upstream host.
+    url: mode === "record" ? (request.url || "/") : requestPath(request.url),
     headers: redactHeaders(Object.fromEntries(Object.entries(request.headers))),
-    body: body.length ? normalizeCassetteBody(await normalizeCustomToolResults(normalizedBody, request.url || "/"), request.url || "/") : null,
-    ...(customSupervisor && body.length ? { custom_normalization_sha256: customPolicy.sha256 } : {}),
-    ...(customSupervisor && body.length ? { normalization_evidence: normalizationEvidence() } : {}),
+    body: body.length ? (mode === "replay" ? normalizeCassetteBody(await normalizeCustomToolResults(normalizedBody, request.url || "/"), request.url || "/") : originalBody) : null,
   };
 
   if (mode === "replay") {
@@ -967,7 +976,7 @@ async function handle(request, response, recording) {
 
   // Preserve provider-specific prefixes (e.g. OpenRouter's /api) while
   // keeping the selected upstream host, even for absolute-form requests.
-  const target = new URL(`${upstream.replace(/\/+$/, "")}${recordedRequest.url}`);
+  const target = new URL(`${upstream.replace(/\/+$/, "")}${requestPath(recordedRequest.url)}`);
   const forwardedHeaders = { ...request.headers };
   delete forwardedHeaders.host;
   delete forwardedHeaders.connection;
@@ -991,11 +1000,12 @@ async function handle(request, response, recording) {
   const recordedResponse = {
     status: upstreamResponse.status,
     headers: responseHeaders(upstreamResponse.headers),
-    body: normalizeRecordedResponse(responseBody),
+    body: responseBody,
   };
   const delayMs = Math.min(Math.max(0, Math.round(performance.now() - startedAt)), MAX_DELAY_MS);
   const interaction = {
-    asb_request_policy: 2,
+    asb_request_policy: 3,
+    ...(process.env.ASB_TAPE_WORKSPACE ? { recorded_workspace: process.env.ASB_TAPE_WORKSPACE } : {}),
     request: recordedRequest,
     response: recordedResponse,
     delay_ms: delayMs,

@@ -91,37 +91,41 @@ async function fixture(t, upstreamHandler, options = {}) {
   return { port, stop, child, curlMarker, output, normalizationEvidence };
 }
 
-test("custom normalizer changes cassette comparison text but not provider input", { timeout: 10000 }, async (t) => {
+test("recording stores original requests and responses without invoking normalizers", { timeout: 10000 }, async (t) => {
   let forwarded = "";
-  const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "seed", source: "export function normalizeToolResult({text}) { return text.replace('seed=1', 'seed=<seed>'); }" }] };
+  const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "never-call", source: "export function normalizeToolResult() { throw new Error('must not run during recording'); }" }] };
+  const workspace = "/tmp/record/workspace-concurrency-1";
+  const responseBody = JSON.stringify({ message: `${workspace}/file`, raw: "seed=1" });
   const { port, stop, normalizationEvidence } = await fixture(t, (req, res) => {
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => { forwarded += chunk; });
+    req.setEncoding("utf8"); req.on("data", (chunk) => { forwarded += chunk; });
+    req.on("end", () => { res.writeHead(200, { "content-type": "application/json" }); res.end(responseBody); });
+  }, { policy, workspace });
+  const body = JSON.stringify({ model: "m", messages: [{ role: "user", content: "seed=1" }, { role: "tool", content: `seed=1 ${workspace}` }] });
+  const response = await request(port, "/v1/chat/completions", body);
+  assert.equal(response.status, 200);
+  assert.equal(response.body, responseBody);
+  const { value, bytes } = await stop();
+  assert.equal(value.complete, true);
+  assert.equal(forwarded, body);
+  const saved = JSON.parse(bytes.toString());
+  assert.equal(saved.asb_request_policy, 3);
+  assert.equal(saved.recorded_workspace, workspace);
+  assert.equal(saved.request.body, body);
+  assert.equal(saved.response.body, responseBody);
+  assert.equal(fs.existsSync(normalizationEvidence), false);
+});
+
+test("recording forwards and stores an unmodified Responses request", { timeout: 10000 }, async (t) => {
+  let forwarded = "";
+  const { port, stop } = await fixture(t, (req, res) => {
+    req.setEncoding("utf8"); req.on("data", (chunk) => { forwarded += chunk; });
     req.on("end", () => res.end("{}"));
-  }, { policy });
-  const body = JSON.stringify({ model: "m", messages: [{ role: "user", content: "seed=1" }, { role: "tool", content: "seed=1" }] });
-  assert.equal((await request(port, "/v1/chat/completions", body)).status, 200);
+  });
+  const body = JSON.stringify({model:"m", reasoning:{effort:"low", context:"original"}, input:[{type:"additional_tools", tools:[]}]});
+  assert.equal((await request(port, "/v1/responses", body)).status, 200);
   const { bytes } = await stop();
   assert.equal(forwarded, body);
-  const recorded = JSON.parse(bytes.toString()).request;
-  assert.deepEqual(recorded.normalization_evidence, {
-    policy_sha256: policy.sha256,
-    count_scope: "result-block-visits-including-repeated-history",
-    failed: false,
-    profiles: [{ id: "seed", observations: 1, changed: 1 }],
-  });
-  assert.deepEqual(JSON.parse(fs.readFileSync(normalizationEvidence)), {
-    schema_version: 1,
-    ...recorded.normalization_evidence,
-    changed_result_digests: [{
-      profiles: ["seed"],
-      before_sha256: createHash("sha256").update("seed=1").digest("hex"),
-      after_sha256: createHash("sha256").update("seed=<seed>").digest("hex"),
-    }],
-  });
-  const saved = JSON.parse(recorded.body);
-  assert.equal(saved.messages[0].content, "seed=1");
-  assert.equal(saved.messages[1].content, "seed=<seed>");
+  assert.equal(JSON.parse(bytes.toString()).request.body, body);
 });
 
 test("profile matching leaves unrelated prompts, arguments and tool text significant", { timeout: 10000 }, async (t) => {
@@ -140,7 +144,7 @@ test("profile matching leaves unrelated prompts, arguments and tool text signifi
   const saved = JSON.parse(JSON.parse(bytes.toString()).request.body);
   assert.equal(saved.messages[0].content, text);
   assert.equal(JSON.parse(saved.messages[1].tool_calls[0].function.arguments).command, text);
-  assert.equal(saved.messages[2].content, `${text}\nseed=<seed>`);
+  assert.equal(saved.messages[2].content, `${text}\nseed=1`);
 });
 
 test("agent envelope precedes workload profile while original call associations survive", { timeout: 10000 }, async (t) => {
@@ -168,30 +172,16 @@ test("agent envelope precedes workload profile while original call associations 
   const { bytes } = await stop();
   assert.equal(forwarded, body);
   const saved = JSON.parse(JSON.parse(bytes.toString()).request.body);
-  assert.equal(saved.input[1].output, "one:agent:profile");
-  assert.equal(saved.input[3].output, "two:agent");
-});
-
-test("normalizer failure rejects the request before upstream and leaves capture incomplete", { timeout: 10000 }, async (t) => {
-  let forwarded = false;
-  const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "broken", source: "export function normalizeToolResult() { throw new Error('fixture normalization failure'); }" }] };
-  const { port, stop, normalizationEvidence } = await fixture(t, () => { forwarded = true; }, { policy });
-  const body = JSON.stringify({ model: "m", messages: [{ role: "tool", content: "result" }] });
-  const response = await request(port, "/v1/chat/completions", body);
-  assert.equal(response.status, 502);
-  assert.match(response.body, /normalizer broken: raised an exception/);
-  assert.doesNotMatch(response.body, /fixture normalization failure/);
-  const { value } = await stop();
-  assert.equal(JSON.parse(fs.readFileSync(normalizationEvidence)).failed, true);
-  assert.equal(forwarded, false);
-  assert.equal(value.complete, false);
-  assert.equal(value.recorded, 0);
+  assert.equal(saved.input[1].output, "one");
+  assert.equal(saved.input[3].output, "two");
 });
 
 test("custom policy applies once on replay and rejects changed prompts", { timeout: 10000 }, async (t) => {
   const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "seed", source: "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>') + '!'; }" }] };
-  const { port, stop, output } = await fixture(t, (_req, res) => res.end('{"ok":true}'), { policy });
-  const recorded = JSON.stringify({ model: "m", messages: [{ role: "user", content: "solve" }, { role: "tool", content: "seed=1" }] });
+  const oldWorkspace = "/tmp/record/workspace-concurrency-1";
+  const newWorkspace = "/tmp/replay/workspace-concurrency-2";
+  const { port, stop, output } = await fixture(t, (_req, res) => res.end(JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" })), { policy, workspace: oldWorkspace });
+  const recorded = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${oldWorkspace}` }, { role: "tool", content: "seed=1" }] });
   assert.equal((await request(port, "/v1/chat/completions", recorded)).status, 200);
   await stop();
   const root = join(process.cwd(), "target/capture-http-fixtures");
@@ -203,7 +193,7 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
   fs.writeFileSync(policyPath, JSON.stringify(policy));
   const script = fileURLToPath(new URL("../assets/scripts/llmtape.mjs", import.meta.url));
   const child = spawn(process.execPath, [script, "replay", "--port", "0", "--cassette", cassette], {
-    env: { PATH: process.env.PATH, ASB_TAPE_OWNER_PIPE: "1", ASB_TAPE_READY_FILE: ready, ASB_TAPE_CUSTOM_NORMALIZERS: policyPath },
+    env: { PATH: process.env.PATH, ASB_TAPE_OWNER_PIPE: "1", ASB_TAPE_READY_FILE: ready, ASB_TAPE_CUSTOM_NORMALIZERS: policyPath, ASB_TAPE_WORKSPACE: newWorkspace },
     stdio: ["pipe", "ignore", "pipe"],
   });
   let stderr = "";
@@ -221,30 +211,40 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
     await delay(10);
   }
   const replayPort = JSON.parse(fs.readFileSync(ready)).port;
-  const changed = JSON.stringify({ model: "m", messages: [{ role: "user", content: "changed" }, { role: "tool", content: "seed=2" }] });
+  const changed = JSON.stringify({ model: "m", messages: [{ role: "user", content: `changed in ${newWorkspace}` }, { role: "tool", content: "seed=2" }] });
   assert.equal((await request(replayPort, "/v1/chat/completions", changed)).status, 409);
-  const replayed = JSON.stringify({ model: "m", messages: [{ role: "user", content: "solve" }, { role: "tool", content: "seed=2" }] });
-  assert.equal((await request(replayPort, "/v1/chat/completions", replayed)).status, 200);
+  const replayed = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${newWorkspace}` }, { role: "tool", content: "seed=2" }] });
+  const replayResponse = await request(replayPort, "/v1/chat/completions", replayed);
+  assert.equal(replayResponse.status, 200);
+  assert.deepEqual(JSON.parse(replayResponse.body), { path: `${newWorkspace}/src`, unrelated: "/tmp/elsewhere" });
+  assert.equal(JSON.parse(fs.readFileSync(cassette, "utf8")).response.body, JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" }));
   child.stdin.end();
   assert.deepEqual(await exited, { code: 0, signal: null }, stderr);
   const progress = JSON.parse(fs.readFileSync(`${cassette}.progress.json`));
   assert.equal(progress.consumed, 1);
   assert.equal(progress.rejected, 1);
-  fs.writeFileSync(policyPath, JSON.stringify({ ...policy, sha256: "b".repeat(64) }));
-  const secondReady = join(replayRoot, "wrong-ready.json");
-  const incompatible = spawn(process.execPath, [script, "replay", "--port", "0", "--cassette", cassette], {
-    env: { PATH: process.env.PATH, ASB_TAPE_OWNER_PIPE: "1", ASB_TAPE_READY_FILE: secondReady, ASB_TAPE_CUSTOM_NORMALIZERS: policyPath },
-    stdio: ["pipe", "ignore", "pipe"],
+
+});
+
+test("a failing replay normalizer rejects the raw cassette without changing it", { timeout: 10000 }, async (t) => {
+  const { port, stop, output } = await fixture(t, (_req, res) => res.end("{}"));
+  const body = JSON.stringify({ model: "m", messages: [{ role: "tool", content: "result" }] });
+  assert.equal((await request(port, "/v1/chat/completions", body)).status, 200);
+  await stop();
+  const before = fs.readFileSync(output);
+  const policyPath = `${output}.policy.json`;
+  fs.writeFileSync(policyPath, JSON.stringify({ sha256: "a".repeat(64), workload: {id:"fixture", task_id:"one"}, profiles: [{ id:"broken", source:"export function normalizeToolResult() { throw new Error('private error'); }" }] }));
+  const script = fileURLToPath(new URL("../assets/scripts/llmtape.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script, "replay", "--port", "0", "--cassette", output], {
+    env: {PATH:process.env.PATH, ASB_TAPE_CUSTOM_NORMALIZERS:policyPath, ASB_TAPE_READY_FILE:`${output}.ready.json`}, stdio:["ignore", "ignore", "pipe"],
   });
-  let incompatibleStderr = "";
-  incompatible.stderr.on("data", (data) => { incompatibleStderr += data; });
-  const incompatibleExit = await Promise.race([
-    new Promise((resolve) => incompatible.once("exit", (code) => resolve(code))),
-    delay(3000, undefined, { ref: false }).then(() => { incompatible.kill("SIGKILL"); throw new Error("incompatible policy did not stop"); }),
-  ]);
-  assert.notEqual(incompatibleExit, 0);
-  assert.equal(fs.existsSync(secondReady), false);
-  assert.match(incompatibleStderr, /policy differs/);
+  let stderr = "";
+  child.stderr.on("data", (data) => { stderr += data; });
+  const result = await new Promise((resolve) => child.once("exit", (code) => resolve(code)));
+  assert.notEqual(result, 0);
+  assert.match(stderr, /normalizer broken/);
+  assert.doesNotMatch(stderr, /private error/);
+  assert.deepEqual(fs.readFileSync(output), before);
 });
 
 test("oversized upload returns 413 but cannot become a complete recording", { timeout: 10000 }, async (t) => {
@@ -353,7 +353,7 @@ test("recorded provider responses preserve unrelated workspace-like paths", { ti
   });
 });
 
-test("recorded responses rewrite only the selected workspace", { timeout: 10000 }, async (t) => {
+test("recorded responses preserve the selected workspace", { timeout: 10000 }, async (t) => {
   const workspace = "/tmp/sweep/000/workspace-concurrency-3";
   const cases = [
     [workspace, "<asb-workspace>"],
@@ -372,7 +372,7 @@ test("recorded responses rewrite only the selected workspace", { timeout: 10000 
   assert.equal(value.complete, true);
   const entries = bytes.toString().trim().split("\n").map(JSON.parse);
   cases.forEach(([sample, expected], offset) => {
-    assert.deepEqual(JSON.parse(entries[offset].response.body), { message: expected }, sample);
+    assert.deepEqual(JSON.parse(entries[offset].response.body), { message: sample }, sample);
   });
 });
 
