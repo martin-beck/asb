@@ -19,11 +19,19 @@ HERE=Path(__file__).resolve().parent
 PROJECT=HERE.parents[2]
 sys.path.insert(0,str(PROJECT/'assets/benchmarks'))
 sys.path.insert(0,str(PROJECT/'tests'))
-from asb_swebench import read_task
-import guest_provider_fixture as provider
+
+
+def check_gate_diagnostics(phase, stderr):
+    # A workload cleanup receipt does not establish host-process quiescence.
+    # Retain and fail on the explicit gate warning reported by the SymPy loop.
+    # Absence of the warning alone is not a positive quiescence receipt.
+    if 'asb process gate cleanup:' in stderr:
+        raise RuntimeError(f'{phase} reported unconfirmed host process cleanup; inspect retained stderr')
 
 
 def main():
+    from asb_swebench import read_task
+    import guest_provider_fixture as provider
     root=Path(os.environ['ASB_TEST_SWECATALOG_ROOT']).resolve(strict=True)
     binary=Path(os.environ['ASB_TEST_BENCHMARK_ASB']).resolve(strict=True)
     if not (root/'.asb/project.toml').is_file():raise RuntimeError('fixture requires an initialized ASB project')
@@ -81,6 +89,7 @@ def main():
             raise
         (artifacts/f'{phase}.stdout').write_text(result.stdout)
         (artifacts/f'{phase}.stderr').write_text(result.stderr)
+        check_gate_diagnostics(phase,result.stderr)
         if result.returncode:raise RuntimeError(f'{phase} failed ({result.returncode}); inspect {artifacts}/{phase}.stderr')
         lines=[json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         rows=[row for row in lines if isinstance(row.get('task'),dict)]
@@ -99,6 +108,10 @@ def main():
         return rows
     try:
         if resume:
+            record_stderr=artifacts/'record.stderr'
+            if not record_stderr.is_file():
+                raise RuntimeError('resume requires the retained recording stderr for gate diagnostics')
+            check_gate_diagnostics('record',record_stderr.read_text())
             lines=[json.loads(line) for line in (artifacts/'record.stdout').read_text().splitlines() if line.strip()]
             outcomes=[line for line in lines if isinstance(line.get('task'),dict)]
             publications=[line['publication'] for line in lines if isinstance(line.get('publication'),dict)]

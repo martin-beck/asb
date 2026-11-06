@@ -12,9 +12,12 @@ synthetic provider, then stops both fixture services and replays the cassette
 in four concurrent isolated workloads. It requires each official grade and
 cleanup to succeed. This is not an AI-solving or performance claim, nor does
 it qualify arbitrary native commands, effects, workloads or agents. Evidence
-is retained inside the project. `ASB_TEST_RESUME_RECORDING` may point to a
-retained successful fixture directory to replay it without rerunning the
-agent; this cannot independently recheck its original HTTP request counter.
+is retained inside the project. The fixture also rejects the reported host
+process-gate cleanup warning in either phase; absence of that warning is not
+a positive host-process quiescence receipt. `ASB_TEST_RESUME_RECORDING` may
+point to a retained successful fixture directory, including `record.stderr`,
+to replay it without rerunning the agent; this cannot independently recheck
+its original HTTP request counter.
 
 The opt-in `tests/fixtures/pi_native/snapshot_http_c4.py` runs the installed
 pinned Pi core and native Bash tool with the real Btrfs snapshot supervisor.

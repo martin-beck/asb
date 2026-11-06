@@ -29,6 +29,11 @@ fn snapshot_workspace_failure_paths_release_resources() {
 }
 
 #[test]
+fn pi_swe_snapshot_qualification_rejects_unconfirmed_host_gate_cleanup() {
+    python_protocol("fixtures/pi_native/test_swe_snapshot_qualification.py");
+}
+
+#[test]
 fn snapshot_hardlink_splits_preserve_existing_inode_handles() {
     python_protocol("fixtures/fs_snapshot/test_topology.py");
 }
