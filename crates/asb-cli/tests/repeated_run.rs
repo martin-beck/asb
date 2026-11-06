@@ -614,6 +614,31 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
             expected_calls
         );
     }
+    let ready: Value = serde_json::from_slice(
+        &fs::read(
+            project
+                .0
+                .join(".sample-sweep-sample-preparation/ready.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let winners = ready["winners"].as_array().unwrap();
+    assert_eq!(winners.len(), 1);
+    assert_eq!(
+        winners[0]["trial"].as_str(),
+        Some(order.candidates()[1].as_str())
+    );
+    assert_eq!(winners[0]["cassette_sha256"].as_str().unwrap().len(), 64);
+    let path = project
+        .0
+        .join(".sample-sweep-sample-preparation/ready.json");
+    fs::write(&path, b"unrelated existing evidence").unwrap();
+    let rejected = run();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("selection differs"));
+    assert_eq!(fs::read(path).unwrap(), b"unrelated existing evidence");
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 fn sampled_candidate_fixture(mismatch: bool, retry: bool) {
