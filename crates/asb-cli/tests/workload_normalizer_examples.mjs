@@ -48,6 +48,11 @@ test("pytest normalization is confined to associated pytest output", () => {
   assert.equal(pytest({ text, tool: null }), text);
   assert.equal(pytest({ text, tool: { ...tool, arguments: { command: "cat test.log" } } }), text);
   assert.notEqual(pytest({ text: text.replace("1 passed", "2 passed"), tool }), expected);
+  const warnings = 'FAILED test_x.py::test_one\n3 failed, 127 passed, 3 warnings in 4.58s\n';
+  const normalized = pytest({text:warnings,tool});
+  assert.equal(pytest({text:warnings.replace('4.58s','4.51s'),tool}), normalized);
+  assert.notEqual(pytest({text:warnings.replace('3 warnings','2 warnings'),tool}), normalized);
+  assert.notEqual(pytest({text:warnings.replace('test_one','test_other'),tool}), normalized);
 });
 
 test("diff normalization keeps paths, hunks and unrelated command output", () => {
