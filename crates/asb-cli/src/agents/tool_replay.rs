@@ -15,9 +15,6 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 const MAX_EVENTS: usize = 16_384;
 const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
-const MAX_SEARCH_FILES: usize = 512;
-const MAX_SEARCH_MATCHES: usize = 128;
-const MAX_SEARCH_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -608,7 +605,7 @@ pub(crate) fn list_directory(root: &Path, value: &str) -> Result<Vec<(String, bo
     Ok(entries)
 }
 
-/// Search bounded UTF-8 source text through the confined workspace.  Results
+/// Search UTF-8 source text through the confined workspace.  Results
 /// are an observation captured in the transcript; a replay does not rescan a
 /// changed checkout.  Build/vendor trees are skipped to retain a predictable
 /// cost and keep agent reasoning focused on task material.
@@ -617,7 +614,7 @@ pub(crate) fn search_text(
     value: &str,
     query: &str,
 ) -> Result<Vec<(String, u64, String)>, Error> {
-    if query.is_empty() || query.len() > 1024 {
+    if query.is_empty() {
         return Err(Error::Run("local-tool search query is invalid".into()));
     }
     let root = root
@@ -630,7 +627,6 @@ pub(crate) fn search_text(
         let _ = confined(&root, value)?;
         value.into()
     };
-    let mut files = 0usize;
     let mut matches = Vec::new();
     if !start.is_empty()
         && std::fs::symlink_metadata(root.join(&start))
@@ -638,9 +634,9 @@ pub(crate) fn search_text(
             .is_file()
     {
         let text = read_text(&root, &start)?;
-        append_search_matches(&start, &text, query, &mut matches)?;
+        append_search_matches(&start, &text, query, &mut matches);
     } else {
-        search_directory(&root, &start, query, 0, &mut files, &mut matches)?;
+        search_directory(&root, &start, query, &mut matches)?;
     }
     Ok(matches)
 }
@@ -649,44 +645,26 @@ fn search_directory(
     root: &Path,
     relative: &str,
     query: &str,
-    depth: usize,
-    files: &mut usize,
     matches: &mut Vec<(String, u64, String)>,
 ) -> Result<(), Error> {
-    if depth > MAX_SEARCH_DEPTH {
-        return Err(Error::Run(
-            "local-tool search exceeds directory-depth bound".into(),
-        ));
-    }
-    if matches.len() >= MAX_SEARCH_MATCHES {
-        return Ok(());
-    }
-    for (name, directory) in list_directory(root, relative)? {
-        if matches.len() >= MAX_SEARCH_MATCHES {
-            break;
-        }
-        if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
-            continue;
-        }
-        let child = if relative.is_empty() {
-            name
-        } else {
-            format!("{relative}/{name}")
-        };
+    let mut pending = vec![(relative.to_owned(), true)];
+    while let Some((path, directory)) = pending.pop() {
         if directory {
-            search_directory(root, &child, query, depth + 1, files, matches)?;
-            continue;
+            let children = list_directory(root, &path)?;
+            for (name, is_directory) in children.into_iter().rev() {
+                if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
+                    continue;
+                }
+                let child = if path.is_empty() {
+                    name
+                } else {
+                    format!("{path}/{name}")
+                };
+                pending.push((child, is_directory));
+            }
+        } else if let Ok(text) = read_text(root, &path) {
+            append_search_matches(&path, &text, query, matches);
         }
-        *files += 1;
-        if *files > MAX_SEARCH_FILES {
-            return Err(Error::Run("local-tool search exceeds file bound".into()));
-        }
-        let Ok(text) = read_text(root, &child) else {
-            // Binary and oversized files are outside this deliberately text
-            // only observation surface; they cannot change replay behavior.
-            continue;
-        };
-        append_search_matches(&child, &text, query, matches)?;
     }
     Ok(())
 }
@@ -696,19 +674,12 @@ fn append_search_matches(
     text: &str,
     query: &str,
     matches: &mut Vec<(String, u64, String)>,
-) -> Result<(), Error> {
+) {
     for (index, line) in text.lines().enumerate() {
         if line.contains(query) {
-            if line.len() > 4096 {
-                return Err(Error::Run("local-tool search line exceeds bound".into()));
-            }
             matches.push((path.to_owned(), index as u64 + 1, line.into()));
-            if matches.len() >= MAX_SEARCH_MATCHES {
-                break;
-            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1238,6 +1209,39 @@ mod tests {
     }
 
     #[test]
+    fn search_reports_all_matches_across_large_and_deep_trees() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-large-search-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..600 {
+            std::fs::write(root.join(format!("source-{index:03}.txt")), "needle\n").unwrap();
+        }
+        let mut deep = root.clone();
+        for _ in 0..20 {
+            deep.push("nested");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(
+            deep.join("deep.txt"),
+            format!("{}needle\n", "x".repeat(5000)),
+        )
+        .unwrap();
+        let matches = search_text(&root, ".", "needle").unwrap();
+        assert_eq!(matches.len(), 601);
+        assert!(
+            matches
+                .iter()
+                .any(|(path, line, text)| path.ends_with("deep.txt")
+                    && *line == 1
+                    && text.len() > 4096)
+        );
+        assert!(matches.iter().any(|(path, _, _)| path == "source-599.txt"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn directory_listing_and_search_handle_more_than_256_entries() {
         let root = std::env::temp_dir().join(format!(
             "asb-large-directory-{}",
@@ -1280,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn text_search_is_bounded_confined_and_skips_vendor_trees() {
+    fn text_search_is_confined_and_skips_vendor_trees() {
         let root = std::env::temp_dir().join(format!("asb-local-search-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
