@@ -603,7 +603,13 @@ pub(crate) fn publish_campaign(prepared: Prepared) -> Result<PublishedCampaign, 
     publish_bytes(&root.join("plan.json"), &bytes)?;
     let (private_cassette, replay) = match replay {
         Some(PreparedReplay::Selected(mut selected)) => {
-            selected.stage(&root, &mut plan.replay_inputs)?;
+            let validate_pi_native = plan.configuration.agent == "pi"
+                && if options.tool_mode_explicit {
+                    options.tool_mode == Some(crate::tape::Mode::Replay)
+                } else {
+                    plan.mode == crate::planning::ExecutionMode::Replay
+                };
+            selected.stage(&root, &mut plan.replay_inputs, validate_pi_native)?;
             (None, Some(selected))
         }
         Some(PreparedReplay::Legacy(legacy)) => (legacy.stage(&root, &plan)?, None),
