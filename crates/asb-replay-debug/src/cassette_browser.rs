@@ -27,6 +27,45 @@ fn outcome(value: Option<bool>) -> &'static str {
     }
 }
 
+fn decode_entries(bytes: &[u8], stream: &Stream, id: u64) -> Result<Vec<Value>, String> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) if matches!(stream, Stream::Artifact(_)) => {
+            let preview: String = bytes
+                .iter()
+                .take(65_536)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            return Ok(vec![
+                serde_json::json!({"kind":"binary artifact", "bytes":bytes.len(), "hex_preview":preview, "preview_truncated":bytes.len() > 65_536}),
+            ]);
+        }
+        Err(_) => return Err(format!("track {id} is not UTF-8 JSONL")),
+    };
+    if matches!(stream, Stream::Artifact(_))
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        return Ok(vec![value]);
+    }
+    let mut events = Vec::new();
+    for (line, value) in text.lines().enumerate() {
+        if value.trim().is_empty() {
+            continue;
+        }
+        if events.len() == MAX_EVENTS {
+            return Err(format!("track {id} exceeds {MAX_EVENTS} entries"));
+        }
+        match serde_json::from_str(value) {
+            Ok(event) => events.push(event),
+            Err(_) if matches!(stream, Stream::Artifact(_)) => {
+                return Ok(vec![Value::String(text.to_owned())]);
+            }
+            Err(e) => return Err(format!("invalid track {id} JSON on line {}: {e}", line + 1)),
+        }
+    }
+    Ok(events)
+}
+
 struct Track {
     id: u64,
     label: String,
@@ -173,20 +212,7 @@ impl Browser {
             Stream::Artifact(kind) => self.source.read_artifact(id, kind),
         }
         .map_err(|e| format!("cannot read {} from track {id}: {e}", stream.label()))?;
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| format!("track {id} is not UTF-8 JSONL"))?;
-        let mut events = Vec::new();
-        for (line, text) in text.lines().enumerate() {
-            if text.trim().is_empty() {
-                continue;
-            }
-            if events.len() == MAX_EVENTS {
-                return Err(format!("track {id} exceeds {MAX_EVENTS} interactions"));
-            }
-            let event: Value = serde_json::from_str(text)
-                .map_err(|e| format!("invalid track {id} JSON on line {}: {e}", line + 1))?;
-            events.push(event);
-        }
+        let events = decode_entries(&bytes, &stream, id)?;
         self.selected = index;
         self.stream = stream;
         self.events = events;
@@ -561,5 +587,18 @@ mod tests {
                 .unwrap()
                 .contains("invalid track")
         );
+    }
+
+    #[test]
+    fn artifact_text_and_binary_are_browsable_without_weakening_track_parsing() {
+        let artifact = Stream::Artifact("fixture".into());
+        assert_eq!(
+            decode_entries(b"ordinary text\n", &artifact, 1).unwrap()[0],
+            "ordinary text\n"
+        );
+        let binary = decode_entries(&[0xff, 0x00], &artifact, 1).unwrap();
+        assert_eq!(binary[0]["hex_preview"], "ff00");
+        assert_eq!(binary[0]["preview_truncated"], false);
+        assert!(decode_entries(b"ordinary text\n", &Stream::Provider, 1).is_err());
     }
 }

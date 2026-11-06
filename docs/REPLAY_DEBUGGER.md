@@ -144,7 +144,9 @@ error rather than assumed complete. The
 viewer uses ASB's existing cassette source reader and checks a selected
 track's recorded length and digest. Selected tracks are limited to 32 MiB
 and 50,000 JSONL interactions; a single interactive preview is capped at
-200,000 characters. `--print` writes the complete selected track.
+200,000 characters. `--print` writes the complete selected text stream.
+Non-UTF-8 artifacts show a hexadecimal preview of at most 65,536 bytes in
+both modes, with an explicit truncation flag; they are not exported as files.
 
 Cassette contents may contain prompts, tool output and other sensitive data.
 The browser shows the recorded contents as stored; protect terminal history
