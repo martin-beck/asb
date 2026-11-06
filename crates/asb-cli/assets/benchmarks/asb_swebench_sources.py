@@ -227,10 +227,23 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         raise
 
 
-def resolve_image(client, name, build, host_arch=None):
+def resolve_image(client, name, build, host_arch=None, offline=False):
     import docker.errors
     import requests.exceptions
     arch = host_arch or platform.machine()
+    if offline:
+        if arch in ("aarch64", "arm64"):
+            prefix = "swebench/sweb.eval.x86_64."
+            if not name.startswith(prefix):
+                raise CatalogError("official SWE-bench image name does not support native ARM64 selection")
+            name = "swebench/sweb.eval.arm64." + name[len(prefix):]
+        try:
+            image = client.images.get(name)
+        except docker.errors.ImageNotFound as error:
+            raise CatalogError(f"SWE-bench replay image {name} is not installed locally; prepare it before replay") from error
+        if arch in ("aarch64", "arm64") and (image.attrs.get("Architecture") != "arm64" or image.attrs.get("Os") != "linux"):
+            raise CatalogError("upstream SWE-bench image is not a native Linux ARM64 image")
+        return image, {"source": "prebuilt-local", "declared_image": name}
     if arch in ("aarch64", "arm64"):
         prefix = "swebench/sweb.eval.x86_64."
         if not name.startswith(prefix):

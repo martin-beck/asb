@@ -432,7 +432,7 @@ fn replay_private_inputs(
 
 pub(crate) fn prefetch(context: &super::PreflightContext<'_>) -> Result<(), crate::Error> {
     let tools = crate::project::resolve(context.project_root, &context.project_config.tools_dir);
-    crate::install::guest_bootstrap(context.agent, context.project_root, &tools)?;
+    crate::install::guest_bootstrap(context.agent, context.project_root, &tools, context.offline)?;
     Ok(())
 }
 
@@ -1239,6 +1239,8 @@ impl Session {
                 "project_root":"/opt/asb-project","runtime_dir":"/opt/asb-private","run_dir":"/opt/asb-private/attempt","replay":context.replay,
                 "tape_cassette":tape_cassette,
                 "tool_replay":context.tool_replay,
+                "ignore_tool_mismatch":context.ignore_tool_mismatch,
+                "ignore_mcp_mismatch":context.ignore_mcp_mismatch,
                 "tool_tape_cassette":tool_tape_cassette,
                 "mcp_mode":context.mcp_mode,
                 "mcp_tape_cassette":mcp_tape_cassette,
@@ -1520,6 +1522,7 @@ impl PreparedBootstrap {
             &context.config.agent,
             context.project_root,
             &tools_root,
+            context.replay,
         )
         .map_err(|error| {
             format!("cannot prepare selected agent installation artifacts: {error}")

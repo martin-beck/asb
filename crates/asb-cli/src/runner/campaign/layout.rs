@@ -67,6 +67,19 @@ fn exact_path(actual: &Path, expected: &Path) -> bool {
 }
 
 impl Plan {
+    pub(crate) fn requires_raw_replay_requests(&self) -> bool {
+        self.mode == ExecutionMode::Replay
+            && match &self.replay_compatibility {
+                Some(expected) => {
+                    expected.normalization_sha256.as_deref()
+                        != self
+                            .normalization_policy
+                            .as_ref()
+                            .map(|policy| policy.sha256.as_str())
+                }
+                None => self.normalization_policy.is_some(),
+            }
+    }
     /// Validate identities and layout without opening a single artifact/source.
     /// This is not input verification, attempt settlement, or execution consent.
     pub(crate) fn validate_layout(&self) -> Result<usize, Error> {
@@ -95,7 +108,10 @@ impl Plan {
                 || self.ignore_agent
                 || self.ignore_collector
                 || self.ignore_provider_mismatch
-                || self.ignore_provider_unconsumed)
+                || self.ignore_provider_unconsumed
+                || self.ignore_tool_mismatch
+                || self.ignore_mcp_mismatch
+                || self.ignore_compatibility)
                 && self.mode != ExecutionMode::Replay)
             || self.source.as_os_str().is_empty()
         {
@@ -112,26 +128,14 @@ impl Plan {
             expected
                 .validate()
                 .map_err(|error| invalid(&error.to_string()))?;
-            if expected.normalization_sha256.as_deref()
-                != self
-                    .normalization_policy
-                    .as_ref()
-                    .map(|policy| policy.sha256.as_str())
-            {
-                return Err(invalid(
-                    "selected normalizer policy differs from the recording; record a new cassette",
-                ));
-            }
+            // A changed policy is admitted only after the selected track bytes
+            // prove that they contain raw (policy-3) requests. The staging and
+            // resume readers enforce that proof before starting any agent.
         }
         if let Some(policy) = &self.normalization_policy {
             policy.validate().map_err(|error| invalid(&error))?;
             if self.mode == ExecutionMode::Live {
                 return Err(invalid("normalization policy requires recording or replay"));
-            }
-            if self.mode == ExecutionMode::Replay && self.replay_compatibility.is_none() {
-                return Err(invalid(
-                    "legacy recordings have no normalizer policy identity; record a new cassette",
-                ));
             }
         }
         let configuration =

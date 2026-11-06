@@ -10,8 +10,10 @@ pub(super) struct NativeRoute<'a> {
     pub tape_mode: Option<tape::Mode>,
     pub max_steps: Option<u64>,
     pub tool_tape_mode: Option<tape::Mode>,
+    pub ignore_tool_mismatch: bool,
     pub tool_tape_cassette: Option<&'a Path>,
     pub mcp_tape_mode: Option<tape::Mode>,
+    pub ignore_mcp_mismatch: bool,
     pub mcp_tape_cassette: Option<&'a Path>,
     pub native_tool: Option<agents::NativeToolContext<'a>>,
 }
@@ -95,8 +97,10 @@ impl NativePlan<'_> {
             tape_mode,
             max_steps,
             tool_tape_mode,
+            ignore_tool_mismatch,
             tool_tape_cassette,
             mcp_tape_mode,
+            ignore_mcp_mismatch,
             mcp_tape_cassette,
             native_tool,
         } = route;
@@ -232,12 +236,22 @@ impl NativePlan<'_> {
         ));
         let mut artifact_specs = agents::find(&config.agent)
             .map_or_else(Vec::new, |adapter| adapter.artifact_specs().to_vec());
+        if ignore_tool_mismatch {
+            artifact_specs.push(agents::tool_replay_mcp::IGNORED_EVENTS_SPEC);
+            artifact_specs.push(agents::tool_replay_mcp::IGNORED_PROGRESS_SPEC);
+        }
+        if ignore_mcp_mismatch {
+            artifact_specs.push(agents::mcp_relay::IGNORED_MCP_SPEC);
+        }
         artifact_specs.push(agents::ArtifactSpec {
             namespace: "native-trace",
             filename: "native-trace.jsonl",
             format: agents::ArtifactFormat::JsonLines,
         });
         let artifact_owner = agents::ArtifactOwner::prepare(&run_dir, &artifact_specs)?;
+        if ignore_mcp_mismatch {
+            agents::mcp_relay::initialize_ignored_journal(&run_dir)?;
+        }
         let tool_observation = measurements
             .as_deref_mut()
             .map(measurements::Session::perfetto_tool_observer_context)
@@ -270,12 +284,17 @@ impl NativePlan<'_> {
                         run_dir: &run_dir,
                         mcp_servers: &config.mcp_servers,
                         mcp_tape: mcp_tape_mode.map(|mode| agents::McpTapeContext {
+                            ignore_mcp_mismatch,
                             mode,
                             cassette: mcp_tape_cassette,
                         }),
                         tape: tool_tape_mode
                             .zip(tool_tape_cassette)
-                            .map(|(mode, cassette)| agents::TapeContext { mode, cassette }),
+                            .map(|(mode, cassette)| agents::TapeContext {
+                                ignore_tool_mismatch,
+                                mode,
+                                cassette,
+                            }),
                     },
                 )?;
             }
@@ -529,8 +548,10 @@ mod tests {
                     tape_mode: Some(tape::Mode::Replay),
                     max_steps: None,
                     tool_tape_mode: None,
+                    ignore_tool_mismatch: false,
                     tool_tape_cassette: None,
                     mcp_tape_mode: None,
+                    ignore_mcp_mismatch: false,
                     mcp_tape_cassette: None,
                     native_tool: None,
                 },
@@ -656,8 +677,10 @@ mod tests {
                 tape_mode: Some(tape::Mode::Replay),
                 max_steps: None,
                 tool_tape_mode: None,
+                ignore_tool_mismatch: false,
                 tool_tape_cassette: None,
                 mcp_tape_mode: None,
+                ignore_mcp_mismatch: false,
                 mcp_tape_cassette: None,
                 native_tool: None,
             },

@@ -88,7 +88,10 @@ pub(super) fn verify_current_normalization(
         ));
     }
     for (entry, layout) in plan.entries.iter().zip(&layouts) {
-        if layout.plan.mode == crate::planning::ExecutionMode::Live {
+        if layout.plan.mode == crate::planning::ExecutionMode::Live
+            || (layout.plan.mode == crate::planning::ExecutionMode::Record
+                && layout.plan.normalization_policy.is_none())
+        {
             continue;
         }
         let (root, config) = crate::project::load_for_invocation(

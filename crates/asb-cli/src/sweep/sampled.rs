@@ -27,6 +27,8 @@ struct Winner {
     replay_config: String,
     cassette: String,
     cassette_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    normalization_sha256: Option<String>,
 }
 
 /// A read-only, verified mapping for the ordinary sweep replay engine.
@@ -65,6 +67,10 @@ impl ReadySelection {
                 Path::new(&winner.replay_config).components().next(),
                 &winner.trial,
             )) || !cassette::valid_digest(&winner.cassette_sha256)
+                || winner
+                    .normalization_sha256
+                    .as_deref()
+                    .is_some_and(|value| !cassette::valid_digest(value))
                 || !safe_reference(&winner.replay_config, "toml")
                 || !safe_reference(&winner.cassette, "zip")
             {
@@ -132,9 +138,7 @@ struct Inputs {
     )>,
 }
 
-fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
+fn preparation_root(path: &Path, options: Options<'_>) -> Result<PathBuf, Error> {
     let anchor = project::configuration_anchor(path, options.invocation_dir)?;
     let owner = anchor.parent().unwrap_or_else(|| Path::new("."));
     let stem = path
@@ -142,6 +146,21 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("sweep");
+    Ok(owner.join(format!(".{stem}-sample-preparation")))
+}
+
+pub(crate) fn has_preparation(path: &Path, options: Options<'_>) -> Result<bool, Error> {
+    let root = preparation_root(path, options)?;
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(crate::io_error(error)),
+    }
+}
+
+fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
     let plan = plan::build_at(parent, sweep, base)?;
     let templates =
         plan::sampled_templates(sweep, plan.entries.iter().map(|entry| &entry.configuration))?;
@@ -189,7 +208,7 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
     digest.update((entries.len() as u64).to_le_bytes());
     digest.update(entries);
     Ok(Inputs {
-        root: owner.join(format!(".{stem}-sample-preparation")),
+        root: preparation_root(path, options)?,
         sweep_digest: format!("{:x}", digest.finalize()),
         groups,
     })
@@ -243,8 +262,9 @@ pub(crate) fn resolve(
         .map_err(|error| {
             Error::Input(format!("sampled replay evidence is unavailable: {error}"))
         })?;
-        append_winners(&mut expected, &group_name, &config, &state);
+        append_winners(&mut expected, &group_name, &config, &state, path, options)?;
     }
+    ensure_policy_unchanged(&ready.winners, &expected)?;
     if expected != ready.winners {
         return Err(Error::Input(
             "sampled replay selection does not match the completed group ledgers".into(),
@@ -271,12 +291,39 @@ fn append_winners(
     group_name: &str,
     config: &crate::benchmark::BenchmarkConfig,
     state: &cassette::BoundTrialPreparation,
-) {
+    path: &Path,
+    options: Options<'_>,
+) -> Result<(), Error> {
+    let base = options.invocation_dir.unwrap_or_else(|| Path::new("."));
+    let (project_root, settings) = project::load_for_invocation(path, Some(base))?;
+    let directory = project::environment_path("ASB_WORKLOAD_DIR", base)
+        .unwrap_or_else(|| project::resolve(&project_root, &settings.workloads_dir));
+    let catalog = if settings.replay.is_empty() {
+        None
+    } else {
+        crate::workloads::planning_catalog(&config.workload, &directory).map_err(Error::Input)?
+    };
     for (trial, digest) in state.preparation().successful() {
         let candidate = format!(
             "{group_name}/candidates/candidate-{}",
             cassette::digest(trial.as_bytes())
         );
+        let normalization_sha256 = if settings.replay.is_empty() {
+            None
+        } else {
+            let mut selected = config.clone();
+            if selected.trial.is_some() {
+                selected.trial = Some(trial.to_owned());
+            }
+            let selection =
+                crate::workloads::describe_selection(&selected, &directory, catalog.as_ref())
+                    .map_err(Error::Input)?;
+            let policy = settings
+                .replay
+                .freeze_for_task(&project_root, &selected.agent, &selection)
+                .map_err(Error::Input)?;
+            (!policy.normalizers.is_empty()).then_some(policy.sha256)
+        };
         winners.push(Winner {
             workload: config.workload.clone(),
             agent: config.agent.clone(),
@@ -286,8 +333,21 @@ fn append_winners(
             replay_config: format!("{candidate}/replay.toml"),
             cassette: format!("{candidate}/recording.asb.zip"),
             cassette_sha256: digest.to_owned(),
+            normalization_sha256,
         });
     }
+    Ok(())
+}
+
+fn ensure_policy_unchanged(existing: &[Winner], expected: &[Winner]) -> Result<(), Error> {
+    for (saved, current) in existing.iter().zip(expected) {
+        if saved.replay_config == current.replay_config
+            && saved.normalization_sha256 != current.normalization_sha256
+        {
+            return Err(Error::Input("prepared replay normalization policy changed; preserve its evidence and create and prepare a new sweep".into()));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn prepare(
@@ -346,7 +406,7 @@ pub(super) fn prepare(
         )
         .map_err(|error| Error::Run(format!("sampled workload `{}`: {error}", config.workload)))?;
         let count = state.preparation().successful().len();
-        append_winners(&mut winners, &group_name, &config, &state);
+        append_winners(&mut winners, &group_name, &config, &state, path, options)?;
         if options.json {
             writeln!(output, "{}", serde_json::json!({"type":"sample-prepared","workload":config.workload,"agent":config.agent,"provider":config.provider,"model":config.model,"qualified":count})).map_err(crate::io_error)?;
         } else {
@@ -365,12 +425,18 @@ pub(super) fn prepare(
         winners,
     };
     ready.validate()?;
+    let ready_path = root.join("ready.json");
+    if ready_path.exists() {
+        let existing = read_ready(&ready_path).map_err(|_| Error::Input(
+            "existing sampled replay selection differs; preserve its evidence and create a new sweep".into()
+        ))?;
+        ensure_policy_unchanged(&existing.winners, &ready.winners)?;
+    }
     publish_cassette_aliases(&root, &ready)?;
     let mut bytes = BoundedReady(Vec::new());
     serde_json::to_writer(&mut bytes, &ready).map_err(|_| {
         Error::Input("sampled replay selection exceeds 16 MiB or cannot be encoded".into())
     })?;
-    let ready_path = root.join("ready.json");
     let _created = crate::config::matrix::scalar_if_absent(&ready_path, &bytes.0)?;
     if read_ready(&ready_path).ok().as_ref() != Some(&ready) {
         return Err(Error::Input("existing sampled replay selection differs; preserve its evidence and create a new sweep".into()));
@@ -534,6 +600,7 @@ mod tests {
                 replay_config: "group/candidate/replay.toml".into(),
                 cassette: "group/candidate/recording.zip".into(),
                 cassette_sha256: "b".repeat(64),
+                normalization_sha256: None,
             }],
         }
     }
@@ -546,6 +613,9 @@ mod tests {
         assert!(value.validate().is_err());
         value = ready();
         value.winners[0].cassette_sha256 = "not-a-digest".into();
+        assert!(value.validate().is_err());
+        value = ready();
+        value.winners[0].normalization_sha256 = Some("not-a-digest".into());
         assert!(value.validate().is_err());
         value = ready();
         let mut distinct: Winner =

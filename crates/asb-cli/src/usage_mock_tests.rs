@@ -323,6 +323,7 @@ fn mini_swe_trajectory_counts_each_response_once() {
         crate::agents::find("mini-swe")
             .unwrap()
             .collect(&crate::agents::CollectionContext {
+                ignore_tool_mismatch: false,
                 provider_capture: None,
                 frozen: &crate::agents::FrozenArtifacts::for_test(
                     "trajectory.json",

@@ -223,17 +223,16 @@ async function replayResponse(response, interaction) {
   // recording workspace path. Materialize the current run's canonical path
   // before replay so agents never execute commands in the record directory.
   const workspace = process.env.ASB_TAPE_WORKSPACE;
-  const originalBody = workspace && interaction.asb_request_policy === 3 && interaction.recorded_workspace
-    ? normalizeRecordedResponse(interaction.response.body || "", interaction.recorded_workspace)
-    : interaction.response.body || "";
-  const body = workspace
-    ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
-        originalBody,
-        "<asb-workspace>",
-        workspace,
-        true,
-      ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
-    : originalBody;
+  const originalBody = interaction.response.body || "";
+  const body = interaction.asb_request_policy === 3
+    ? (workspace && interaction.recorded_workspace
+        ? normalizeRecordedResponse(originalBody, interaction.recorded_workspace, workspace)
+        : originalBody)
+    : (workspace
+        ? replaceExactWorkspace(normalizeOpenAiSseWorkspacePaths(normalizeSseWorkspaceFragments(
+            originalBody, "<asb-workspace>", workspace, true,
+          ), "<asb-workspace>", workspace, true), "<asb-workspace>", workspace)
+        : originalBody);
   // Request matching intentionally redacts provider-generated tool-call IDs,
   // but Claude requires IDs to be unique across turns. Give each replayed
   // response a fresh local ID without changing the cassette evidence.
@@ -326,8 +325,7 @@ function normalizeRequestBody(url, body) {
 // Preserve provider response content exactly, apart from workspace paths that
 // must point into the replay replica. Request canonicalization is only for
 // matching and must never rewrite dates, UUIDs or other model-generated data.
-function normalizeRecordedResponse(body, workspace) {
-  const marker = "<asb-workspace>";
+function normalizeRecordedResponse(body, workspace, marker) {
   // JSON may escape slashes, so rewrite decoded string values before
   // serializing rather than relying on bytewise path matching.
   try {

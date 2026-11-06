@@ -190,6 +190,19 @@ back into the owning extension.
 
 ### Ignoring specific completed-attempt failures
 
+`--ignore-compatibility` opts into an approximate replay when the cassette's
+recorded agent, provider, model, workload, task, prompt, dataset, prepared
+material or protocol identity differs from the actual prepared execution.
+ASB reports each differing field name in an immediate warning and in the
+retained run and measurement evidence; comparison JSON and HTML mark the
+result approximate. The recorded identity remains in the campaign plan and
+the actual identity is published as prepared evidence. All replicas and
+subsequent batches must still agree on their actual prepared identity. Resume
+requires the same option. This option does not choose or manufacture missing
+recorded responses, override source integrity checks, or relax errors from
+another class. A changed normalization-policy identity still requires a raw
+policy-3 recording, as checked by replay staging before agent launch.
+
 For exploratory replay, `asb run --replay --ignore-evaluation CONFIG` and
 `asb sweep --replay --ignore-evaluation SWEEP` allow an unresolved workload
 or a grader error to be reported without failing the command solely for that
@@ -220,8 +233,8 @@ their workspace even if compact retention is enabled. Repeated campaign and
 sweep plans freeze these choices; resume requires the original sweep choices.
 
 These flags cover only failures observed after an attempt reaches a disposition.
-They cannot manufacture missing or corrupt cassette data, turn a rejected
-provider/tool request into a valid recorded response, recover an agent that
+They cannot manufacture missing or corrupt cassette data, validate an
+approximate provider/tool response as equivalent, recover an agent that
 cannot start, or establish missing resource cleanup or required run and summary evidence.
 Such independent failures still fail the command. ASB does not contact a live
 provider to replace a missing replay response.
@@ -245,3 +258,31 @@ consumed and total counts as an ignored warning, marks that attempt approximate,
 and does not claim verified cassette usage. It does not ignore an independently
 failed evaluation, a rejected request, or an attempt to request an exchange past
 the end of the cassette. This choice is also frozen for campaign and sweep resume.
+
+`--ignore-tool-mismatch` permits the semantic local-tool replayer to use its
+next recorded event when the requested tool name matches but arguments differ.
+It also permits a valid tool progress receipt with recorded events left unused.
+Every ignored event is persisted as a warning with its event index or argument
+digests; the run is marked approximate and replay-derived usage is unverified.
+The recorded event's workspace effects are applied as recorded, which can
+differ from what the new arguments request. Unused events have no effects.
+The option never runs an unrecorded tool, substitutes a different tool's
+response, ignores invalid or escaping effects, or manufactures an exhausted
+transcript. Transparent MCP relay and native snapshot replay are separate
+transports and are not covered. This policy is frozen in sweep and campaign
+plans and must match on resume.
+
+`--ignore-mcp-mismatch` enables transparent MCP replay for a cassette recorded
+with `--mcp-record`, and permits a client
+request with changed arguments only when the JSON-RPC method, message kind,
+framing and, for `tools/call`, tool name still match. ASB returns the recorded
+response with the current request ID, writes bounded digest-only divergence
+evidence, warns, and marks the result approximate. A clean client EOF may leave
+recorded client messages unused only when all issued requests were answered;
+the remaining count is reported. Each declared server must report a settled
+relay session so ASB can distinguish an unused server from lost evidence. A
+missing or unsettled relay session, invalid
+payload, changed tool or method, unrecorded extra request, or missing response
+remains fatal. The option never starts the live MCP server during replay, and
+does not reproduce external server side effects. Repeated-campaign and sweep
+plans freeze the policy for resume.

@@ -28,6 +28,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     source: include_str!("../../../assets/scripts/agent-normalizers/claude-code.mjs"),
 }])
 .with_tool_replay(prepare_tool_replay)
+.with_approximate_local_tool_replay()
 .with_native_tool_transport()
 .with_preferred_native_snapshot_recording()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
@@ -878,6 +879,7 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         };
         let cassette = root.join("recording.zip");
         let tape = super::super::TapeContext {
+            ignore_tool_mismatch: false,
             mode: crate::tape::Mode::Replay,
             cassette: &cassette,
         };
@@ -960,6 +962,7 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         };
         let cassette = root.join("recording.zip");
         let tape = super::super::TapeContext {
+            ignore_tool_mismatch: false,
             mode: crate::tape::Mode::Record,
             cassette: &cassette,
         };
@@ -1033,6 +1036,7 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
         };
         let mut command = std::process::Command::new("claude");
         let tape = super::super::TapeContext {
+            ignore_tool_mismatch: false,
             mode: crate::tape::Mode::Record,
             cassette: &root.join("recording.asb.zip"),
         };
@@ -1197,6 +1201,7 @@ if (normalizeRequest(altered).system[0].text === a.system[0].text) throw Error('
             run_dir: &root.join("run"),
             mcp_servers: &declarations,
             mcp_tape: Some(super::super::McpTapeContext {
+                ignore_mcp_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: None,
             }),

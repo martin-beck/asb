@@ -152,7 +152,15 @@ impl Request {
         // Reopen the exact prepared winner set when reporting a sampled replay.
         // Resolving validates the retained ledgers and archives and never records.
         let plan_path = sweep_results.join("plan.json");
-        let sampled_replay = !sweep.sampled_trials.is_empty()
+        let may_be_prepared = !sweep.sampled_trials.is_empty()
+            || crate::sweep::sampled::has_preparation(
+                sweep_path,
+                crate::sweep::Options {
+                    invocation_dir: invocation.or(Some(output_parent)),
+                    ..Default::default()
+                },
+            )?;
+        let sampled_replay = may_be_prepared
             && match fs::symlink_metadata(&plan_path) {
                 Ok(_) => {
                     let text = read_text_limit(
@@ -162,7 +170,24 @@ impl Request {
                     )?;
                     let value: Value = serde_json::from_str(&text)
                         .map_err(|error| Error::Input(format!("invalid sweep plan: {error}")))?;
-                    value.get("execution_mode").and_then(Value::as_str) == Some("replay")
+                    let replay =
+                        value.get("execution_mode").and_then(Value::as_str) == Some("replay");
+                    let references =
+                        value
+                            .get("entries")
+                            .and_then(Value::as_array)
+                            .map(|entries| {
+                                entries
+                                    .iter()
+                                    .filter_map(|entry| {
+                                        entry.get("reference").and_then(Value::as_str)
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                    let originals = sweep.configs.iter().map(String::as_str).collect::<Vec<_>>();
+                    replay
+                        && (!sweep.sampled_trials.is_empty()
+                            || references.is_some_and(|refs| refs != originals))
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => {
@@ -632,6 +657,7 @@ fn load_attempt(
             |selection| selection.evaluation_kind.clone(),
         );
         return Ok(BenchmarkData {
+            approximate_replay: false,
             replay_selection: None,
             native_replay_consumed: None,
             execution: None,
@@ -924,6 +950,16 @@ fn load_attempt(
         ));
     }
     Ok(BenchmarkData {
+        approximate_replay: run_value["approximate_replay"] == true
+            || run_value["ignored_failures"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "replay_compatibility"
+                            && event["ignored"] == true
+                            && event["severity"] == "warning"
+                    })
+                }),
         replay_selection,
         native_replay_consumed: if grade_only_closed
             || outcome.is_some_and(|record| record.source == "imported-official-grade")
@@ -1379,6 +1415,7 @@ mod pricing_tests {
         pricing_fixture(|root| {
             std::fs::write(root.join("openrouter-pricing.json"), r#"{"schema_version":1,"provider":"openrouter","models":{"fixture":{"prompt":"0.000002","completion":"0.000004"}}}"#).unwrap();
             let make_row = |provider: &str| BenchmarkData {
+                approximate_replay: false,
                 replay_selection: None,
                 native_replay_consumed: None,
                 planned_normalization_policy: None,

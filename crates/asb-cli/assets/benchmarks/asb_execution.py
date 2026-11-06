@@ -221,7 +221,7 @@ class ManagedDockerWorkspace:
         return workspace
 
     def __init__(self, client, image, attempt, workdir, memory_bytes=4 * 1024**3,
-                 cpus=2, pids=512, journal=None, snapshot=False, snapshot_storage=None):
+                 cpus=2, pids=512, journal=None, snapshot=False, snapshot_storage=None, offline=False):
         if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
             raise ExecutionError("workspace requires a unique ASB attempt identity")
         if not isinstance(workdir, str) or not workdir.startswith("/") or "\x00" in workdir:
@@ -232,6 +232,7 @@ class ManagedDockerWorkspace:
             raise ExecutionError("workspace image must resolve to a content identity")
         self.client, self.image, self.attempt, self.workdir = client, image, attempt, workdir
         self.snapshot = snapshot
+        self.offline = offline
         self.snapshot_storage = Path(snapshot_storage).absolute() if snapshot_storage is not None else None
         self.limits = {"memory_bytes": memory_bytes, "cpus": cpus, "pids": pids}
         self.container = None
@@ -256,6 +257,8 @@ class ManagedDockerWorkspace:
             mem_limit=self.limits["memory_bytes"], nano_cpus=int(self.limits["cpus"] * 10**9),
             pids_limit=self.limits["pids"],
         )
+        if self.offline:
+            creation["network_mode"] = "none"
         if self.snapshot:
             # Experimental isolated container backend; ordinary workloads
             # retain their existing container configuration.

@@ -111,6 +111,9 @@ pub(crate) struct Options<'a> {
     pub ignore_collector: bool,
     pub ignore_provider_mismatch: bool,
     pub ignore_provider_unconsumed: bool,
+    pub ignore_tool_mismatch: bool,
+    pub ignore_mcp_mismatch: bool,
+    pub ignore_compatibility: bool,
     pub cassette_root: Option<&'a Path>,
     pub jobs: usize,
     pub max_active_attempts: Option<usize>,
@@ -148,6 +151,9 @@ impl Default for Options<'_> {
             ignore_collector: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
+            ignore_tool_mismatch: false,
+            ignore_mcp_mismatch: false,
+            ignore_compatibility: false,
             cassette_root: None,
             jobs: 1,
             max_active_attempts: None,
@@ -204,11 +210,6 @@ pub(crate) fn run_with_options(
     }
     let sweep_path = Path::new(path);
     let mut sweep = read_manifest(sweep_path)?;
-    if options.prepare_replay && sweep.sampled_trials.is_empty() {
-        return Err(Error::Input(
-            "--prepare-replay requires a sweep created with --trial-count".into(),
-        ));
-    }
     if options.prepare_replay {
         return sampled::prepare(sweep_path, &sweep, options, output);
     }
@@ -226,7 +227,12 @@ pub(crate) fn run_with_options(
         .unwrap_or("sweep");
     // Keep ownership through comparison, including moving older output trees.
     let _output_lock = lock::OutputLock::acquire_for_source(output_parent, stem, sweep_path)?;
-    let resolved = if !sweep.sampled_trials.is_empty() && mode == Some(crate::tape::Mode::Replay) {
+    let prepared_fixed = mode == Some(crate::tape::Mode::Replay)
+        && options.cassette_root.is_none()
+        && sampled::has_preparation(sweep_path, options)?;
+    let resolved = if (!sweep.sampled_trials.is_empty() || prepared_fixed)
+        && mode == Some(crate::tape::Mode::Replay)
+    {
         if options.cassette_root.is_some() {
             return Err(Error::Input(
                 "sampled replay uses its verified prepared cassettes; omit --cassette-root".into(),

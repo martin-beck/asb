@@ -202,6 +202,9 @@ impl Execution<'_> {
                 ignore_collector: self.options.ignore_collector,
                 ignore_provider_mismatch: self.options.ignore_provider_mismatch,
                 ignore_provider_unconsumed: self.options.ignore_provider_unconsumed,
+                ignore_tool_mismatch: self.options.ignore_tool_mismatch,
+                ignore_mcp_mismatch: self.options.ignore_mcp_mismatch,
+                ignore_compatibility: self.options.ignore_compatibility,
                 requirements_prepared: !self.options.resume,
                 architecture_confirmed: true,
                 on_completion: observer

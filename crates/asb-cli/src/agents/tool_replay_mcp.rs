@@ -52,6 +52,18 @@ const LEGACY_LOCAL_TOOL_PROTOCOLS: &[&str] = &[
     "asb-local-tools-v6-agent-deadline",
 ];
 const TOOL_PROTOCOL_ARTIFACT: &str = "tool-protocol";
+pub(crate) const IGNORED_EVENTS_FILENAME: &str = "ignored-tool-replay.jsonl";
+pub(crate) const IGNORED_PROGRESS_FILENAME: &str = "ignored-tool-progress.json";
+pub(crate) const IGNORED_EVENTS_SPEC: super::ArtifactSpec = super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: IGNORED_EVENTS_FILENAME,
+    format: super::ArtifactFormat::JsonLines,
+};
+pub(crate) const IGNORED_PROGRESS_SPEC: super::ArtifactSpec = super::ArtifactSpec {
+    namespace: "tool-replay",
+    filename: IGNORED_PROGRESS_FILENAME,
+    format: super::ArtifactFormat::Json,
+};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +102,7 @@ struct Options {
     /// request parameters, tool arguments and tool results never enter it.
     metadata_trace: Option<PathBuf>,
     allow_commuted_observations: bool,
+    ignored_events: Option<PathBuf>,
 }
 
 /// A restarted client may briefly overlap its old and new stdio MCP children.
@@ -135,6 +148,8 @@ struct PerCallState {
     schema_version: u32,
     cursor: usize,
     events: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pending: bool,
 }
 
 const PER_CALL_STATE_SCHEMA_VERSION: u32 = 1;
@@ -185,7 +200,7 @@ pub(crate) fn launch(
         ));
     }
     let program = runtime_program(std::env::var_os("ASB_RUNTIME_EXECUTABLE"))?;
-    Ok(Launch {
+    let mut launch = Launch {
         program,
         args: vec![
             "__asb-tool-replay".into(),
@@ -197,9 +212,46 @@ pub(crate) fn launch(
             "--workspace".into(),
             context.workspace.as_os_str().to_owned(),
             "--transcript".into(),
-            transcript.into_os_string(),
+            transcript.as_os_str().to_owned(),
         ],
-    })
+    };
+    if tape.ignore_tool_mismatch {
+        if tape.mode != crate::tape::Mode::Replay {
+            return Err(Error::Input(
+                "local-tool mismatch policy requires replay".into(),
+            ));
+        }
+        let journal = context
+            .run_dir
+            .join("tool-replay")
+            .join(IGNORED_EVENTS_FILENAME);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&journal)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| {
+                Error::Run("cannot initialize local-tool replay divergence journal".into())
+            })?;
+        launch
+            .args
+            .extend(["--ignored-events".into(), journal.into_os_string()]);
+        let state = context
+            .run_dir
+            .join("tool-replay")
+            .join(IGNORED_PROGRESS_FILENAME);
+        let events = Transcript::decode(&fs::read(&transcript).map_err(crate::io_error)?)?.len();
+        publish_per_call_state(&state, 0, events)?;
+        launch
+            .args
+            .extend(["--per-call-state".into(), state.into_os_string()]);
+    }
+    Ok(launch)
 }
 
 /// Bind an adapter's recorded provider request shape to the exact local-tool
@@ -345,6 +397,61 @@ pub(crate) fn verify_persistent_per_call_completion_receipt(
     verify_per_call_completion_receipt(receipt, transcript)
 }
 
+/// Identify a valid partial receipt without treating malformed or missing
+/// progress as a harmless unconsumed-event warning.
+pub(crate) fn ignored_persistent_completion(
+    receipt: Option<&serde_json::Value>,
+    transcript: Option<&[u8]>,
+) -> Result<Option<tool_replay::IgnoredToolMismatch>, Error> {
+    let state = match receipt {
+        Some(value) => read_per_call_state_value(value)?,
+        None if transcript.is_none() => return Ok(None),
+        None => return Err(Error::Run("local-tool progress is missing".into())),
+    };
+    if state.cursor > state.events || state.pending {
+        return Err(Error::Run(
+            "local-tool progress exceeds its transcript".into(),
+        ));
+    }
+    if let Some(bytes) = transcript
+        && Transcript::decode(bytes)?.len() != state.events
+    {
+        return Err(Error::Run(
+            "local-tool progress differs from its transcript".into(),
+        ));
+    }
+    Ok(
+        (state.cursor < state.events).then_some(tool_replay::IgnoredToolMismatch::Unconsumed {
+            next_index: state.cursor,
+            count: state.events - state.cursor,
+        }),
+    )
+}
+
+pub(crate) fn collect_persistent_completion(
+    context: &super::CollectionContext<'_>,
+    filename: &str,
+) -> super::AgentArtifacts {
+    let receipt = context.frozen.document(filename);
+    let transcript = context.frozen.bytes("local-tools.jsonl");
+    let result = if context.ignore_tool_mismatch {
+        ignored_persistent_completion(receipt, transcript)
+    } else {
+        verify_persistent_per_call_completion_receipt(receipt, transcript).map(|()| None)
+    };
+    match result {
+        Ok(Some(event)) => super::AgentArtifacts {
+            ignored_tool_mismatches: vec![event],
+            ..Default::default()
+        },
+        Ok(None) => super::AgentArtifacts::default(),
+        Err(error) => super::AgentArtifacts {
+            errors: vec![error.to_string()],
+            ..Default::default()
+        },
+    }
+}
+
 fn verify_per_call_completion_receipt(
     receipt: Option<PerCallState>,
     transcript: Option<&[u8]>,
@@ -352,6 +459,9 @@ fn verify_per_call_completion_receipt(
     match (receipt, transcript) {
         (None, None) => Ok(()),
         (None, Some(_)) => Err(Error::Run("local-tool progress is missing".into())),
+        (Some(state), _) if state.pending || state.cursor > state.events => Err(Error::Run(
+            "local-tool replay did not settle its pending call".into(),
+        )),
         (Some(state), None) => (state.cursor == state.events)
             .then_some(())
             .ok_or_else(|| Error::Run("local-tool replay left recorded events unconsumed".into())),
@@ -466,6 +576,7 @@ impl MessageSource for ChannelSource {
 
 fn defer_request(options: &Options, transcript: &Transcript, request: &Value) -> bool {
     if options.mode != Mode::Replay
+        || options.ignored_events.is_some()
         || options.per_call_state.is_some()
         || request.get("id").is_none()
         || request.get("method").and_then(Value::as_str) != Some("tools/call")
@@ -534,7 +645,7 @@ fn run_with_source(
     };
     if let Some(state) = &options.per_call_state {
         let state = read_per_call_state(state)?;
-        if state.events != transcript.len() {
+        if state.events != transcript.len() || state.pending {
             return Err(Error::Run(
                 "local-tool per-call progress does not bind its transcript".into(),
             ));
@@ -556,6 +667,19 @@ fn run_with_source(
             } else {
                 if ended {
                     break;
+                }
+                if options.mode == Mode::Replay
+                    && options.ignored_events.is_some()
+                    && let Some(state) = &options.per_call_state
+                {
+                    // A framing or read failure must not be mistaken for a
+                    // harmless unconsumed event if the client hides it.
+                    publish_per_call_state_pending(
+                        state,
+                        transcript.cursor(),
+                        transcript.len(),
+                        true,
+                    )?;
                 }
                 let request = match source.next()? {
                     Incoming::Message(request) => request,
@@ -585,6 +709,13 @@ fn run_with_source(
             let tool_call =
                 request.value.get("method").and_then(Value::as_str) == Some("tools/call");
             let tool_observation = tool_call.then(|| observation.begin("mcp")).flatten();
+            if tool_call
+                && options.mode == Mode::Replay
+                && options.ignored_events.is_some()
+                && let Some(state) = &options.per_call_state
+            {
+                publish_per_call_state_pending(state, transcript.cursor(), transcript.len(), true)?;
+            }
             let response = match respond(&options, &mut transcript, &request.value) {
                 Ok(response) => response,
                 Err(error) => {
@@ -633,10 +764,20 @@ fn run_with_source(
         Mode::Record => {
             publish_record_transcript(&options.transcript, &transcript)?;
         }
-        Mode::Replay if options.per_call_state.is_none() => transcript.finish()?,
+        Mode::Replay if options.per_call_state.is_none() => {
+            if let (Some(path), Some(event)) =
+                (&options.ignored_events, transcript.ignored_unconsumed())
+            {
+                journal_ignored(path, &event)?;
+            } else {
+                transcript.finish()?;
+            }
+        }
         Mode::Replay => {}
     };
-    if let Some(state) = &options.per_call_state {
+    if let Some(state) = &options.per_call_state
+        && (operation.is_ok() || options.ignored_events.is_none())
+    {
         let cursor = match options.mode {
             // Recording appends one event per short-lived service process;
             // its progress is the sealed transcript length rather than the
@@ -686,6 +827,15 @@ fn read_per_call_state_value(value: &serde_json::Value) -> Result<PerCallState, 
 }
 
 fn publish_per_call_state(path: &Path, cursor: usize, events: usize) -> Result<(), Error> {
+    publish_per_call_state_pending(path, cursor, events, false)
+}
+
+fn publish_per_call_state_pending(
+    path: &Path,
+    cursor: usize,
+    events: usize,
+    pending: bool,
+) -> Result<(), Error> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::Run("local-tool progress has no private namespace".into()))?;
@@ -695,6 +845,7 @@ fn publish_per_call_state(path: &Path, cursor: usize, events: usize) -> Result<(
         schema_version: PER_CALL_STATE_SCHEMA_VERSION,
         cursor,
         events,
+        pending,
     })
     .map_err(|_| Error::Run("cannot render local-tool per-call progress".into()))?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
@@ -757,6 +908,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
     let mut per_call_state = None;
     let mut metadata_trace = None;
     let mut allow_commuted_observations = false;
+    let mut ignored_events = None;
     let mut values = args.iter();
     while let Some(flag) = values.next() {
         if flag == "--allow-commuted-observations" {
@@ -778,11 +930,18 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
             "--transcript" => transcript = Some(PathBuf::from(value)),
             "--per-call-state" => per_call_state = Some(PathBuf::from(value)),
             "--metadata-trace" => metadata_trace = Some(PathBuf::from(value)),
+            "--ignored-events" => ignored_events = Some(PathBuf::from(value)),
             _ => return Err(Error::Input("invalid local-tool MCP arguments".into())),
         }
     }
+    let mode = mode.ok_or_else(|| Error::Input("local-tool MCP mode is required".into()))?;
+    if ignored_events.is_some() && mode != Mode::Replay {
+        return Err(Error::Input(
+            "local-tool divergence journal requires replay".into(),
+        ));
+    }
     Ok(Options {
-        mode: mode.ok_or_else(|| Error::Input("local-tool MCP mode is required".into()))?,
+        mode,
         workspace: workspace
             .ok_or_else(|| Error::Input("local-tool MCP workspace is required".into()))?,
         transcript: transcript
@@ -790,6 +949,7 @@ fn options(args: &[OsString]) -> Result<Options, Error> {
         per_call_state,
         metadata_trace,
         allow_commuted_observations,
+        ignored_events,
     })
 }
 
@@ -932,26 +1092,38 @@ fn respond(
             {"name":"create_directory","description":"Create a directory inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},
             {"name":"remove_file","description":"Remove a file inside the benchmark workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}
         ]}),
-        "tools/call" => match call(
-            options,
-            transcript,
-            request.get("params").cloned().unwrap_or(Value::Null),
-        ) {
-            Ok(result) => result,
-            // A tool can legitimately fail (for example, the first test run
-            // of a bug-fix task).  Preserve that failure in the sealed
-            // transcript, but return it through MCP rather than terminating
-            // the server.  Clients such as WorkBuddy otherwise lose their
-            // stdio connection and cannot issue the follow-up inspection and
-            // repair calls that make a record/replay attempt useful.
-            Err(error) => {
-                return Ok(Some(json!({
-                    "jsonrpc":"2.0",
-                    "id":id,
-                    "error":{"code":-32000,"message":error.to_string()},
-                })));
+        "tools/call" => {
+            let before = transcript.cursor();
+            match call(
+                options,
+                transcript,
+                request.get("params").cloned().unwrap_or(Value::Null),
+            ) {
+                Ok(result) => result,
+                // A tool can legitimately fail (for example, the first test run
+                // of a bug-fix task).  Preserve that failure in the sealed
+                // transcript, but return it through MCP rather than terminating
+                // the server.  Clients such as WorkBuddy otherwise lose their
+                // stdio connection and cannot issue the follow-up inspection and
+                // repair calls that make a record/replay attempt useful.
+                Err(error) => {
+                    if options.mode == Mode::Replay
+                        && options.ignored_events.is_some()
+                        && transcript.cursor() == before
+                    {
+                        if let Some(path) = &options.ignored_events {
+                            journal_ignored(path, &tool_replay::IgnoredToolMismatch::Fatal)?;
+                        }
+                        return Err(error);
+                    }
+                    return Ok(Some(json!({
+                        "jsonrpc":"2.0",
+                        "id":id,
+                        "error":{"code":-32000,"message":error.to_string()},
+                    })));
+                }
             }
-        },
+        }
         _ => {
             return Ok(Some(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"method unavailable"}}),
@@ -972,11 +1144,19 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
         .unwrap_or_else(|| json!({}));
     let request = canonical_request(tool, request)?;
     let result = if options.mode == Mode::Replay {
-        transcript.replay_with_commuted_observations(
+        let mut journal = |event: &tool_replay::IgnoredToolMismatch| {
+            journal_ignored(options.ignored_events.as_ref().expect("enabled"), event)
+        };
+        let journal = options
+            .ignored_events
+            .as_ref()
+            .map(|_| &mut journal as &mut tool_replay::MismatchJournal<'_>);
+        transcript.replay_with_policy(
             &options.workspace,
             tool,
             &request,
             options.allow_commuted_observations,
+            journal,
         )?
     } else {
         let recorded = match execute(&options.workspace, tool, &request) {
@@ -1018,6 +1198,39 @@ fn call(options: &Options, transcript: &mut Transcript, params: Value) -> Result
         "structuredContent": result,
         "isError": false,
     }))
+}
+
+/// The private journal is a bounded evidence file, never an alternative
+/// transcript. Persist before applying approximate effects or returning data.
+fn journal_ignored(path: &Path, event: &tool_replay::IgnoredToolMismatch) -> Result<(), Error> {
+    const MAX_JOURNAL_BYTES: u64 = 256 * 1024;
+    let mut options = fs::OpenOptions::new();
+    options.append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| Error::Run("cannot open local-tool replay divergence journal".into()))?;
+    let metadata = file.metadata().map_err(crate::io_error)?;
+    if !metadata.is_file() || metadata.len() > MAX_JOURNAL_BYTES {
+        return Err(Error::Run(
+            "local-tool replay divergence journal is invalid or full".into(),
+        ));
+    }
+    let mut bytes = serde_json::to_vec(event)
+        .map_err(|_| Error::Run("cannot encode local-tool replay divergence".into()))?;
+    bytes.push(b'\n');
+    if metadata.len() + bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err(Error::Run(
+            "local-tool replay divergence journal is full".into(),
+        ));
+    }
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| Error::Run("cannot persist local-tool replay divergence".into()))
 }
 
 /// Failure turns are sealed only when they are already small, single-line
@@ -1543,6 +1756,7 @@ mod tests {
                 transcript,
                 per_call_state: None,
                 metadata_trace: None,
+                ignored_events: None,
                 allow_commuted_observations: false,
             },
             &mut input,
@@ -1579,6 +1793,7 @@ mod tests {
                 transcript,
                 per_call_state: None,
                 metadata_trace: Some(trace.clone()),
+                ignored_events: None,
                 allow_commuted_observations: false,
             },
             &mut BufReader::new(input.as_bytes()),
@@ -1681,6 +1896,142 @@ mod tests {
 
         let complete = bounded_read_result("small source".into());
         assert_eq!(complete, json!({"text":"small source","truncated":false}));
+    }
+
+    #[test]
+    fn approximate_service_records_fatal_invalid_effect_and_rejects_it() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-fatal-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "write_file".into(),
+                request: json!({"path":"recorded.txt","content":"old"}),
+                result: json!({"ok":true}),
+                failure: None,
+                effects: vec![Effect::WriteText {
+                    path: "../escape".into(),
+                    content: "bad".into(),
+                }],
+            })
+            .unwrap();
+        let path = root.join("recording.jsonl");
+        let journal = root.join("ignored.jsonl");
+        std::fs::write(&path, transcript.encode().unwrap()).unwrap();
+        std::fs::write(&journal, b"").unwrap();
+        let options = Options {
+            mode: Mode::Replay,
+            workspace: root.clone(),
+            transcript: path,
+            per_call_state: None,
+            metadata_trace: None,
+            ignored_events: Some(journal.clone()),
+            allow_commuted_observations: false,
+        };
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"write_file\",\"arguments\":{\"path\":\"changed.txt\",\"content\":\"new\"}}}\n";
+        assert!(run_with_io(options, &mut BufReader::new(&request[..]), &mut Vec::new()).is_err());
+        let events = std::fs::read_to_string(&journal).unwrap();
+        assert!(events.contains("\"kind\":\"request\""));
+        assert!(events.contains("\"kind\":\"fatal\""));
+        assert!(!root.join("changed.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn approximate_persistent_completion_rejects_unsettled_or_invalid_progress() {
+        assert!(
+            ignored_persistent_completion(
+                Some(&json!({"schema_version":1,"cursor":1,"events":1,"pending":true})),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            ignored_persistent_completion(
+                Some(&json!({"schema_version":1,"cursor":2,"events":1})),
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(
+            ignored_persistent_completion(
+                Some(&json!({"schema_version":1,"cursor":0,"events":1})),
+                None
+            )
+            .unwrap(),
+            Some(tool_replay::IgnoredToolMismatch::Unconsumed {
+                next_index: 0,
+                count: 1
+            })
+        );
+    }
+
+    #[test]
+    fn unavailable_approximation_journal_leaves_pending_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tool-pending-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut transcript = Transcript::default();
+        transcript
+            .record(Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: 1,
+                tool: "write_file".into(),
+                request: json!({"path":"recorded.txt","content":"old"}),
+                result: json!({"ok":true}),
+                failure: None,
+                effects: vec![],
+            })
+            .unwrap();
+        let input = root.join("recording.jsonl");
+        std::fs::write(&input, transcript.encode().unwrap()).unwrap();
+        let state = root.join("state.json");
+        publish_per_call_state(&state, 0, 1).unwrap();
+        let options = Options {
+            mode: Mode::Replay,
+            workspace: root.clone(),
+            transcript: input.clone(),
+            per_call_state: Some(state.clone()),
+            metadata_trace: None,
+            ignored_events: Some(root.join("missing-journal.jsonl")),
+            allow_commuted_observations: false,
+        };
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"write_file\",\"arguments\":{\"path\":\"changed.txt\",\"content\":\"new\"}}}\n";
+        assert!(run_with_io(options, &mut BufReader::new(&request[..]), &mut Vec::new()).is_err());
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(receipt["pending"], true);
+        assert!(ignored_persistent_completion(Some(&receipt), None).is_err());
+        publish_per_call_state(&state, 0, 1).unwrap();
+        let journal = root.join("journal.jsonl");
+        std::fs::write(&journal, b"").unwrap();
+        let options = Options {
+            mode: Mode::Replay,
+            workspace: root.clone(),
+            transcript: input,
+            per_call_state: Some(state.clone()),
+            metadata_trace: None,
+            ignored_events: Some(journal),
+            allow_commuted_observations: false,
+        };
+        assert!(
+            run_with_io(
+                options,
+                &mut BufReader::new(&b"not json\n"[..]),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(receipt["pending"], true);
+        assert!(ignored_persistent_completion(Some(&receipt), None).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1793,6 +2144,7 @@ mod tests {
             transcript: file,
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let requests = concat!(
@@ -1868,6 +2220,7 @@ mod tests {
             transcript: file,
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let request = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"pwd\"]}}}\n";
@@ -2116,6 +2469,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
@@ -2127,6 +2481,7 @@ mod tests {
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let replayed = call(&replay_options, &mut replay, request).unwrap();
@@ -2155,6 +2510,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
@@ -2174,6 +2530,7 @@ mod tests {
             transcript: root.join("replay.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut replayed = Transcript::decode(&bytes).unwrap();
@@ -2206,6 +2563,7 @@ mod tests {
             transcript: transcript.clone(),
             per_call_state: Some(state.clone()),
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut output = Vec::new();
@@ -2235,6 +2593,7 @@ mod tests {
             transcript,
             per_call_state: Some(state.clone()),
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut replay_output = Vec::new();
@@ -2286,6 +2645,7 @@ mod tests {
             transcript: transcript.clone(),
             per_call_state: Some(state.clone()),
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut output = Vec::new();
@@ -2332,6 +2692,7 @@ mod tests {
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
                     metadata_trace: None,
+                    ignored_events: None,
                     allow_commuted_observations: false,
                 },
                 &mut BufReader::new(request),
@@ -2358,6 +2719,7 @@ mod tests {
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
                     metadata_trace: None,
+                    ignored_events: None,
                     allow_commuted_observations: false,
                 },
                 &mut BufReader::new(request),
@@ -2428,6 +2790,7 @@ mod tests {
                     transcript: transcript.clone(),
                     per_call_state: Some(state.clone()),
                     metadata_trace: None,
+                    ignored_events: None,
                     allow_commuted_observations: false,
                 },
                 &mut BufReader::new(request.as_slice()),
@@ -2480,6 +2843,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
@@ -2502,6 +2866,7 @@ mod tests {
                 transcript: replay_root.join("replay.jsonl"),
                 per_call_state: None,
                 metadata_trace: None,
+                ignored_events: None,
                 allow_commuted_observations: false,
             },
             &mut replay,
@@ -2563,6 +2928,7 @@ mod tests {
             transcript: root.join("record.jsonl"),
             per_call_state: None,
             metadata_trace: None,
+            ignored_events: None,
             allow_commuted_observations: false,
         };
         let mut transcript = Transcript::default();
@@ -2580,6 +2946,7 @@ mod tests {
                 transcript: root.join("replay.jsonl"),
                 per_call_state: None,
                 metadata_trace: None,
+                ignored_events: None,
                 allow_commuted_observations: false,
             },
             &mut replay,
@@ -2620,6 +2987,7 @@ mod tests {
                 tape: None,
             },
             TapeContext {
+                ignore_tool_mismatch: false,
                 mode: crate::tape::Mode::Record,
                 cassette: &cassette,
             },
@@ -2708,6 +3076,7 @@ mod tests {
                 tape: None,
             },
             TapeContext {
+                ignore_tool_mismatch: false,
                 mode: crate::tape::Mode::Replay,
                 cassette: &replay,
             },

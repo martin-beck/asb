@@ -105,6 +105,7 @@ pub(crate) struct PreflightContext<'a> {
     pub project_root: &'a Path,
     pub project_config: &'a crate::project::ProjectConfig,
     pub agent: &'a str,
+    pub offline: bool,
 }
 
 impl PreflightContext<'_> {
@@ -1170,6 +1171,7 @@ mod tests {
             project_root: &root,
             project_config: &project,
             agent: "missing-fixture-agent",
+            offline: false,
         };
         // Local tasks neither install remote tools nor require an agent for
         // dependency preparation. No environment/network mutation is needed.

@@ -173,6 +173,9 @@ pub(crate) trait AgentAdapter: Sync {
     fn has_tool_replay_hook(&self) -> bool {
         false
     }
+    fn supports_approximate_local_tool_replay(&self) -> bool {
+        false
+    }
     /// Bind an adapter-private pending native stream to settled workspace data.
     fn finalize_native_recording(
         &self,
@@ -376,12 +379,14 @@ pub(crate) struct PreparationContext<'a> {
 pub(crate) struct TapeContext<'a> {
     pub mode: crate::tape::Mode,
     pub cassette: &'a Path,
+    pub ignore_tool_mismatch: bool,
 }
 
 /// Mode for the protocol-level MCP relay.  The relay has no tool semantics;
 /// adapter configuration supplies it in place of an ordinary stdio server.
 #[derive(Clone, Copy)]
 pub(crate) struct McpTapeContext<'a> {
+    pub ignore_mcp_mismatch: bool,
     pub mode: crate::tape::Mode,
     /// Selected replay payload. Recording owns a new private relay directory;
     /// replay needs the exact staged sidecar that supplied its sealed bundle.
@@ -497,6 +502,8 @@ pub(crate) struct AgentArtifacts {
     /// Fail-closed adapter collection errors. They are retained only as the
     /// run diagnostic; an incomplete relay recording is never publishable.
     pub errors: Vec<String>,
+    /// Approximate local-tool replay observations retained for run reporting.
+    pub ignored_tool_mismatches: Vec<tool_replay::IgnoredToolMismatch>,
 }
 
 /// A named private sidecar supplied by an adapter after an execution settles.
@@ -521,6 +528,7 @@ pub(crate) struct CollectionContext<'a> {
     pub anthropic_input_includes_cache: bool,
     pub mcp_servers: &'a [crate::benchmark::McpServerConfig],
     pub mcp_tape: Option<McpTapeContext<'a>>,
+    pub ignore_tool_mismatch: bool,
 }
 
 pub(super) fn read_usage_document(path: &Path) -> Option<serde_json::Value> {
@@ -646,6 +654,7 @@ pub(super) struct StaticAdapter {
     command: CommandBuilder,
     prepare: PreparationHook,
     tool_replay: Option<ToolReplayHook>,
+    approximate_local_tool_replay: bool,
     mcp_servers: bool,
     mcp_relay: bool,
     native_tool_transport: bool,
@@ -705,6 +714,7 @@ impl StaticAdapter {
             command,
             prepare,
             tool_replay: None,
+            approximate_local_tool_replay: false,
             mcp_servers: false,
             mcp_relay: false,
             native_tool_transport: false,
@@ -774,6 +784,11 @@ impl StaticAdapter {
     pub(super) const fn with_tool_replay(mut self, hook: ToolReplayHook) -> Self {
         self.tool_replay = Some(hook);
         self.replay_artifacts = Some(adapters::replay_artifacts::collect_local_tool_transcript);
+        self
+    }
+
+    pub(super) const fn with_approximate_local_tool_replay(mut self) -> Self {
+        self.approximate_local_tool_replay = true;
         self
     }
 
@@ -1099,6 +1114,9 @@ impl AgentAdapter for StaticAdapter {
     }
     fn has_tool_replay_hook(&self) -> bool {
         self.tool_replay.is_some()
+    }
+    fn supports_approximate_local_tool_replay(&self) -> bool {
+        self.approximate_local_tool_replay
     }
     fn prepare_guest_service(
         &self,

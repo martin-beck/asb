@@ -320,6 +320,7 @@ impl Prepared {
         root: &Path,
         inputs: &mut [ReplayInput],
         validate_pi_native: bool,
+        require_raw: bool,
     ) -> Result<(), Error> {
         private_directory(&root.join("inputs"), false)?;
         for input in inputs {
@@ -377,6 +378,10 @@ impl Prepared {
                 return Err(Error::Input(
                     "selected cassette changed after planning; no agent was started".into(),
                 ));
+            }
+            if require_raw {
+                crate::cassette::require_raw_requests(std::io::BufReader::new(bytes.as_slice()))
+                    .map_err(input_error)?;
             }
             publish_bytes(&root.join(&input.private), &bytes)?;
             if let Some(local_tools) = &input.local_tools {

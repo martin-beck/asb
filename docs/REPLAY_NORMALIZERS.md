@@ -59,15 +59,16 @@ Select those examples only for the relevant agents, workloads and tasks; each
 requires an associated matching tool or shell command. Canonicalizing output
 does not make tool execution deterministic or establish that a benchmark passed.
 
-Record a new cassette with the selected profiles before replaying. A profile
-cannot be silently added to an older recording, and an archive never supplies
-executable scripts: replay uses the explicitly configured local modules and
-requires their frozen policy to match. Runs without selected profiles retain
-their historical matching contract. Normal live runs do not run these scripts.
+For recordings that contain raw requests, profiles can be added, changed or
+disabled after recording. ASB checks every selected track is raw before allowing
+a policy change. Older cassettes that stored normalized requests still require
+their original policy. An archive never supplies executable scripts: replay
+uses the explicitly configured project modules. Normal live runs and recordings
+do not run these scripts.
 
 Private tape evidence contains the effective policy digest and per-profile
-observation and change counts. These count visits to result blocks, including
-the same history revisited in later requests; they are not counts of distinct
+observation and change counts. These count visits to result blocks on both the
+recorded and replay sides, including the same history revisited in later requests; they are not counts of distinct
 tool executions. A separate private normalization evidence file is retained
 beside the tape session on shutdown, even when measurement collectors are
 disabled. Replay mismatch evidence also includes the active policy and counts.

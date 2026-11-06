@@ -154,7 +154,10 @@ fn verify_winners(
         }
         let archive = Archive::open_verified(&path, length, expected_digest, Limits::default())?;
         let compatibility = &archive.manifest().compatibility;
-        if !settings.replay.is_empty() || compatibility.normalization_sha256.is_some() {
+        // Legacy cassettes may contain already-normalized requests and bind
+        // their original policy. New recordings contain raw requests; their
+        // replay-only qualification policy belongs to the prepared selection.
+        if compatibility.normalization_sha256.is_some() {
             if cached_catalog.is_none() {
                 cached_catalog = Some(
                     crate::workloads::planning_catalog(&actual.workload, &workload_directory)

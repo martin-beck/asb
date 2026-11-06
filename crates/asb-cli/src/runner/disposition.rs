@@ -21,12 +21,15 @@ pub(crate) enum FailureKind {
     AgentFailure,
     ProviderMismatch,
     ProviderUnconsumed,
+    ToolMismatch,
+    McpMismatch,
     WorkloadCheckFailed,
     GraderError,
     CollectorError,
     OutputError,
     ProviderCleanupError,
     RecordingError,
+    ReplayCompatibility,
 }
 
 impl FailureKind {
@@ -36,12 +39,15 @@ impl FailureKind {
             Self::AgentFailure => "agent_failure",
             Self::ProviderMismatch => "provider_mismatch",
             Self::ProviderUnconsumed => "provider_unconsumed",
+            Self::ToolMismatch => "tool_mismatch",
+            Self::McpMismatch => "mcp_mismatch",
             Self::WorkloadCheckFailed => "workload_check_failed",
             Self::GraderError => "grader_error",
             Self::CollectorError => "collector_error",
             Self::OutputError => "output_error",
             Self::ProviderCleanupError => "provider_cleanup_error",
             Self::RecordingError => "recording_error",
+            Self::ReplayCompatibility => "replay_compatibility",
         }
     }
 }

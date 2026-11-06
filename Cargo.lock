@@ -114,8 +114,10 @@ dependencies = [
  "asb-cli",
  "clap",
  "crossterm",
+ "libc",
  "ratatui",
  "serde_json",
+ "toml",
  "zip",
 ]
 

@@ -184,6 +184,11 @@ impl Prepared {
                     "replay input changed after execution planning; no agent was started".into(),
                 ));
             }
+            if plan.requires_raw_replay_requests() {
+                let staged = File::open(&pending).map_err(io_error)?;
+                crate::cassette::require_raw_requests(std::io::BufReader::new(staged))
+                    .map_err(|error| Error::Input(format!("{error}; no agent was started")))?;
+            }
             file.sync_all()
                 .and_then(|()| fs::hard_link(&pending, &destination))
                 .map_err(io_error)?;

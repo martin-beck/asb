@@ -289,6 +289,8 @@ pub(crate) struct ExecutionContext<'a> {
     pub tape_cassette: Option<&'a Path>,
     /// Whether agent-local tool effects must be served from the recording.
     pub tool_replay: bool,
+    pub ignore_tool_mismatch: bool,
+    pub ignore_mcp_mismatch: bool,
     /// Exact cassette identity for the adapter-owned local-tool sidecar.
     pub tool_tape_cassette: Option<&'a Path>,
     /// Explicit transparent MCP relay direction for declared MCP servers.

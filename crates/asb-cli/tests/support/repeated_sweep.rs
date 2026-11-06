@@ -123,7 +123,11 @@ fn fixture_prelude_rejects_invalid_oversized_and_missing_events() {
     }
 }
 
-fn sweep(project: &Project, provider: Option<&RecordingProvider>, arguments: &[&str]) -> Output {
+pub(super) fn sweep(
+    project: &Project,
+    provider: Option<&RecordingProvider>,
+    arguments: &[&str],
+) -> Output {
     sweep_command(project, provider, arguments)
         .output()
         .unwrap()
@@ -278,6 +282,110 @@ fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
             "--cassette-root",
             "replay-input",
             "--ignore-evaluation",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
+#[test]
+fn replay_sweep_persists_ignored_compatibility_and_resumes() {
+    let project = registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = record_to_with_mode(
+        &project,
+        &provider,
+        None,
+        Some("new-recording.jsonl"),
+        "--llm-record",
+    );
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    drop(provider);
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "different-model".into()
+    });
+    let config_path = project.0.join("benchmark.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            "{config}\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=[]\n"
+        ),
+    )
+    .unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("new-recording.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let args = [
+        "--llm-replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-compatibility",
+        "--verbose",
+    ];
+    let output = sweep(&project, None, &args);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["ignored_failures"][0]["kind"] == "replay_compatibility")
+    );
+    let report_dir = project.0.join("results/sweep-comparison");
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(report["benchmarks"][0]["approximate_replay"], true);
+    assert!(
+        fs::read_to_string(report_dir.join("report.html"))
+            .unwrap()
+            .contains("Approximate replay:")
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_compatibility"], true);
+    let without = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    );
+    assert!(!without.status.success());
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--llm-replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-compatibility",
         ],
     );
     assert!(
@@ -2363,16 +2471,13 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&recorded.stderr)
     );
     let plan: Value = serde_json::from_slice(&fs::read(campaign_plan(&recorded)).unwrap()).unwrap();
-    let digest = plan["normalization_policy"]["sha256"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert!(plan["normalization_policy"].is_null());
     let seal: Value = serde_json::from_slice(
         &fs::read(project.0.join("sweep-results/.checkpoint/inputs.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(seal["status"], "stable");
-    assert!(seal["roots"].as_array().unwrap().iter().any(|root| {
+    assert!(!seal["roots"].as_array().unwrap().iter().any(|root| {
         root["name"]
             .as_str()
             .is_some_and(|name| name.ends_with("-normalization"))
@@ -2395,12 +2500,8 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     .unwrap();
     let changed = sweep(&project, Some(&provider), &["--llm-record", "--resume"]);
     assert!(
-        !changed.status.success(),
-        "a changed normalizer must invalidate completed-only resume"
-    );
-    assert!(
-        String::from_utf8_lossy(&changed.stderr).contains("normalizer policy changed"),
-        "{}",
+        changed.status.success(),
+        "recording resume must not depend on replay normalizers: {}",
         String::from_utf8_lossy(&changed.stderr)
     );
     assert_eq!(
@@ -2420,6 +2521,11 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
         String::from_utf8_lossy(&replayed.stdout),
         String::from_utf8_lossy(&replayed.stderr)
     );
+    let replay_plan: Value =
+        serde_json::from_slice(&fs::read(campaign_plan(&replayed)).unwrap()).unwrap();
+    let digest = replay_plan["normalization_policy"]["sha256"]
+        .as_str()
+        .unwrap();
     let report: Value = serde_json::from_slice(
         &fs::read(project.0.join("results/sweep-comparison/comparison.json")).unwrap(),
     )
@@ -2427,5 +2533,21 @@ fn profile_enabled_sweep_records_seals_and_replays_offline() {
     assert_eq!(
         report["benchmarks"][0]["planned_normalization_policy"]["sha256"],
         digest
+    );
+    fs::write(
+        project.0.join("normalizer.mjs"),
+        "export function normalizeToolResult({text}) { return text; }\n// revised after recording\n",
+    ).unwrap();
+    let changed_replay = sweep(&project, None, &["--llm-replay"]);
+    assert!(
+        changed_replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed_replay.stderr)
+    );
+    let resumed = sweep(&project, None, &["--llm-replay", "--resume"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
     );
 }

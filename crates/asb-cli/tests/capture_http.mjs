@@ -219,7 +219,7 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
   const policy = { sha256: "a".repeat(64), workload: { id: "fixture", task_id: "one" }, profiles: [{ id: "seed", source: "export function normalizeToolResult({text}) { return text.replace(/seed=\\d+/, 'seed=<seed>') + '!'; }" }] };
   const oldWorkspace = "/tmp/record/workspace-concurrency-1";
   const newWorkspace = "/tmp/replay/workspace-concurrency-2";
-  const { port, stop, output } = await fixture(t, (_req, res) => res.end(JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" })), { policy, workspace: oldWorkspace });
+  const { port, stop, output } = await fixture(t, (_req, res) => res.end(JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" })), { policy, workspace: oldWorkspace });
   const recorded = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${oldWorkspace}` }, { role: "tool", content: "seed=1" }] });
   assert.equal((await request(port, "/v1/chat/completions", recorded)).status, 200);
   await stop();
@@ -255,8 +255,8 @@ test("custom policy applies once on replay and rejects changed prompts", { timeo
   const replayed = JSON.stringify({ model: "m", messages: [{ role: "user", content: `solve in ${newWorkspace}` }, { role: "tool", content: "seed=2" }] });
   const replayResponse = await request(replayPort, "/v1/chat/completions", replayed);
   assert.equal(replayResponse.status, 200);
-  assert.deepEqual(JSON.parse(replayResponse.body), { path: `${newWorkspace}/src`, unrelated: "/tmp/elsewhere" });
-  assert.equal(JSON.parse(fs.readFileSync(cassette, "utf8")).response.body, JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere" }));
+  assert.deepEqual(JSON.parse(replayResponse.body), { path: `${newWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" });
+  assert.equal(JSON.parse(fs.readFileSync(cassette, "utf8")).response.body, JSON.stringify({ path: `${oldWorkspace}/src`, unrelated: "/tmp/elsewhere", literal: "<asb-workspace>" }));
   child.stdin.end();
   assert.deepEqual(await exited, { code: 0, signal: null }, stderr);
   const progress = JSON.parse(fs.readFileSync(`${cassette}.progress.json`));

@@ -34,6 +34,7 @@ const Y_TICKS: usize = 5;
 
 #[derive(Debug)]
 struct BenchmarkData {
+    approximate_replay: bool,
     replay_selection: Option<crate::runner::ReplaySelection>,
     observation: crate::process_termination::Observation,
     native_replay_consumed: Option<bool>,
@@ -629,6 +630,11 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let mcp = if selection.mcp_replay { "MCP replay selected" } else { "MCP replay not selected" };
             format!("<p>Replay selection: {provider}; {tools}; {mcp}. Selection is not proof of complete tool or filesystem coverage.</p>")
         });
+        let approximate_details = if benchmark.approximate_replay {
+            "<p class=\"status\"><strong>Approximate replay:</strong> one or more replay differences were explicitly ignored. Inspect the retained ignored-failure evidence before comparing results.</p>"
+        } else {
+            ""
+        };
         let native_replay_details = if benchmark.native_replay_consumed == Some(true) {
             "<p>The agent adapter consumed its recorded native tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
         } else {
@@ -740,7 +746,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
+            format_args!("{approximate_details}{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,
