@@ -199,7 +199,13 @@ def guardian(scripts, root, binary):
         for phase in ("record", "replay", "outbound", "signal", "closed-before-ready"):
             case = root / phase
             (case / "bin").mkdir(parents=True)
-            (case / "tape").write_text("")
+            # Replay requires a real recorded interaction; an empty file is
+            # not a valid cassette and exits before the lifecycle test starts.
+            initial_tape = (json.dumps({"asb_request_policy": 3,
+                "request": {"method": "POST", "url": "/v1/responses", "body": "{}"},
+                "response": {"status": 200, "headers": {}, "body": "{}"}}) + "\n"
+                if phase == "replay" else "")
+            (case / "tape").write_text(initial_tape)
             curl = case / "bin/curl"
             curl.write_text(f"#!{sys.executable}\nimport os,signal,time\n"
                             "from pathlib import Path\n"
@@ -238,7 +244,7 @@ def guardian(scripts, root, binary):
                     pid = int((case / "curl").read_text())
                     assert not Path(f"/proc/{pid}").exists(), "outbound helper was not stopped and reaped"
                 assert sibling.poll() is None, "unrelated sibling was stopped"
-                assert (case / "tape").read_text() == "", "interrupted response fabricated a recording"
+                assert (case / "tape").read_text() == initial_tape, "interrupted response fabricated a recording"
                 if phase == "signal":
                     process.kill()
                     process.wait(timeout=3)
