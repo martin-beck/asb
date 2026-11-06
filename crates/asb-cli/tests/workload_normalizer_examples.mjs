@@ -21,6 +21,11 @@ test('temporary listings normalize only modification times', () => {
   assert.notEqual(tmpListing({text:other.replace('5783941','5783942'),tool}), canonical);
   assert.notEqual(tmpListing({text:other.replace('sympy.whl','different.whl'),tool}), canonical);
   assert.equal(tmpListing({text,tool:{...tool,arguments:{command:'cat output'}}}),text);
+  const downloadTool = {name:'Bash',arguments:{command:'ls -la /tmp/sd 2>/dev/null; pip download sympy==1.12 -d /tmp/sd --no-deps 2>&1 | tail -5'}};
+  const download = 'total 1\n-rw-r--r-- 1 user user 4 Nov  6 16:09 a.whl\nDownloading foo';
+  assert.equal(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('16:09','16:12'),tool:downloadTool}));
+  assert.notEqual(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('Downloading foo','Downloading bar'),tool:downloadTool}));
+  assert.notEqual(tmpListing({text:download,tool:downloadTool}),tmpListing({text:download.replace('a.whl','b.whl'),tool:downloadTool}));
   const warning = text + '\nls: denied';
   assert.equal(tmpListing({text:warning,tool}), warning);
 });
