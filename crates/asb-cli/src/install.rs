@@ -631,6 +631,8 @@ fn python_guest_package_tree_in(
     })
 }
 
+const MAX_NPM_GUEST_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 fn npm_guest_package_tree_in(context: &OperationContext, root: &Path) -> InstallResult<PathBuf> {
     let node_modules = root.join("node_modules");
     if !node_modules.is_dir() {
@@ -672,10 +674,10 @@ fn npm_guest_package_tree_in(context: &OperationContext, root: &Path) -> Install
             "cannot inspect prepared npm agent payload: {error}"
         ))
     })?;
-    if !metadata.is_file() || metadata.len() > 512 * 1024 * 1024 {
+    if !metadata.is_file() || metadata.len() > MAX_NPM_GUEST_ARCHIVE_BYTES {
         let _ = fs::remove_file(&temporary);
         return Err(Error::Input(
-            "npm agent payload exceeds the 512 MiB guest bootstrap limit; reduce the selected package tree before retrying".into(),
+            format!("npm agent payload at {} exceeds the 4 GiB guest bootstrap limit; reduce the selected package tree before retrying", root.display()),
         )
         .into());
     }
