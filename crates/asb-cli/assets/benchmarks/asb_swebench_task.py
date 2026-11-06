@@ -15,8 +15,9 @@ from asb_resources import ResourceJournal
 
 SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
-# The per-command execution budget starts after the container gate is ready.
+# Repository setup has its own bounds; neither is an agent execution budget.
 _REPOSITORY_GATE_PREPARATION_SECONDS = 600
+_REPOSITORY_COMMAND_SECONDS = 600
 
 
 def snapshot_storage_path(artifacts, attempt, tool_mode):
@@ -127,7 +128,9 @@ class SweBenchTask:
         finally:
             self.preparing_repository = False
 
-    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=60):
+    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None):
+        if timeout is None:
+            timeout = _REPOSITORY_COMMAND_SECONDS if self.preparing_repository else 60
         options = {"environment": environment, "timeout": timeout,
                    "output_limit": output_limit, "cancelled": self.cancelled}
         if self.preparing_repository:
