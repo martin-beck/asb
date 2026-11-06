@@ -27,7 +27,7 @@ pub(crate) fn replay_protocol_fingerprint(
     // SWE-bench client environment and Git dates are replay inputs. Existing
     // recordings used the image's base Python and must not be silently reused.
     if module.is_some_and(|module| module.family == "swe-bench") {
-        identity["swe_client_environment"] = "sdk-conda-and-base-git-dates-v1".into();
+        identity["swe_client_environment"] = "sdk-conda-base-git-dates-and-full-object-ids-v2".into();
     }
     serde_json::to_vec(&identity)
         .map(|bytes| crate::cassette::digest(&bytes))

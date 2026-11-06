@@ -106,10 +106,33 @@ class SubmissionRecoveryTests(unittest.TestCase):
             self.assertEqual(result['API_KEY'], 'secret')
             self.assertEqual(result['GIT_AUTHOR_DATE'], 'explicit')
             self.assertEqual(result['GIT_COMMITTER_DATE'], '@1637276904 +0000')
+            self.assertEqual(result['GIT_CONFIG_COUNT'], '1')
+            self.assertEqual(result['GIT_CONFIG_KEY_0'], 'core.abbrev')
+            self.assertEqual(result['GIT_CONFIG_VALUE_0'], '40')
+            custom = task.agent_environment({'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.abbrev', 'GIT_CONFIG_VALUE_0': '12'})
+            self.assertEqual(custom['GIT_CONFIG_VALUE_0'], '12')
             self.assertEqual(calls[0][1]['environment'], {'PATH':'/custom/bin'})
             task.checked = lambda *args, **kwargs: b'invalid'
             with self.assertRaises(task_module.ExecutionError):
                 task.agent_environment({})
+
+    def test_full_git_object_ids_preserve_distinct_commits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.abbrev', GIT_CONFIG_VALUE_0='40',
+                       GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                       GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=root, env=env, check=True, capture_output=True).stdout.decode().strip()
+            git('init', '-q')
+            for text in ('first', 'second'):
+                (root/'file').write_text(text)
+                git('add', 'file')
+                git('commit', '-qm', text)
+            ids = [line.split()[0] for line in git('log', '--oneline').splitlines()]
+            self.assertEqual(len(ids), 2)
+            self.assertTrue(all(len(value) == 40 for value in ids))
+            self.assertNotEqual(ids[0], ids[1])
 
     def test_default_git_dates_stabilize_stash_without_masking_changed_content(self):
         with tempfile.TemporaryDirectory() as directory:
