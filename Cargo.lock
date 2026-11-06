@@ -111,10 +111,12 @@ dependencies = [
 name = "asb-replay-debug"
 version = "0.2.51"
 dependencies = [
+ "asb-cli",
  "clap",
  "crossterm",
  "ratatui",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
