@@ -43,8 +43,12 @@ class SubmissionRecoveryTests(unittest.TestCase):
         task.preparing_repository = False
         task.checked(['git', 'status'])
         options = task.workspace.execute.call_args.kwargs
-        self.assertEqual(options['timeout'], 60)
+        self.assertEqual(options['timeout'], 600)
         self.assertNotIn('preparation_timeout', options)
+        task.checked(['id', '-g'])
+        self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 600)
+        task.checked(['id', '-g'], timeout=4)
+        self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 4)
 
     def test_history_fetch_has_a_separate_bounded_setup_budget(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
