@@ -58,6 +58,10 @@ For newly completed Pi snapshot replays, comparison evidence reports
 indicates that the captured native tool stream was consumed, not that every
 agent process or effect was captured. Historical or missing observations remain
 unknown; a task grade is not a substitute for this receipt.
+New run and comparison records also disclose the selected provider, tool and
+MCP replay modes. Provider-only selection warns that native tools can still
+execute and contact external services. Selection is not evidence that tools or
+filesystem effects were captured completely; older records remain unknown.
 
 ## Implementation sequence
 

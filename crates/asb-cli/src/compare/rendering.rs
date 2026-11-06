@@ -215,6 +215,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             "id": benchmark.id,
             "execution": benchmark.execution,
             "native_replay_consumed": benchmark.native_replay_consumed,
+            "replay_selection": benchmark.replay_selection,
             "planned_normalization_policy": benchmark.planned_normalization_policy,
             "normalization_observation": benchmark.normalization_observation,
             "name": benchmark.label,

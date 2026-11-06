@@ -34,6 +34,7 @@ const Y_TICKS: usize = 5;
 
 #[derive(Debug)]
 struct BenchmarkData {
+    replay_selection: Option<crate::runner::ReplaySelection>,
     observation: crate::process_termination::Observation,
     native_replay_consumed: Option<bool>,
     id: RowId,
@@ -607,6 +608,18 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             },
         );
         let analysis_details = analysis::html(&benchmark.collector_documents);
+        let replay_selection_details = benchmark.replay_selection.map_or_else(String::new, |selection| {
+            use crate::runner::ReplayToolSelection;
+            let provider = if selection.provider_replay { "provider responses selected for replay" } else { "provider responses not selected for replay" };
+            let tools = match selection.tools {
+                ReplayToolSelection::NotSelected => "tool replay not selected; native commands and external requests may be live",
+                ReplayToolSelection::PiAdapterLocal => "Pi adapter-local tool replay selected",
+                ReplayToolSelection::NativeSnapshot => "experimental native snapshot tool replay selected",
+                ReplayToolSelection::OtherSelected => "tool replay selected; transport details unavailable",
+            };
+            let mcp = if selection.mcp_replay { "MCP replay selected" } else { "MCP replay not selected" };
+            format!("<p>Replay selection: {provider}; {tools}; {mcp}. Selection is not proof of complete tool or filesystem coverage.</p>")
+        });
         let native_replay_details = if benchmark.native_replay_consumed == Some(true) {
             "<p>Pi native snapshot broker consumed its recorded tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
         } else {
@@ -718,7 +731,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
+            format_args!("{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,

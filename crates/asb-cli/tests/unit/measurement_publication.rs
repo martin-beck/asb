@@ -312,6 +312,15 @@ fn native_consumption_measurement_preserves_unknown_and_observed_states() {
             .get("native_replay_consumed")
             .is_none()
     );
+    measurement.replay_selection = Some(crate::runner::ReplaySelection {
+        provider_replay: true,
+        tools: crate::runner::ReplayToolSelection::NotSelected,
+        mcp_replay: false,
+    });
+    assert_eq!(
+        serde_json::to_value(&measurement).unwrap()["replay_selection"]["tools"],
+        "not-selected"
+    );
     measurement.native_replay_consumed = Some(true);
     assert_eq!(
         serde_json::to_value(&measurement).unwrap()["native_replay_consumed"],
@@ -322,6 +331,7 @@ fn native_consumption_measurement_preserves_unknown_and_observed_states() {
 #[cfg(unix)]
 fn fixture_measurement() -> RunMeasurement<'static> {
     RunMeasurement {
+        replay_selection: None,
         native_replay_consumed: None,
         planning: None,
         effective_budgets: None,

@@ -78,6 +78,7 @@ impl Recorded {
             "execution",
             "recording",
             "native_replay_consumed",
+            "replay_selection",
             "execution_plan_fingerprint",
             "module",
             "benchmark_outcome",
@@ -806,6 +807,47 @@ mod tests {
         let mut different = observed["summary"].clone();
         different["native_replay_consumed"] = json!(false);
         fs::write(measured_dir.join("run.json"), different.to_string()).unwrap();
+        assert!(fixture.compare().is_err());
+    }
+
+    #[test]
+    fn report_discloses_replay_selection_without_asserting_coverage() {
+        let fixture = Fixture::new("swe-bench", 4);
+        let selections = [
+            json!({"provider_replay":true,"tools":"not-selected","mcp_replay":false}),
+            json!({"provider_replay":true,"tools":"pi-adapter-local","mcp_replay":false}),
+            json!({"provider_replay":true,"tools":"native-snapshot","mcp_replay":false}),
+        ];
+        for slot in 1..=4 {
+            let mut record = fixture.record(slot, json!(true), true, true);
+            if slot < 4 {
+                record["summary"]["replay_selection"] = selections[slot - 1].clone();
+            }
+            fixture.publish(slot, &record);
+        }
+        let report = fixture.compare().unwrap();
+        for (row, selection) in report["benchmarks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(3)
+            .zip(&selections)
+        {
+            assert_eq!(&row["replay_selection"], selection);
+        }
+        assert!(report["benchmarks"][3]["replay_selection"].is_null());
+        let html =
+            fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
+        assert!(html.contains(
+            "tool replay not selected; native commands and external requests may be live"
+        ));
+        assert!(html.contains("Pi adapter-local tool replay selected"));
+        assert!(html.contains("experimental native snapshot tool replay selected"));
+        assert!(html.contains("Selection is not proof of complete tool or filesystem coverage"));
+        let mut contradictory = fixture.record(1, json!(true), true, true);
+        contradictory["summary"]["replay_selection"] = selections[0].clone();
+        contradictory["summary"]["native_replay_consumed"] = json!(true);
+        fixture.publish(1, &contradictory);
         assert!(fixture.compare().is_err());
     }
 
