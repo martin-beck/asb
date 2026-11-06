@@ -206,6 +206,14 @@ class SweBenchTask:
         date = "@" + timestamp.decode("ascii") + " +0000"
         result.setdefault("GIT_AUTHOR_DATE", date)
         result.setdefault("GIT_COMMITTER_DATE", date)
+        # Git otherwise chooses abbreviations based on the current object set.
+        # Full object IDs retain identity even when a tool clones a repository
+        # whose remote has gained objects between recording and replay. Honor
+        # an explicitly supplied command-scope Git configuration unchanged.
+        if not any(key == "GIT_CONFIG_COUNT" or key.startswith("GIT_CONFIG_KEY_")
+                   or key.startswith("GIT_CONFIG_VALUE_") for key in result):
+            result.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.abbrev",
+                          GIT_CONFIG_VALUE_0="40")
         return result
 
     def prepare_base_history(self, worktree, clean_git, base):

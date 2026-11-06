@@ -53,7 +53,10 @@ SWE-bench clients execute in the conda environment named by the pinned SDK,
 after ASB has installed the agent. The task adapter retains the client's HOME
 and provider settings, and defaults Git author and committer dates to the base
 commit timestamp unless explicitly supplied. This stabilizes identical Git
-objects without masking different file contents. The changed client inputs
+objects without masking different file contents. When no command-scope Git
+configuration is supplied, the agent also receives `core.abbrev=40`, so Git
+reports complete object IDs regardless of changes in a cloned object database.
+Explicit command-scope Git configuration is left untouched. The changed client inputs
 have their own bundled replay identity; older bundled recordings made with the
 previous environment need a fresh recording. Legacy recordings lacking this
 identity cannot prove that their environment matches. These controls do not
