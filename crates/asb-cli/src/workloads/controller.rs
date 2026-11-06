@@ -12,6 +12,24 @@ use std::time::{Duration, Instant};
 
 const MAX_MESSAGE: u64 = 1024 * 1024;
 
+fn controller_error(event: &Value) -> String {
+    if event["error_class"] == "ExecutionError"
+        && let Some(reason) = event["reason"]
+            .as_str()
+            .filter(|reason| reason.len() <= 512 && !reason.contains(['\n', '\r']))
+    {
+        return format!("workload execution failed: {reason}");
+    }
+    if matches!(
+        event["error_class"].as_str(),
+        Some("ReadTimeout" | "ConnectTimeout")
+    ) {
+        return "workload controller timed out waiting for a service; check Docker and workload service availability, then retry".into();
+    }
+    "workload controller could not complete the operation; inspect the private task artifacts"
+        .into()
+}
+
 /// Build the typed carrier before applying opaque std::Command configuration.
 /// The same command owns env_clear/removals, cwd, stdio and pre_exec through
 /// admission. Never reconstruct it from getters to insert a supervisor later.
@@ -638,6 +656,20 @@ mod tests {
                 Some("workload execution failed: fixed local reason"),
             ),
             ("SdkError", "private SDK response".to_owned(), None),
+            (
+                "ReadTimeout",
+                "private SDK response".to_owned(),
+                Some(
+                    "workload controller timed out waiting for a service; check Docker and workload service availability, then retry",
+                ),
+            ),
+            (
+                "ConnectTimeout",
+                "private SDK response".to_owned(),
+                Some(
+                    "workload controller timed out waiting for a service; check Docker and workload service availability, then retry",
+                ),
+            ),
             ("ExecutionError", "private\nSDK response".to_owned(), None),
             ("ExecutionError", "private\rSDK response".to_owned(), None),
             ("ExecutionError", "private".repeat(100), None),
@@ -657,6 +689,7 @@ mod tests {
             let error = controller
                 .receive(Instant::now() + Duration::from_secs(3))
                 .unwrap_err();
+            assert!(!error.contains("private SDK"));
             match expected {
                 Some(expected) => assert_eq!(error, expected),
                 None => {

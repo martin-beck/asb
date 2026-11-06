@@ -26,6 +26,26 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_repository_gate_has_separate_preparation_and_execution_budgets(self):
+        task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
+        task.workspace = MagicMock()
+        task.workspace.execute.return_value = {
+            'timed_out': False, 'cancelled': False, 'exit_code': 0,
+            'output_truncated': False, 'stdout': b'ok',
+        }
+        task.preparing_repository = True
+        self.assertEqual(task.checked(['git', 'status']), b'ok')
+        options = task.workspace.execute.call_args.kwargs
+        self.assertEqual(options['timeout'], 600)
+        self.assertEqual(options['preparation_timeout'], 600)
+        task.checked(['git', 'status'], timeout=4)
+        self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 4)
+        task.preparing_repository = False
+        task.checked(['git', 'status'])
+        options = task.workspace.execute.call_args.kwargs
+        self.assertEqual(options['timeout'], 60)
+        self.assertNotIn('preparation_timeout', options)
+
     def test_agent_environment_activates_sdk_environment_and_preserves_private_values(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
         task.row = {'base_commit':'a' * 40}
