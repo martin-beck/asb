@@ -236,3 +236,10 @@ to an online provider. An exhausted cassette, oversized request, unretained
 divergence evidence, unsupported external proxy, or other independent failure
 still fails. Replay-derived usage is not treated as verified on an approximate
 attempt. The policy is frozen in repeated campaign and sweep plans.
+
+`--ignore-provider-unconsumed` separately allows an otherwise completed replay
+whose agent did not request all recorded provider exchanges. ASB reports the
+consumed and total counts as an ignored warning, marks that attempt approximate,
+and does not claim verified cassette usage. It does not ignore an independently
+failed evaluation, a rejected request, or an attempt to request an exchange past
+the end of the cassette. This choice is also frozen for campaign and sweep resume.

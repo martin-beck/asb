@@ -538,6 +538,60 @@ fn approximate_provider_replay_sweep_keeps_policy_and_diagnostics_on_resume() {
 }
 
 #[test]
+fn provider_unconsumed_replay_sweep_is_approximate_and_resumable() {
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    let cassette = fs::read_to_string(project.0.join("input.jsonl")).unwrap();
+    fs::write(
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+        format!("{cassette}{cassette}"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-provider-unconsumed",
+    ];
+    let output = sweep(&project, None, &options);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert!(
+        row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["kind"] == "provider_unconsumed")
+    );
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let output = sweep(&project, None, &resume);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+}
+
+#[test]
 fn continuation_metadata_recovery_cli_rejects_execution_options_without_provider_setup() {
     let project = registered_project(1);
     for arguments in [

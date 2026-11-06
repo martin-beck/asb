@@ -15,6 +15,7 @@ pub(crate) struct RecordingRequest<'a> {
     pub cassette: &'a std::path::Path,
     pub respect_record_timings: bool,
     pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
     pub workspace: &'a std::path::Path,
     pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
@@ -204,7 +205,9 @@ fn start_recording_chain_with(
     registry: &[&dyn ProxyAdapter],
 ) -> Result<Chain, Error> {
     let adapter = resolve_recorder(registry, request.recorder)?;
-    if request.ignore_provider_mismatch && !adapter.supports_approximate_replay() {
+    if (request.ignore_provider_mismatch || request.ignore_provider_unconsumed)
+        && !adapter.supports_approximate_replay()
+    {
         return Err(Error::Input(format!(
             "recording proxy `{}` does not support approximate replay",
             adapter.name()
@@ -349,6 +352,7 @@ pub(crate) struct Completion {
 
 #[derive(Clone)]
 pub(crate) struct ReplayDivergence {
+    pub kind: crate::runner::disposition::FailureKind,
     pub reason: String,
 }
 
@@ -673,6 +677,7 @@ mod tests {
             cassette: std::path::Path::new("fixture"),
             respect_record_timings: false,
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             workspace: std::path::Path::new("."),
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
@@ -804,6 +809,7 @@ mod tests {
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             recorder: None,
             mode: crate::tape::Mode::Replay,
             cassette,

@@ -137,6 +137,7 @@ impl BatchRun<'_> {
                 ignore_agent: self.plan.ignore_agent,
                 ignore_collector: self.plan.ignore_collector,
                 ignore_provider_mismatch: self.plan.ignore_provider_mismatch,
+                ignore_provider_unconsumed: self.plan.ignore_provider_unconsumed,
                 policy: Some(&policy),
                 requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),

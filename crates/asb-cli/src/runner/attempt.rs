@@ -782,6 +782,7 @@ impl<'a> ReadyAttempt<'a> {
                             tape::AgentContext {
                                 workspace: &workspace,
                                 ignore_provider_mismatch: options.ignore_provider_mismatch,
+                                ignore_provider_unconsumed: options.ignore_provider_unconsumed,
                                 agent: Some(&config.agent),
                                 workload: Some(&config.workload),
                                 task: Some(&workload_session.invocation().identity.task_id),
@@ -1454,7 +1455,7 @@ impl ResultFacts {
         }
         for divergence in &proxy_evidence.replay_divergences {
             disposition.ignored_failures.push(RunFailure::ignored(
-                FailureKind::ProviderMismatch,
+                divergence.kind,
                 divergence.reason.clone(),
             ));
         }

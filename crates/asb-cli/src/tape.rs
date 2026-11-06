@@ -21,6 +21,7 @@ pub struct Session(proxy::Chain);
 pub(crate) struct AgentContext<'a> {
     pub workspace: &'a Path,
     pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
     pub agent: Option<&'a str>,
     /// The configured workload selects only its adapter's explicitly declared
     /// cassette normalizers. It is not inferred from request data.
@@ -75,6 +76,7 @@ impl Session {
             AgentContext {
                 workspace,
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 agent,
                 workload: None,
                 task: None,
@@ -127,6 +129,7 @@ impl Session {
             cassette,
             respect_record_timings,
             ignore_provider_mismatch: context.ignore_provider_mismatch,
+            ignore_provider_unconsumed: context.ignore_provider_unconsumed,
             workspace: context.workspace,
             invocation_dir: context.invocation_dir,
             wire_extension: context.agent.and_then(crate::agents::tape_wire_extension),

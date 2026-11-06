@@ -201,6 +201,8 @@ pub(crate) struct Plan {
     pub ignore_collector: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_provider_mismatch: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_provider_unconsumed: bool,
     pub measurement_root: Option<PathBuf>,
     pub replay_inputs: Vec<ReplayInput>,
     pub slots: Vec<Slot>,

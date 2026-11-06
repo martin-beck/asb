@@ -242,6 +242,7 @@ pub(crate) struct RunOptions<'a> {
     pub ignore_agent: bool,
     pub ignore_collector: bool,
     pub ignore_provider_mismatch: bool,
+    pub ignore_provider_unconsumed: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,

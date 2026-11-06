@@ -201,6 +201,7 @@ impl Execution<'_> {
                 ignore_agent: self.options.ignore_agent,
                 ignore_collector: self.options.ignore_collector,
                 ignore_provider_mismatch: self.options.ignore_provider_mismatch,
+                ignore_provider_unconsumed: self.options.ignore_provider_unconsumed,
                 requirements_prepared: !self.options.resume,
                 architecture_confirmed: true,
                 on_completion: observer

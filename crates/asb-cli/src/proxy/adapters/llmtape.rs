@@ -91,6 +91,7 @@ struct Settings {
     cassette: PathBuf,
     respect_record_timings: bool,
     ignore_provider_mismatch: bool,
+    ignore_provider_unconsumed: bool,
     workspace: PathBuf,
     invocation_dir: PathBuf,
     /// Opaque adapter-owned request extension; llmtape materializes and
@@ -112,6 +113,7 @@ struct RunningLlmtape {
     retained_mismatch_evidence: Option<PathBuf>,
     replay_divergences: Vec<crate::proxy::ReplayDivergence>,
     ignore_provider_mismatch: bool,
+    ignore_provider_unconsumed: bool,
     normalization_evidence: Option<PathBuf>,
     cassette: PathBuf,
     mode: Mode,
@@ -194,6 +196,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             cassette: request.cassette.to_path_buf(),
             respect_record_timings: request.respect_record_timings,
             ignore_provider_mismatch: request.ignore_provider_mismatch,
+            ignore_provider_unconsumed: request.ignore_provider_unconsumed,
             workspace: request.workspace.to_path_buf(),
             invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
@@ -286,7 +289,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         // only after listening. A released parent-selected port can be taken
         // by a different ASB process; a TCP connect does not prove ownership.
         let builtin = matches!(executable, ProxyExecutable::Builtin(_));
-        if !builtin && request.ignore_provider_mismatch {
+        if !builtin && (request.ignore_provider_mismatch || request.ignore_provider_unconsumed) {
             return Err(Error::Input(
                 "external tape overrides cannot establish approximate replay evidence".into(),
             ));
@@ -489,6 +492,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             retained_mismatch_evidence: None,
             replay_divergences: Vec::new(),
             ignore_provider_mismatch: request.ignore_provider_mismatch,
+            ignore_provider_unconsumed: request.ignore_provider_unconsumed,
             normalization_evidence,
             cassette: cassette.clone(),
             mode: request.mode,
@@ -796,6 +800,7 @@ impl ProxySession for RunningLlmtape {
                         format!("request {sequence}, mismatch details unavailable")
                     });
                     self.replay_divergences.push(crate::proxy::ReplayDivergence {
+                        kind: crate::runner::disposition::FailureKind::ProviderMismatch,
                         reason: format!("approximate replay served a recorded response despite provider request mismatch; {context}; first mismatch evidence: {}", retained.display()),
                     });
                 }
@@ -820,10 +825,17 @@ impl ProxySession for RunningLlmtape {
                 )));
             }
             if consumed != total {
-                return Err(Error::Run(format!(
-                    "replay consumed {consumed} of {total} cassette requests for {}; refusing partial replay",
-                    self.cassette.display()
-                )));
+                if self.ignore_provider_unconsumed && consumed < total {
+                    self.replay_divergences.push(crate::proxy::ReplayDivergence {
+                        kind: crate::runner::disposition::FailureKind::ProviderUnconsumed,
+                        reason: format!("approximate replay consumed {consumed} of {total} recorded provider requests; {} request(s) remained unconsumed", total - consumed),
+                    });
+                } else {
+                    return Err(Error::Run(format!(
+                        "replay consumed {consumed} of {total} cassette requests for {}; refusing partial replay",
+                        self.cassette.display()
+                    )));
+                }
             }
             let omitted = value
                 .get("unrequested_optional_probes")
@@ -1280,6 +1292,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 workspace: &root,
                 agent: None,
                 workload: None,
@@ -1312,6 +1325,7 @@ mod tests {
         use crate::proxy::ProxyAdapter;
         let request = crate::proxy::RecordingRequest {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             recorder: None,
             mode: Mode::Replay,
             cassette: std::path::Path::new("fixture.jsonl"),
@@ -1344,6 +1358,7 @@ mod tests {
             child.wait().unwrap();
             let mut session = super::RunningLlmtape {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
                 child: Some(child),
@@ -1404,6 +1419,7 @@ mod tests {
             }
             let mut session = super::RunningLlmtape {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
                 retained_mismatch_evidence: None,
                 child: None,
@@ -4247,6 +4263,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 workspace: &root,
                 agent: Some("codex"),
                 workload: Some("swe-bench"),
@@ -4301,6 +4318,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 workspace: &root,
                 agent: Some("pi"),
                 workload: Some("fixture"),
@@ -4367,6 +4385,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
                 workspace: &root,
                 agent: Some("pi"),
                 workload: Some("fixture"),

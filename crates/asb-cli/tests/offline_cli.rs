@@ -3634,6 +3634,44 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     assert!(String::from_utf8_lossy(&no_response.stderr).contains("replay rejected"));
     let rejected = replay(&replay_project(1), "mismatch", &[]);
     assert!(!rejected.status.success());
+    let partial = replay(
+        &replay_project(1),
+        "skip",
+        &[
+            "--ignore-provider-unconsumed",
+            "--ignore-evaluation",
+            "--json",
+        ],
+    );
+    assert!(
+        partial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial["approximate_replay"], true);
+    let failures = partial["ignored_failures"].as_array().unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "provider_unconsumed"
+                && failure["ignored"] == true
+                && failure["reason"].as_str().unwrap().contains("0 of 1"))
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure["kind"] == "workload_check_failed")
+    );
+    let partial_without_evaluation = replay(
+        &replay_project(1),
+        "skip",
+        &["--ignore-provider-unconsumed"],
+    );
+    assert!(
+        !partial_without_evaluation.status.success(),
+        "an independent false grade remains fatal"
+    );
     let twice_project = replay_project(1);
     let cassette = std::fs::read_to_string(twice_project.0.join("tape.jsonl")).unwrap();
     std::fs::write(

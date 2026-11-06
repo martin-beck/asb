@@ -36,6 +36,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
     ] {
         let settings = Settings {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             mode: Mode::Record,
             cassette: requested,
             respect_record_timings: false,
@@ -76,6 +77,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
         let fixture = Fixture::new();
         let settings = Settings {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             mode: Mode::Record,
             cassette: fixture.0.join("trace.jsonl"),
             respect_record_timings: false,
@@ -153,6 +155,7 @@ fn capture_evidence_and_retained_diagnostics_survive_independent_cleanup_failure
         .unwrap();
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
@@ -216,6 +219,7 @@ fn sealed_incomplete_capture_retains_only_its_private_receipt_scratch() {
     child.wait().unwrap();
     let mut session = RunningLlmtape {
         ignore_provider_mismatch: false,
+        ignore_provider_unconsumed: false,
         replay_divergences: Vec::new(),
         retained_mismatch_evidence: None,
         child: Some(child),
@@ -258,6 +262,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
         }
         let settings = Settings {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             mode: Mode::Record,
             cassette: path,
             respect_record_timings: false,
@@ -296,6 +301,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
         let root = Fixture::new();
         let mut settings = Settings {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             mode: Mode::Record,
             cassette: root.0.join("tape.jsonl"),
             respect_record_timings: false,
@@ -443,6 +449,7 @@ fn replay_finish_reports_absent_and_malformed_progress_then_is_idempotent() {
         }
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
@@ -483,6 +490,7 @@ fn replay_finish_reports_only_validated_structural_mismatch_context() {
         fs::write(&progress, contents).unwrap();
         let mut session = RunningLlmtape {
             ignore_provider_mismatch: false,
+            ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),
             retained_mismatch_evidence: None,
             child: Some(child),
