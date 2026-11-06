@@ -1618,18 +1618,8 @@ fn perfetto_probe(service: &Service, measurement_dir: &Path) -> Result<bool, Str
             .stdout(Stdio::null())
             .stderr(Stdio::from(File::create(&stderr_path)?))
             .spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let success = loop {
-            match child.try_wait()? {
-                Some(status) => break status.success(),
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break false;
-                }
-                None => std::thread::sleep(Duration::from_millis(25)),
-            }
-        };
+        // Software-emulated guests can take several seconds to start tracing.
+        let success = wait_for_perfetto_preflight(&mut child, Duration::from_secs(30))?;
         let mut bytes = Vec::new();
         File::open(&stderr_path)?
             .take(256 * 1024)
@@ -1650,6 +1640,27 @@ fn perfetto_probe(service: &Service, measurement_dir: &Path) -> Result<bool, Str
     result.map_err(|error| format!("cannot execute owned Perfetto preflight client: {error}. Check .asb/perfetto service logs and reinstall with `asb tool install perfetto` if needed."))
 }
 
+fn wait_for_perfetto_preflight(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status.success()),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Perfetto preflight timed out; check guest load and tracing service logs",
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "perfetto/coverage_tests.rs"]
 mod coverage_tests;
@@ -1657,6 +1668,24 @@ mod coverage_tests;
 #[cfg(test)]
 mod marker_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preflight_wait_reports_timeout_and_reaps_the_client() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let error = wait_for_perfetto_preflight(&mut child, Duration::ZERO).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("check guest load"));
+        assert!(child.try_wait().unwrap().is_some());
+
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        assert!(wait_for_perfetto_preflight(&mut child, Duration::from_secs(2)).unwrap());
+        let mut child = std::process::Command::new("/bin/false").spawn().unwrap();
+        assert!(!wait_for_perfetto_preflight(&mut child, Duration::from_secs(2)).unwrap());
+    }
 
     #[test]
     fn metrics_produce_distinct_escaped_svg_artifacts() {
