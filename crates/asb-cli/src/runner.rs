@@ -710,7 +710,13 @@ fn run_dispatched(
         }
     }
     let gate = (options.verify_initial_material && options.preparation_gate.is_none())
-        .then(|| batch::Gate::new(config.concurrency, None, Duration::from_secs(1800)))
+        .then(|| {
+            batch::Gate::new(
+                config.concurrency,
+                None,
+                crate::planning::BatchAdmissionPolicy::current().material_timeout(),
+            )
+        })
         .transpose()?;
     // Reused replicas do not launch or arrive at this new barrier.  Select
     // exactly the same fresh slots that run_concurrent will actually start.
@@ -723,7 +729,7 @@ fn run_dispatched(
                 batch::SettlementBarrier::selected(
                     config.concurrency,
                     &fresh_slots,
-                    Duration::from_secs(1800),
+                    crate::planning::BatchAdmissionPolicy::current().launch_timeout(),
                 )
             })
             .transpose()?;
