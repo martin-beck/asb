@@ -18,6 +18,7 @@ pub struct TrialOrder {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrialPreparation {
+    schema_version: u8,
     target: usize,
     candidates: Vec<String>,
     outcomes: Vec<TrialOutcome>,
@@ -36,6 +37,7 @@ impl TrialPreparation {
     /// Begin qualification with a precomputed complete candidate order.
     pub fn new(order: TrialOrder) -> Self {
         Self {
+            schema_version: 1,
             target: order.target,
             candidates: order.candidates,
             outcomes: Vec::new(),
@@ -45,7 +47,8 @@ impl TrialPreparation {
 
     /// Validate loaded state before it can select or reuse any recording.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.target == 0
+        if self.schema_version != 1
+            || self.target == 0
             || self.target > self.candidates.len()
             || self.candidates.len() > 65_536
             || self.outcomes.len() > self.candidates.len()
@@ -326,6 +329,9 @@ mod tests {
         assert!(!state.complete().unwrap());
         let mut bad = state.clone();
         bad.outcomes[0].trial = "unrelated".into();
+        assert!(bad.validate().is_err());
+        bad = state.clone();
+        bad.schema_version = 2;
         assert!(bad.validate().is_err());
     }
 
