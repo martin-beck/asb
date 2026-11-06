@@ -792,6 +792,8 @@ fn run_dispatched(
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
             &mut messages,
             options.ignore_collector,
+            options.mode == Some(tape::Mode::Replay)
+                && options.effective_tool_mode() == Some(tape::Mode::Replay),
         )?;
         if !options.json {
             output.write_all(&messages).map_err(io_error)?;

@@ -279,7 +279,8 @@ fn replay_requirement_check_never_installs_missing_inputs() {
         "agent='pi'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='fixture'\n",
     )
     .unwrap();
-    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    let missing =
+        validate_offline_replay_requirements(&config, &tools, &workloads, false).unwrap_err();
     assert!(missing.to_string().contains("locally installed tool `pi`"));
     assert!(!tools.exists());
     assert!(!workloads.exists());
@@ -287,7 +288,8 @@ fn replay_requirement_check_never_installs_missing_inputs() {
     fs::create_dir_all(agent.parent().unwrap()).unwrap();
     fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
-    let missing = validate_offline_replay_requirements(&config, &tools, &workloads).unwrap_err();
+    let missing =
+        validate_offline_replay_requirements(&config, &tools, &workloads, false).unwrap_err();
     assert!(
         missing
             .to_string()
@@ -295,7 +297,7 @@ fn replay_requirement_check_never_installs_missing_inputs() {
     );
     assert!(!workloads.exists());
     config.workload = "bug-fix".into();
-    validate_offline_replay_requirements(&config, &tools, &workloads).unwrap();
+    validate_offline_replay_requirements(&config, &tools, &workloads, false).unwrap();
 }
 
 #[test]

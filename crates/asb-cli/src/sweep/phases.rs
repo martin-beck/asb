@@ -213,6 +213,9 @@ impl<'a> PreparedSweep<'a> {
                     options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     &mut messages,
                     options.ignore_collector,
+                    options.mode == Some(crate::tape::Mode::Replay)
+                        && (!options.tool_mode_explicit
+                            || options.tool_mode == Some(crate::tape::Mode::Replay)),
                 )?;
                 if !options.json {
                     output.write_all(&messages).map_err(crate::io_error)?;

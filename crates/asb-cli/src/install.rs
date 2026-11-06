@@ -938,6 +938,7 @@ pub(crate) fn ensure_execution_requirements(
         invocation_dir,
         output,
         false,
+        mode == Some(crate::tape::Mode::Replay),
     )
 }
 
@@ -948,13 +949,19 @@ pub(crate) fn ensure_execution_requirements_with_policy(
     invocation_dir: &Path,
     output: &mut dyn std::io::Write,
     ignore_collector: bool,
+    full_replay: bool,
 ) -> Result<(), Error> {
     let (root, project_config) = project::load_for_invocation(config_path, Some(invocation_dir))?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
-    if mode == Some(crate::tape::Mode::Replay) {
-        return validate_offline_replay_requirements(config, &tools_root, &workloads_root);
+    if full_replay {
+        return validate_offline_replay_requirements(
+            config,
+            &tools_root,
+            &workloads_root,
+            ignore_collector,
+        );
     }
     let context = OperationContext::new_at(&root, &project_config, invocation_dir)
         .map_err(InstallFailure::into_public)?;
@@ -1044,11 +1051,31 @@ fn validate_offline_replay_requirements(
     config: &BenchmarkConfig,
     tools_root: &Path,
     workloads_root: &Path,
+    ignore_collector: bool,
 ) -> Result<(), Error> {
     let mut required = execution_tool_ids(config, Some(crate::tape::Mode::Replay));
     if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+        let expanded = crate::collectors::expand_dependencies(&measures.collectors);
+        let unavailable = if ignore_collector {
+            crate::collectors::unavailable_preflight(
+                crate::collectors::all(),
+                &expanded,
+                Some(tools_root),
+            )
+        } else {
+            Vec::new()
+        };
+        let selected: Vec<_> = expanded
+            .into_iter()
+            .filter(|selection| {
+                !unavailable.iter().any(|(name, _)| {
+                    crate::collectors::find(name)
+                        .is_some_and(|adapter| adapter.accepts_selection(selection))
+                })
+            })
+            .collect();
         required.extend(
-            crate::collectors::dependency_tools(&measures.collectors)
+            crate::collectors::dependency_tools(&selected)
                 .into_iter()
                 .map(str::to_owned),
         );
@@ -1065,7 +1092,7 @@ fn validate_offline_replay_requirements(
             }
             crate::executables::Lookup::Unusable(path) => {
                 return Err(Error::Input(format!(
-                    "replay tool `{id}` at {} is not executable; repair or reinstall it before replay",
+                    "selected tool executable {} is not a usable executable; remove or repair it, then run `asb tool install {id}`",
                     path.display()
                 )));
             }
