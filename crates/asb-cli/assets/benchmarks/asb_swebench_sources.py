@@ -132,14 +132,44 @@ def buildx_unavailable(command):
         return True
 
 
+def arm64_dockerfile(original):
+    """Translate only the known pinned x86 task definition to a native ARM build.
+
+    Keep package versions, but discard x86-specific Conda build identifiers.
+    The resulting environment is an adaptation, not an upstream ARM image.
+    """
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CatalogError("official task Dockerfile is not UTF-8") from error
+    platform_x86 = "--platform=linux/amd64"
+    conda_x86 = "Miniconda3-py311_23.11.0-2-Linux-x86_64.sh"
+    if text.count(platform_x86) != 1 or text.count(conda_x86) != 1:
+        raise CatalogError("official task definition has an unsupported ARM64 source layout")
+    text = text.replace(platform_x86, "--platform=linux/arm64")
+    text = text.replace(conda_x86, "Miniconda3-py311_23.11.0-2-Linux-aarch64.sh")
+    text = text.replace("ld_impl_linux-64=", "ld_impl_linux-aarch64=")
+    text = re.sub(r"(?m)^(  - [A-Za-z0-9_.-]+=[^=\s]+)=[^\s]+$", r"\1", text)
+    if re.search(r"(?i)\b(?:amd64|x86_64|linux-64)\b", text):
+        raise CatalogError("official task definition retains unsupported x86 dependencies")
+    return text.encode("utf-8")
+
+
 def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                 archive=None, command=None, executor=run_harness, yaml_loader=None,
-                expected_sha256=SOURCE_SHA256, journal=None):
+                expected_sha256=SOURCE_SHA256, journal=None, host_arch=None):
     if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
         raise CatalogError("source builds require a fresh ASB attempt identity")
     archive = archive or Path(__file__).parent / SOURCE_ARCHIVE
     files = read_sources(archive, {row["instance_id"]}, expected_sha256)[row["instance_id"]]
-    dockerfile = validate_task(row, files, dataset, yaml_loader)
+    original_dockerfile = validate_task(row, files, dataset, yaml_loader)
+    arch = host_arch or platform.machine()
+    native_arm = arch in ("aarch64", "arm64")
+    if native_arm:
+        from asb_execution import require_native_docker_host
+        if require_native_docker_host(client) != "arm64":
+            raise CatalogError("ARM64 source image build requires a native ARM64 Docker host")
+    dockerfile = arm64_dockerfile(original_dockerfile) if native_arm else original_dockerfile
     artifacts = Path(artifacts)
     context = artifacts / "source-build"
     context.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -151,7 +181,10 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
     labels = journal.declare("images",tag) if journal is not None else {"asb.owner":"asb","asb.attempt":attempt}
     receipt = {"source": "https://github.com/SWE-bench/swe-bench-tasks",
                "revision": SOURCE_REVISION, "archive_sha256": expected_sha256,
-               "dockerfile_sha256": hashlib.sha256(dockerfile).hexdigest(),
+               "dockerfile_sha256": hashlib.sha256(original_dockerfile).hexdigest(),
+               "build_dockerfile_sha256": hashlib.sha256(dockerfile).hexdigest(),
+               "architecture": "arm64" if native_arm else arch,
+               "adaptation": "native-arm64-version-pinned-v1" if native_arm else None,
                "task_id": row["instance_id"], "tag": tag, "status": "building",
                "limits": {"timeout_seconds": SOURCE_BUILD_TIMEOUT_SECONDS, "memory_bytes": 8 * 1024**3, "cpus": 2}}
     path = artifacts / "source-image.json"
@@ -159,6 +192,8 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
     arguments = command + ["buildx", "build", "--builder", "default", "--load",
         "--resource", "memory=8g", "--resource", "cpu-quota=200000", "--resource", "cpu-period=100000",
         "--tag", tag]
+    if native_arm:
+        arguments += ["--platform", "linux/arm64"]
     for key,value in labels.items():
         arguments += ["--label",key + "=" + value]
     arguments += [
@@ -208,10 +243,13 @@ def resolve_image(client, name, build, host_arch=None):
             except docker.errors.ImageNotFound:
                 image = client.images.pull(arm_name)
                 source = "prebuilt-pull"
+        except docker.errors.ImageNotFound:
+            image, receipt = build()
+            if image.attrs.get("Architecture") != "arm64" or image.attrs.get("Os") != "linux":
+                raise CatalogError("built SWE-bench image is not a native Linux ARM64 image")
+            return image, dict(receipt, fallback_reason="upstream_arm64_image_unavailable")
         except (docker.errors.DockerException, requests.exceptions.RequestException) as error:
-            raise CatalogError(
-                "could not load the upstream ARM64 image for this SWE-bench task; check registry access or select a task with an available ARM64 image"
-            ) from error
+            raise CatalogError("cannot load the upstream ARM64 image; check registry access") from error
         if image.attrs.get("Architecture") != "arm64" or image.attrs.get("Os") != "linux":
             raise CatalogError("upstream SWE-bench image is not a native Linux ARM64 image")
         return image, {"source": source, "declared_image": arm_name, "architecture": "arm64"}
