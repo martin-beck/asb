@@ -4,6 +4,7 @@
 const processAliases = new Map();
 const replayProcesses = new Map();
 let processMappingEnabled = true;
+export function resetReplayComparison() { processAliases.clear(); }
 export function configureReplay({interactions}) {
   processMappingEnabled = interactions.some(row => Array.isArray(row?.agent_record_metadata?.running_session_ids));
 }

@@ -3,8 +3,11 @@
 LLM replay executes local tools again. Some tool output includes incidental
 timings or generated values that can differ even when the useful output is
 unchanged. A project can opt in to scripts that canonicalize selected tool
-result text for cassette comparison. Scripts do not change what the agent's
-tool returns or what ASB forwards to the live provider.
+result text for cassette comparison. New recordings preserve the original
+request and response bodies; no normalizer runs during recording. Replay
+normalizes comparison copies of the recorded and current requests, leaving
+the cassette unchanged. Scripts do not change what the agent's tool returns
+or what ASB forwards to the live provider.
 
 Declare profiles in `.asb/project.toml` and put modules under the project
 root. For example, copy `crates/asb-cli/assets/examples/normalizers/sympy-test-banner.mjs`
