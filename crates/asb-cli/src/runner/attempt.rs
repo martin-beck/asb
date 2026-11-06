@@ -530,6 +530,7 @@ impl<'a> ReadyAttempt<'a> {
                         project_root,
                         project_config,
                         agent: &config.agent,
+                        offline: options.mode == Some(tape::Mode::Replay),
                     },
                 )?;
                 std::fs::create_dir_all(&workspace).map_err(|error| {

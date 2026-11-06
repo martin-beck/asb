@@ -56,12 +56,24 @@ fn download_in(
             // turning it into a permanent installation failure.
             cache.discard();
         }
+        require_online(context, options.kind)?;
         download_uncached(scope, source, staging, options)?;
         verify_download(staging, options)?;
         cache.store(staging)?;
         return Ok(());
     }
+    require_online(context, options.kind)?;
     download_uncached(scope, source, staging, options)
+}
+
+fn require_online(context: &OperationContext, kind: &str) -> InstallResult<()> {
+    if context.is_offline() {
+        return Err(Error::Input(format!(
+            "replay needs a cached {kind}; prepare the replay while online and retry"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn verify_download(staging: &Path, options: &Options<'_>) -> InstallResult<()> {
@@ -491,5 +503,50 @@ pub(in crate::install) fn install_input_in(
             staging.finish(Err(error)).map_err(Into::into)
         }
         Err(super::prepared::PublicationFailure::Check(error)) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    #[test]
+    fn replay_uses_cached_archive_and_does_not_connect_for_missing_archive() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let context = OperationContext::new(&root, &crate::project::ProjectConfig::default())
+            .expect("default installation configuration")
+            .offline();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/archive", listener.local_addr().unwrap());
+        let archive = root.join("archive");
+        let checksum = format!("{:x}", Sha256::digest(b"cached"));
+        let result = crate::tools::runtime::cached_archive_in(
+            &context,
+            &archive,
+            &url,
+            &checksum,
+            &mut |_, _| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        std::fs::write(&archive, b"cached").unwrap();
+        crate::tools::runtime::cached_archive_in(
+            &context,
+            &archive,
+            &url,
+            &checksum,
+            &mut |_, _| {},
+        )
+        .expect("verified cached archive is usable offline");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

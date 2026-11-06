@@ -37,6 +37,46 @@ class ConnectionTests(unittest.TestCase):
              patch.object(RUNTIME.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]):
             self.assertEqual(RUNTIME.docker_command(), ["/bin/sudo", "-n", "--", "/bin/docker", "--host", "unix:///run/docker.sock"])
 
+    def test_replay_rejects_remote_docker_before_any_probe(self):
+        with patch.dict(RUNTIME.os.environ, {"ASB_WORKLOAD_TOOL_MODE":"replay", "DOCKER_HOST":"tcp://192.0.2.1:2375"}, clear=True), \
+             patch.object(RUNTIME.shutil, "which", return_value="/bin/docker"), \
+             patch.object(RUNTIME.subprocess, "run") as probe:
+            with self.assertRaisesRegex(RUNTIME.DockerProbeError, "local Docker endpoint"):
+                RUNTIME.docker_command()
+            probe.assert_not_called()
+
+    def test_replay_rejects_remote_active_context_before_daemon_probe(self):
+        with patch.dict(RUNTIME.os.environ, {"ASB_WORKLOAD_TOOL_MODE":"replay"}, clear=True), \
+             patch.object(RUNTIME.shutil, "which", return_value="/bin/docker"), \
+             patch.object(RUNTIME.subprocess, "check_output", return_value="ssh://remote.example\n"), \
+             patch.object(RUNTIME.subprocess, "run") as probe:
+            with self.assertRaisesRegex(RUNTIME.DockerProbeError, "local Docker endpoint"):
+                RUNTIME.docker_command()
+            probe.assert_not_called()
+
+    def test_replay_rejects_dns_names_without_resolving_them(self):
+        with patch.dict(RUNTIME.os.environ, {"ASB_WORKLOAD_TOOL_MODE":"replay", "DOCKER_HOST":"tcp://localhost:2375"}, clear=True), \
+             patch.object(RUNTIME.shutil, "which", return_value="/bin/docker"), \
+             patch.object(RUNTIME.subprocess, "run") as probe:
+            with self.assertRaisesRegex(RUNTIME.DockerProbeError, "local Docker endpoint"):
+                RUNTIME.docker_command()
+            probe.assert_not_called()
+
+    def test_replay_sudo_fallback_reuses_validated_context(self):
+        with patch.dict(RUNTIME.os.environ, {"ASB_WORKLOAD_TOOL_MODE":"replay"}, clear=True), \
+             patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/" + name), \
+             patch.object(RUNTIME.subprocess, "check_output", side_effect=["unix:///tmp/local.sock\n", "ssh://remote.example\n"]) as inspect, \
+             patch.object(RUNTIME.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]):
+            self.assertEqual(RUNTIME.docker_command(), ["/bin/sudo", "-n", "--", "/bin/docker", "--host", "unix:///tmp/local.sock"])
+            self.assertEqual(inspect.call_count, 1)
+
+    def test_replay_pins_local_docker_endpoint_before_probe(self):
+        with patch.dict(RUNTIME.os.environ, {"ASB_WORKLOAD_TOOL_MODE":"replay", "DOCKER_HOST":"unix:///tmp/test-docker.sock"}, clear=True), \
+             patch.object(RUNTIME.shutil, "which", return_value="/bin/docker"), \
+             patch.object(RUNTIME.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as probe:
+            self.assertEqual(RUNTIME.docker_command(), ["/bin/docker", "--host", "unix:///tmp/test-docker.sock"])
+            self.assertEqual(probe.call_args.args[0][:3], ["/bin/docker", "--host", "unix:///tmp/test-docker.sock"])
+
     def test_docker_negotiates_on_unversioned_endpoint_before_ping(self):
         try:
             import docker

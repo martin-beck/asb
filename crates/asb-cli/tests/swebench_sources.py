@@ -48,6 +48,25 @@ def archive(root, files, extra=()):
 
 
 class SourceContracts(unittest.TestCase):
+    def test_replay_never_pulls_or_builds_missing_task_image(self):
+        class DockerFailure(Exception): pass
+        class ImageNotFound(DockerFailure): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        requests, exceptions = ModuleType('requests'), ModuleType('requests.exceptions')
+        docker.errors, requests.exceptions = errors, exceptions
+        errors.DockerException, errors.ImageNotFound = DockerFailure, ImageNotFound
+        exceptions.RequestException = type('NetworkFailure', (Exception,), {})
+        calls = []
+        def missing(name): calls.append(('get', name)); raise ImageNotFound()
+        def forbidden(*args): raise AssertionError('offline replay attempted network or build')
+        client = SimpleNamespace(images=SimpleNamespace(get=missing, pull=forbidden))
+        with patch.dict(sys.modules, {'docker':docker, 'docker.errors':errors,
+                'requests':requests, 'requests.exceptions':exceptions}):
+            for arch in ('x86_64', 'aarch64'):
+                with self.subTest(arch=arch), self.assertRaisesRegex(sources.CatalogError, 'prepare it before replay'):
+                    sources.resolve_image(client, 'swebench/sweb.eval.x86_64.example', forbidden, host_arch=arch, offline=True)
+        self.assertEqual(len(calls), 2)
+
     def test_arm64_uses_only_native_upstream_images_without_x86_fallback(self):
         class DockerFailure(Exception): pass
         class ImageNotFound(DockerFailure): pass
