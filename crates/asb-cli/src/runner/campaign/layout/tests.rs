@@ -198,6 +198,7 @@ fn plan(mode: ExecutionMode, concurrency: usize, repeat: u64, measured: bool) ->
         ignore_evaluation: false,
         ignore_agent: false,
         ignore_collector: false,
+        ignore_provider_mismatch: false,
         measurement_root: measured.then(|| PathBuf::from("/external/fixture")),
         slots: planned_slots(&configuration, repeat, measured).unwrap(),
         configuration,

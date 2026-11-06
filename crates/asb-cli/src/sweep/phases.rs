@@ -97,6 +97,7 @@ impl<'a> PreparedSweep<'a> {
         plan.ignore_evaluation = options.ignore_evaluation;
         plan.ignore_agent = options.ignore_agent;
         plan.ignore_collector = options.ignore_collector;
+        plan.ignore_provider_mismatch = options.ignore_provider_mismatch;
         let weights: Vec<_> = plan
             .entries
             .iter()
@@ -139,6 +140,7 @@ impl<'a> PreparedSweep<'a> {
                 || saved.ignore_evaluation != plan.ignore_evaluation
                 || saved.ignore_agent != plan.ignore_agent
                 || saved.ignore_collector != plan.ignore_collector
+                || saved.ignore_provider_mismatch != plan.ignore_provider_mismatch
                 || saved.scheduling != plan.scheduling
                 || saved.resources != plan.resources
                 || saved

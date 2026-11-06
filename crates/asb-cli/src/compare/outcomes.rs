@@ -101,6 +101,7 @@ impl Recorded {
             "steps",
             "failure_kind",
             "failure_reason",
+            "ignored_failures",
             "workload_failure",
             "adapter_smoke_success",
             "workload_resource_disposition",
@@ -123,6 +124,16 @@ impl Recorded {
                     ),
                 ));
             }
+        }
+        if self.summary["approximate_replay"]
+            .as_bool()
+            .unwrap_or(false)
+            != measured["approximate_replay"].as_bool().unwrap_or(false)
+        {
+            return Err(invalid(
+                &self.path,
+                "task outcome and measurement disagree on approximate replay status",
+            ));
         }
         Ok(())
     }

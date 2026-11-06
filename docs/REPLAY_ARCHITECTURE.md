@@ -225,3 +225,14 @@ provider/tool request into a valid recorded response, recover an agent that
 cannot start, or establish missing resource cleanup or required run and summary evidence.
 Such independent failures still fail the command. ASB does not contact a live
 provider to replace a missing replay response.
+
+`--ignore-provider-mismatch` additionally permits an unmatched provider request
+when a next recorded response exists. ASB returns that next response and marks
+the attempt `approximate_replay: true`, emits an ignored `provider_mismatch`
+warning, and retains the redacted mismatch evidence. This is an exploratory
+continuation, not proof that the model would have produced the response to the
+new request. The original cassette is unchanged, and replay does not fall back
+to an online provider. An exhausted cassette, oversized request, unretained
+divergence evidence, unsupported external proxy, or other independent failure
+still fails. Replay-derived usage is not treated as verified on an approximate
+attempt. The policy is frozen in repeated campaign and sweep plans.

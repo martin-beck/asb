@@ -90,6 +90,7 @@ struct Settings {
     mode: Mode,
     cassette: PathBuf,
     respect_record_timings: bool,
+    ignore_provider_mismatch: bool,
     workspace: PathBuf,
     invocation_dir: PathBuf,
     /// Opaque adapter-owned request extension; llmtape materializes and
@@ -108,6 +109,9 @@ struct RunningLlmtape {
     url: String,
     progress: Option<PathBuf>,
     mismatch_evidence: Option<PathBuf>,
+    retained_mismatch_evidence: Option<PathBuf>,
+    replay_divergence: Option<crate::proxy::ReplayDivergence>,
+    ignore_provider_mismatch: bool,
     normalization_evidence: Option<PathBuf>,
     cassette: PathBuf,
     mode: Mode,
@@ -173,6 +177,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         true
     }
 
+    fn supports_approximate_replay(&self) -> bool {
+        true
+    }
+
     fn supports_custom_normalization(&self) -> bool {
         true
     }
@@ -185,6 +193,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             mode: request.mode,
             cassette: request.cassette.to_path_buf(),
             respect_record_timings: request.respect_record_timings,
+            ignore_provider_mismatch: request.ignore_provider_mismatch,
             workspace: request.workspace.to_path_buf(),
             invocation_dir: request.invocation_dir.to_path_buf(),
             wire_extension: request.wire_extension,
@@ -277,6 +286,11 @@ impl ProxyAdapter for LlmtapeAdapter {
         // only after listening. A released parent-selected port can be taken
         // by a different ASB process; a TCP connect does not prove ownership.
         let builtin = matches!(executable, ProxyExecutable::Builtin(_));
+        if !builtin && request.ignore_provider_mismatch {
+            return Err(Error::Input(
+                "external tape overrides cannot establish approximate replay evidence".into(),
+            ));
+        }
         if !builtin && request.custom_normalization.is_some() {
             return Err(Error::Input(
                 "external tape overrides do not support project replay normalizers".into(),
@@ -325,6 +339,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_CAPTURE_RECEIPT");
         command.env_remove("ASB_TAPE_CAPTURE_NONCE");
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
+        command.env_remove("ASB_TAPE_IGNORE_PROVIDER_MISMATCH");
+        if request.ignore_provider_mismatch {
+            command.env("ASB_TAPE_IGNORE_PROVIDER_MISMATCH", "1");
+        }
         command.env_remove("ASB_TAPE_AGENT_WIRE_EXTENSION");
         command.env_remove("ASB_TAPE_AGENT_NORMALIZER");
         command.env_remove("ASB_TAPE_CUSTOM_NORMALIZERS");
@@ -468,6 +486,9 @@ impl ProxyAdapter for LlmtapeAdapter {
                 .then(|| replay_cassette.with_extension("jsonl.progress.json")),
             mismatch_evidence: (request.mode == Mode::Replay)
                 .then(|| scratch.path.join("mismatch.json")),
+            retained_mismatch_evidence: None,
+            replay_divergence: None,
+            ignore_provider_mismatch: request.ignore_provider_mismatch,
             normalization_evidence,
             cassette: cassette.clone(),
             mode: request.mode,
@@ -637,10 +658,14 @@ impl ProxySession for RunningLlmtape {
         if self.mode == Mode::Record {
             outputs.push(self.cassette.clone());
         }
+        outputs.extend(self.retained_mismatch_evidence.iter().cloned());
         outputs
     }
     fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
+    }
+    fn replay_divergence(&self) -> Option<crate::proxy::ReplayDivergence> {
+        self.replay_divergence.clone()
     }
     fn capture_evidence(&self) -> Option<crate::proxy::capture::CaptureEvidence> {
         self.capture.clone()
@@ -721,6 +746,47 @@ impl ProxySession for RunningLlmtape {
                 .get("rejected")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
+            let ignored = match value
+                .get("ignored_mismatches")
+                .and_then(|value| value.as_u64())
+            {
+                Some(count) => count,
+                None if !self.ignore_provider_mismatch => 0,
+                None => {
+                    return Err(Error::Run(
+                        "approximate replay did not produce valid mismatch accounting".into(),
+                    ));
+                }
+            };
+            if ignored > 0 {
+                if !self.ignore_provider_mismatch
+                    || ignored > consumed
+                    || !value["first_ignored_mismatch"].is_object()
+                {
+                    return Err(Error::Run(
+                        "invalid approximate replay mismatch evidence".into(),
+                    ));
+                }
+                let path = self
+                    .mismatch_evidence
+                    .as_deref()
+                    .filter(|path| path.is_file())
+                    .ok_or_else(|| {
+                        Error::Run("ignored provider mismatch evidence was not retained".into())
+                    })?;
+                let retained = self._scratch.retain_mismatch_evidence(path)?;
+                let details =
+                    serde_json::json!({"first_mismatch": value["first_ignored_mismatch"]});
+                let context = replay_mismatch_context(&details)
+                    .unwrap_or_else(|| "mismatch details unavailable".into());
+                self.replay_divergence = Some(crate::proxy::ReplayDivergence {
+                    reason: format!(
+                        "approximate replay served {ignored} recorded response(s) despite provider request mismatch; {context}; evidence: {}",
+                        retained.display()
+                    ),
+                });
+                self.retained_mismatch_evidence = Some(retained);
+            }
             if rejected != 0 {
                 let mismatch = replay_mismatch_context(&value)
                     .map(|context| format!("; first mismatch: {context}"))
@@ -1199,6 +1265,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                ignore_provider_mismatch: false,
                 workspace: &root,
                 agent: None,
                 workload: None,
@@ -1230,6 +1297,7 @@ mod tests {
     fn registry_recording_settings_preserve_invocation_context() {
         use crate::proxy::ProxyAdapter;
         let request = crate::proxy::RecordingRequest {
+            ignore_provider_mismatch: false,
             recorder: None,
             mode: Mode::Replay,
             cassette: std::path::Path::new("fixture.jsonl"),
@@ -1261,6 +1329,9 @@ mod tests {
                 .unwrap();
             child.wait().unwrap();
             let mut session = super::RunningLlmtape {
+                ignore_provider_mismatch: false,
+                replay_divergence: None,
+                retained_mismatch_evidence: None,
                 child: Some(child),
                 builtin: true,
                 url: String::new(),
@@ -1318,6 +1389,9 @@ mod tests {
                 std::fs::write(&evidence, "{}").unwrap();
             }
             let mut session = super::RunningLlmtape {
+                ignore_provider_mismatch: false,
+                replay_divergence: None,
+                retained_mismatch_evidence: None,
                 child: None,
                 builtin: true,
                 url: String::new(),
@@ -4158,6 +4232,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                ignore_provider_mismatch: false,
                 workspace: &root,
                 agent: Some("codex"),
                 workload: Some("swe-bench"),
@@ -4211,6 +4286,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                ignore_provider_mismatch: false,
                 workspace: &root,
                 agent: Some("pi"),
                 workload: Some("fixture"),
@@ -4276,6 +4352,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                ignore_provider_mismatch: false,
                 workspace: &root,
                 agent: Some("pi"),
                 workload: Some("fixture"),

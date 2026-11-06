@@ -1193,6 +1193,7 @@ fn recording_association_binds_actual_attempt_and_preserves_uncertain_raw_captur
         sha256: crate::cassette::digest(b"{}\n"),
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: vec![capture.clone()],
         output_files: vec![producer.clone()],
         cleanup_confirmed: false,
@@ -1286,6 +1287,7 @@ fn recording_streams_snapshot_artifact_and_keeps_completed_capture_selectable() 
         sha256: crate::cassette::digest(b"{}\n"),
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: vec![capture],
         output_files: vec![producer],
         cleanup_confirmed: true,
@@ -1353,6 +1355,7 @@ fn recording_setup_failure_retains_partial_bytes_with_unknown_outcomes() {
 
 fn result() -> RunResult<'static> {
     RunResult {
+        approximate_replay: false,
         replay_selection: None,
         native_replay_consumed: None,
         observation: Default::default(),
@@ -1778,6 +1781,7 @@ fn missing_fixture_grade_reports_settled_agent_and_proxy_evidence() {
         ..Default::default()
     };
     let proxy = crate::proxy::Evidence {
+        replay_divergences: Vec::new(),
         captures: Vec::new(),
         output_files: Vec::new(),
         cleanup_confirmed: false,

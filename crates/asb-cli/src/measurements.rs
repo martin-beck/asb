@@ -186,6 +186,8 @@ pub fn collector_description(id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunMeasurement<'a> {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) approximate_replay: bool,
     /// Replay transports selected for this attempt; not a completeness claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) replay_selection: Option<crate::runner::ReplaySelection>,
@@ -2297,6 +2299,7 @@ mod tests {
             classes: vec!["filesystem.read".into()],
         }];
         let run = RunMeasurement {
+            approximate_replay: false,
             ignored_failures: &[],
             replay_selection: None,
             native_replay_consumed: None,

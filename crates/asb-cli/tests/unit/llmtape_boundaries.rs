@@ -35,6 +35,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
         ),
     ] {
         let settings = Settings {
+            ignore_provider_mismatch: false,
             mode: Mode::Record,
             cassette: requested,
             respect_record_timings: false,
@@ -74,6 +75,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
     if std::env::var_os(CHILD).is_some() {
         let fixture = Fixture::new();
         let settings = Settings {
+            ignore_provider_mismatch: false,
             mode: Mode::Record,
             cassette: fixture.0.join("trace.jsonl"),
             respect_record_timings: false,
@@ -150,6 +152,9 @@ fn capture_evidence_and_retained_diagnostics_survive_independent_cleanup_failure
         )
         .unwrap();
         let mut session = RunningLlmtape {
+            ignore_provider_mismatch: false,
+            replay_divergence: None,
+            retained_mismatch_evidence: None,
             child: Some(child),
             builtin: true,
             url: String::new(),
@@ -210,6 +215,9 @@ fn sealed_incomplete_capture_retains_only_its_private_receipt_scratch() {
     let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
     child.wait().unwrap();
     let mut session = RunningLlmtape {
+        ignore_provider_mismatch: false,
+        replay_divergence: None,
+        retained_mismatch_evidence: None,
         child: Some(child),
         builtin: true,
         url: String::new(),
@@ -249,6 +257,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
             _ => std::os::unix::fs::symlink(fixture.0.join("absent"), &path).unwrap(),
         }
         let settings = Settings {
+            ignore_provider_mismatch: false,
             mode: Mode::Record,
             cassette: path,
             respect_record_timings: false,
@@ -286,6 +295,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
     if let Ok(scenario) = std::env::var(CHILD) {
         let root = Fixture::new();
         let mut settings = Settings {
+            ignore_provider_mismatch: false,
             mode: Mode::Record,
             cassette: root.0.join("tape.jsonl"),
             respect_record_timings: false,
@@ -432,6 +442,9 @@ fn replay_finish_reports_absent_and_malformed_progress_then_is_idempotent() {
             fs::write(path, contents).unwrap();
         }
         let mut session = RunningLlmtape {
+            ignore_provider_mismatch: false,
+            replay_divergence: None,
+            retained_mismatch_evidence: None,
             child: Some(child),
             builtin: false,
             url: "http://127.0.0.1:1/v1".into(),
@@ -469,6 +482,9 @@ fn replay_finish_reports_only_validated_structural_mismatch_context() {
         let progress = root.0.join(crate::tools::runtime::unique_id());
         fs::write(&progress, contents).unwrap();
         let mut session = RunningLlmtape {
+            ignore_provider_mismatch: false,
+            replay_divergence: None,
+            retained_mismatch_evidence: None,
             child: Some(child),
             builtin: false,
             url: "http://127.0.0.1:1/v1".into(),

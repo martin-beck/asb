@@ -9,6 +9,7 @@ fn planned(root: &Path, destination: PathBuf) -> crate::runner::campaign::Plan {
         ignore_evaluation: false,
         ignore_agent: false,
         ignore_collector: false,
+        ignore_provider_mismatch: false,
         normalization_policy: None,
         replay_compatibility: None,
         recording_selection: Some(workloads::TaskSelection {

@@ -482,6 +482,62 @@ fn replay_sweep_skips_unexecutable_collector_and_resumes() {
 }
 
 #[test]
+fn approximate_provider_replay_sweep_keeps_policy_and_diagnostics_on_resume() {
+    let project = registered_project(1);
+    let executable = project.0.join("tools/pi/bin/pi");
+    let old = fs::read_to_string(&executable).unwrap();
+    let changed = old.replace("'model':'fixture'", "'model':'changed-fixture'");
+    assert_ne!(old, changed);
+    fixture_writer::write_file(&project.0, &executable, changed).unwrap();
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let options = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-provider-mismatch",
+    ];
+    let output = sweep(&project, None, &options);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["approximate_replay"] == true)
+        .unwrap();
+    assert_eq!(row["ignored_failures"][0]["kind"], "provider_mismatch");
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_provider_mismatch"], true);
+    let mut resume = options.to_vec();
+    resume.push("--resume");
+    let output = sweep(&project, None, &resume);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        records(&output.stdout)
+            .iter()
+            .any(|row| row["reused"] == true && row["approximate_replay"] == true)
+    );
+}
+
+#[test]
 fn continuation_metadata_recovery_cli_rejects_execution_options_without_provider_setup() {
     let project = registered_project(1);
     for arguments in [

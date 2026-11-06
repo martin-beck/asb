@@ -416,6 +416,7 @@ impl Inspection {
             ignore_evaluation: options.ignore_evaluation,
             ignore_agent: options.ignore_agent,
             ignore_collector: options.ignore_collector,
+            ignore_provider_mismatch: options.ignore_provider_mismatch,
             measurement_root: measurement_root.clone(),
             replay_inputs: Vec::new(),
             slots,

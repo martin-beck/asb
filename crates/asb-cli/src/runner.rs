@@ -97,6 +97,8 @@ pub(crate) enum ReplayToolSelection {
 
 #[derive(Serialize)]
 struct RunResult<'a> {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    approximate_replay: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     replay_selection: Option<ReplaySelection>,
     /// Guest-attested native tool stream consumption, not total effect coverage.
@@ -239,6 +241,7 @@ pub(crate) struct RunOptions<'a> {
     pub ignore_evaluation: bool,
     pub ignore_agent: bool,
     pub ignore_collector: bool,
+    pub ignore_provider_mismatch: bool,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,
@@ -1693,6 +1696,7 @@ fn render_json(result: &RunResult<'_>, output: &mut dyn Write) -> Result<(), Err
         "workload_baseline": result.workload_baseline,
         "workload_failure": result.workload_failure,
         "adapter_smoke_success": result.adapter_smoke_success,
+        "approximate_replay": result.approximate_replay,
         "ignored_failures": result.disposition.ignored_failures,
         "failure_kind": result.disposition.failure.as_ref().map(|f| f.kind),
         "failure_reason": result.disposition.failure.as_ref().map(|f| &f.reason),
@@ -2853,6 +2857,7 @@ mod tests {
             .unwrap();
         session
             .finish(crate::measurements::RunMeasurement {
+                approximate_replay: false,
                 ignored_failures: &[],
                 replay_selection: None,
                 native_replay_consumed: None,
@@ -3214,6 +3219,7 @@ mod tests {
                 true,
                 &evidence,
                 &crate::proxy::Evidence {
+                    replay_divergences: Vec::new(),
                     captures: Vec::new(),
                     output_files: Vec::new(),
                     cleanup_confirmed: true,
@@ -3287,6 +3293,7 @@ mod tests {
                     true,
                     &[],
                     &crate::proxy::Evidence {
+                        replay_divergences: Vec::new(),
                         captures: Vec::new(),
                         output_files: Vec::new(),
                         cleanup_confirmed: true
@@ -3322,6 +3329,7 @@ mod tests {
             replica_index: None,
             execution_cohort: None,
             schema_version: 2,
+            approximate_replay: false,
             disposition: RunDisposition {
                 status: RunStatus::Completed,
                 failure: None,

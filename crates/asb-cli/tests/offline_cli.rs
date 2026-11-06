@@ -3567,6 +3567,78 @@ fn replay_ignored_failures_are_warned_and_preserve_real_outcomes() {
 
 #[cfg(unix)]
 #[test]
+fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() {
+    let project = replay_project(1);
+    let result = replay(
+        &project,
+        "mismatch",
+        &["--ignore-provider-mismatch", "--json"],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["approximate_replay"], true);
+    assert_eq!(json["ignored_failures"][0]["kind"], "provider_mismatch");
+    assert_eq!(json["ignored_failures"][0]["ignored"], true);
+    assert_eq!(json["ignored_failures"][0]["severity"], "warning");
+    assert!(
+        json["ignored_failures"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let reason = json["ignored_failures"][0]["reason"].as_str().unwrap();
+    let evidence_path = reason.rsplit_once("evidence: ").unwrap().1;
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(evidence_path).unwrap()).unwrap();
+    assert_eq!(evidence["mismatch"]["sequence"], 1);
+    assert!(json["token_usage"]["total_tokens"].is_null());
+    let log: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+    assert_eq!(log["approximate_replay"], true);
+    assert_eq!(log["ignored_failures"], json["ignored_failures"]);
+    expect_success(&project.command(&["compare", "benchmark.toml"]));
+    let comparison = project.0.join("results/benchmark-comparison");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(comparison.join("comparison.json")).unwrap())
+            .unwrap();
+    assert!(
+        report["benchmarks"][0]["status"]
+            .as_str()
+            .unwrap()
+            .contains("approximate replay")
+    );
+    assert!(
+        std::fs::read_to_string(comparison.join("report.html"))
+            .unwrap()
+            .contains("approximate replay")
+    );
+    let human = replay(
+        &replay_project(1),
+        "mismatch",
+        &["--ignore-provider-mismatch"],
+    );
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Warning: ignored provider_mismatch"));
+    let no_response = replay(&replay_project(1), "extra", &["--ignore-provider-mismatch"]);
+    assert!(!no_response.status.success());
+    assert!(String::from_utf8_lossy(&no_response.stderr).contains("replay rejected"));
+    let rejected = replay(&replay_project(1), "mismatch", &[]);
+    assert!(!rejected.status.success());
+    let rejected = replay_project(1).command(&[
+        "run",
+        "benchmark.toml",
+        "--tool-replay",
+        "--ignore-provider-mismatch",
+    ]);
+    assert!(!rejected.status.success());
+}
+
+#[cfg(unix)]
+#[test]
 fn pre_solved_workspace_is_preserved_but_never_earns_resolution_credit() {
     let project = replay_project(1);
     project.write(

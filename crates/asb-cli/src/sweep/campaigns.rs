@@ -262,6 +262,7 @@ pub(super) fn prepare(
                 ignore_evaluation: options.ignore_evaluation,
                 ignore_agent: options.ignore_agent,
                 ignore_collector: options.ignore_collector,
+                ignore_provider_mismatch: options.ignore_provider_mismatch,
                 // PreparedSweep warmed this fresh population before campaign
                 // construction, so each repeated task must not revalidate the
                 // same shared installations.

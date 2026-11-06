@@ -142,6 +142,8 @@ if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
+const ignoreProviderMismatch = process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH === "1";
+delete process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH;
 const respectRecordTimings = args.includes("--respect-record-timings");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
@@ -585,6 +587,8 @@ function advanceNativeTools() {
 }
 let rejected = 0;
 let firstMismatch = null;
+let ignoredMismatches = 0;
+let firstIgnoredMismatch = null;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
@@ -593,6 +597,8 @@ function writeProgress() {
       consumed: cursor,
       total: interactions.length,
       rejected,
+      ignored_mismatches: ignoredMismatches,
+      ...(firstIgnoredMismatch ? { first_ignored_mismatch: firstIgnoredMismatch } : {}),
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
@@ -962,10 +968,17 @@ async function handle(request, response, recording) {
       }
       const mismatch = requestMismatch(interaction.request, recordedRequest, cursor + 1);
       retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
-      reject(mismatch);
-      response.writeHead(409, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: "request does not match cassette" }));
-      return;
+      if (!ignoreProviderMismatch) {
+        reject(mismatch);
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "request does not match cassette" }));
+        return;
+      }
+      ignoredMismatches += 1;
+      firstIgnoredMismatch ??= mismatch;
+      // Deliberately consume the next recorded response. This does not assert
+      // semantic equivalence: the owning run marks the replay approximate.
+      writeProgress();
     }
     if (agentWireExtension?.observeReplayExchange) {
       let parsed;

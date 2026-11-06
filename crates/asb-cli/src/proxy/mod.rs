@@ -14,6 +14,7 @@ pub(crate) struct RecordingRequest<'a> {
     pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
     pub respect_record_timings: bool,
+    pub ignore_provider_mismatch: bool,
     pub workspace: &'a std::path::Path,
     pub invocation_dir: &'a std::path::Path,
     pub wire_extension: Option<&'static str>,
@@ -65,6 +66,9 @@ pub(crate) trait ProxyAdapter: Sync {
     }
     /// This adapter can operate during replay without any online backend.
     fn supports_offline_replay(&self) -> bool {
+        false
+    }
+    fn supports_approximate_replay(&self) -> bool {
         false
     }
     fn supports_custom_normalization(&self) -> bool {
@@ -200,6 +204,12 @@ fn start_recording_chain_with(
     registry: &[&dyn ProxyAdapter],
 ) -> Result<Chain, Error> {
     let adapter = resolve_recorder(registry, request.recorder)?;
+    if request.ignore_provider_mismatch && !adapter.supports_approximate_replay() {
+        return Err(Error::Input(format!(
+            "recording proxy `{}` does not support approximate replay",
+            adapter.name()
+        )));
+    }
     if request.custom_normalization.is_some() && !adapter.supports_custom_normalization() {
         return Err(Error::Input(format!(
             "recording proxy `{}` does not support project replay normalizers",
@@ -320,6 +330,9 @@ pub(crate) trait ProxySession {
     fn cleanup_confirmed(&self) -> bool {
         false
     }
+    fn replay_divergence(&self) -> Option<ReplayDivergence> {
+        None
+    }
     fn capture_evidence(&self) -> Option<capture::CaptureEvidence> {
         None
     }
@@ -334,7 +347,13 @@ pub(crate) struct Completion {
     pub evidence: Evidence,
 }
 
+#[derive(Clone)]
+pub(crate) struct ReplayDivergence {
+    pub reason: String,
+}
+
 pub(crate) struct Evidence {
+    pub replay_divergences: Vec<ReplayDivergence>,
     pub captures: Vec<capture::CaptureEvidence>,
     pub output_files: Vec<std::path::PathBuf>,
     pub cleanup_confirmed: bool,
@@ -424,6 +443,11 @@ impl Chain {
 
     pub(crate) fn finish(mut self) -> Completion {
         let mut failure = None;
+        for hop in self.hops.iter_mut().rev() {
+            if let Err(error) = hop.finish() {
+                failure.get_or_insert(error);
+            }
+        }
         let mut output_files = self
             .hops
             .iter()
@@ -431,14 +455,14 @@ impl Chain {
             .collect::<Vec<_>>();
         output_files.sort();
         output_files.dedup();
-        for hop in self.hops.iter_mut().rev() {
-            if let Err(error) = hop.finish() {
-                failure.get_or_insert(error);
-            }
-        }
         Completion {
             result: failure.map_or(Ok(()), Err),
             evidence: Evidence {
+                replay_divergences: self
+                    .hops
+                    .iter()
+                    .filter_map(|hop| hop.replay_divergence())
+                    .collect(),
                 captures: self
                     .hops
                     .iter()
@@ -614,6 +638,7 @@ mod tests {
             mode: crate::tape::Mode::Replay,
             cassette: std::path::Path::new("fixture"),
             respect_record_timings: false,
+            ignore_provider_mismatch: false,
             workspace: std::path::Path::new("."),
             invocation_dir: std::path::Path::new("."),
             wire_extension: None,
@@ -744,6 +769,7 @@ mod tests {
         assert_eq!(selected.name(), "other-recorder");
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
+            ignore_provider_mismatch: false,
             recorder: None,
             mode: crate::tape::Mode::Replay,
             cassette,
