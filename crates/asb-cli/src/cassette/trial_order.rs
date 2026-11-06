@@ -25,6 +25,64 @@ pub struct TrialPreparation {
     in_flight: Option<String>,
 }
 
+/// A preparation ledger bound to immutable sweep and configuration inputs.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundTrialPreparation {
+    sweep_sha256: String,
+    configuration_sha256: String,
+    preparation: TrialPreparation,
+}
+
+impl BoundTrialPreparation {
+    /// Bind a new ledger to canonical digests of the sweep and one combination.
+    pub fn new(
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: TrialOrder,
+    ) -> Result<Self, Error> {
+        if !super::valid_digest(sweep_sha256) || !super::valid_digest(configuration_sha256) {
+            return Err(Error(
+                "sample preparation requires valid sweep and configuration digests".into(),
+            ));
+        }
+        Ok(Self {
+            sweep_sha256: sweep_sha256.into(),
+            configuration_sha256: configuration_sha256.into(),
+            preparation: TrialPreparation::new(order),
+        })
+    }
+
+    /// Validate persisted state against the current immutable inputs and order.
+    pub fn validate(
+        &self,
+        sweep_sha256: &str,
+        configuration_sha256: &str,
+        order: &TrialOrder,
+    ) -> Result<(), Error> {
+        if !super::valid_digest(sweep_sha256)
+            || !super::valid_digest(configuration_sha256)
+            || self.sweep_sha256 != sweep_sha256
+            || self.configuration_sha256 != configuration_sha256
+            || self.preparation.target != order.target
+            || self.preparation.candidates != order.candidates
+        {
+            return Err(Error("sample preparation inputs or candidate order changed; preserve existing evidence and create a new sweep".into()));
+        }
+        self.preparation.validate()
+    }
+
+    /// Access the underlying ledger after validating its bindings.
+    pub fn preparation(&self) -> &TrialPreparation {
+        &self.preparation
+    }
+
+    /// Modify the ledger after validating its bindings while holding its owner lock.
+    pub fn preparation_mut(&mut self) -> &mut TrialPreparation {
+        &mut self.preparation
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TrialOutcome {
@@ -574,5 +632,30 @@ mod tests {
         summary["replay_selection"]["provider_replay"] = serde_json::json!(true);
         summary.as_object_mut().unwrap().remove("failure_kind");
         assert!(ReplayObservation::from_summary(&summary).is_err());
+    }
+
+    #[test]
+    fn persisted_ledger_refuses_changed_sweep_configuration_or_catalog() {
+        let ids = vec!["one".into(), "two".into(), "three".into()];
+        let order = TrialOrder::new(&ids, 1, 42).unwrap();
+        let sweep = "a".repeat(64);
+        let config = "b".repeat(64);
+        let mut bound = BoundTrialPreparation::new(&sweep, &config, order.clone()).unwrap();
+        let started = bound.preparation_mut().start().unwrap().unwrap();
+        let bytes = serde_json::to_vec(&bound).unwrap();
+        let restored: BoundTrialPreparation = serde_json::from_slice(&bytes).unwrap();
+        restored.validate(&sweep, &config, &order).unwrap();
+        assert_eq!(
+            restored.preparation().in_flight().unwrap(),
+            Some(started.as_str())
+        );
+        assert!(restored.validate(&"c".repeat(64), &config, &order).is_err());
+        assert!(restored.validate(&sweep, &"d".repeat(64), &order).is_err());
+        assert!(
+            restored
+                .validate(&sweep, &config, &TrialOrder::new(&ids, 2, 42).unwrap())
+                .is_err()
+        );
+        assert!(BoundTrialPreparation::new("bad", &config, order).is_err());
     }
 }
