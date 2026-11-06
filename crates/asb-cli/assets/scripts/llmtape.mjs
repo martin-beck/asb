@@ -592,6 +592,11 @@ let rejected = 0;
 let firstMismatch = null;
 let ignoredMismatchCount = 0;
 let replayEvidenceFailure = false;
+// Only hold this while committing a selected exchange. Waiting for a later
+// recorded request happens outside the lock, so out-of-order peers can still
+// advance the cursor. Delivery itself is also outside the lock.
+let replayCommitPending = null;
+let replayCommitWaiters = 0;
 const progressPath = `${cassette}.progress.json`;
 function writeProgress() {
   if (mode === "replay") {
@@ -897,6 +902,30 @@ async function handle(request, response, recording) {
   if (mode === "replay") {
     const deadline = performance.now() + MAX_REPLAY_ORDER_WAIT_MS;
     while (true) {
+      if (replayCommitPending) {
+        if (replayCommitWaiters >= MAX_REPLAY_ORDER_WAITERS) {
+          reject({ sequence: cursor + 1, category: "replay_commit_capacity", path: "$" });
+          response.writeHead(503, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "too many requests waiting for replay" }));
+          return;
+        }
+        replayCommitWaiters += 1;
+        let timer;
+        try {
+          await Promise.race([replayCommitPending, new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, deadline - performance.now())); })]);
+        } finally {
+          clearTimeout(timer);
+          replayCommitWaiters -= 1;
+        }
+        if (response.destroyed || stopping) return;
+        if (replayCommitPending && performance.now() >= deadline) {
+          reject({ sequence: cursor + 1, category: "replay_commit_timeout", path: "$" });
+          response.writeHead(409, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "timed out waiting for replay" }));
+          return;
+        }
+        continue;
+      }
       advanceNativeTools();
       if (isReplayProbe(recordedRequest)) {
         const deferred = deferredProbes.findIndex((index) => requestKey(interactions[index].request) === requestKey(recordedRequest));
@@ -943,8 +972,18 @@ async function handle(request, response, recording) {
       if (!await awaitReplayTurn(recordedRequest, response, deadline)) return;
       // Another request may have advanced to a probe, a duplicate, or the
       // end while this one waited. Reevaluate before choosing a response.
-      if (cursor === expectedCursor) break;
+      if (cursor === expectedCursor && !replayCommitPending) break;
     }
+    let unlockCommit;
+    replayCommitPending = new Promise((resolve) => { unlockCommit = resolve; });
+    const releaseCommit = () => {
+      if (!unlockCommit) return;
+      const release = unlockCommit;
+      unlockCommit = null;
+      replayCommitPending = null;
+      release();
+    };
+    try {
     const interaction = interactions[cursor];
     if (!interaction) {
       reject({ sequence: cursor + 1, category: "cassette_exhausted", path: "$" });
@@ -965,6 +1004,7 @@ async function handle(request, response, recording) {
         }
       }
       if (retry) {
+        releaseCommit();
         await deliverRecordedResponse(response, retry);
         return;
       }
@@ -1000,8 +1040,10 @@ async function handle(request, response, recording) {
     cursor += 1;
     advanceNativeTools();
     writeProgress();
+    releaseCommit();
     await deliverRecordedResponse(response, interaction);
     return;
+    } finally { releaseCommit(); }
   }
 
   // Preserve provider-specific prefixes (e.g. OpenRouter's /api) while

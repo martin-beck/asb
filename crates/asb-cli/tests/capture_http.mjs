@@ -30,6 +30,26 @@ test("ignored mismatch journal write failure makes replay shutdown fail", { time
   assert.deepEqual(await exited,{code:2,signal:null});
 });
 
+test("concurrent ignored provider mismatches consume different recorded exchanges", { timeout: 10000 }, async (t) => {
+  const parent = join(process.cwd(), "target/capture-http-fixtures"); fs.mkdirSync(parent, {recursive:true});
+  const root = fs.mkdtempSync(join(parent, "mismatch-concurrent-"));
+  const cassette = join(root,"cassette.jsonl"), ready = join(root,"ready.json"), journal = join(root,"journal.jsonl"), wire = join(root,"wire.mjs");
+  fs.writeFileSync(wire,'export async function observeReplayExchange() { await new Promise(resolve => setTimeout(resolve,100)); }');
+  const exchange = (id) => JSON.stringify({request:{method:"POST",url:"/v1/responses",body:JSON.stringify({input:`original-${id}`})},response:{status:200,headers:{},body:JSON.stringify({id})}});
+  fs.writeFileSync(cassette,`${exchange(1)}\n${exchange(2)}\n`);
+  const script=fileURLToPath(new URL("../assets/scripts/llmtape.mjs",import.meta.url));
+  const child=spawn(process.execPath,[script,"replay","--port","0","--cassette",cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:"1",ASB_TAPE_READY_FILE:ready,ASB_TAPE_IGNORE_PROVIDER_MISMATCH:"1",ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_AGENT_WIRE_EXTENSION:wire},stdio:["pipe","ignore","pipe"]});
+  const exited=new Promise((resolve,reject)=>{child.once("error",reject);child.once("exit",(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null) child.kill("SIGKILL");await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const deadline=performance.now()+3000;while(!fs.existsSync(ready)){assert.ok(performance.now()<deadline);await delay(10);}
+  const port=JSON.parse(fs.readFileSync(ready)).port;
+  const replies=await Promise.all([request(port,"/v1/responses",JSON.stringify({input:"changed-a"})),request(port,"/v1/responses",JSON.stringify({input:"changed-b"}))]);
+  assert.deepEqual(replies.map(reply=>JSON.parse(reply.body).id).sort(),[1,2]);
+  const events=fs.readFileSync(journal,"utf8").trim().split("\n").map(line=>JSON.parse(line));
+  assert.deepEqual(events.map(event=>event.sequence),[1,2]);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null});
+});
+
 async function fixture(t, upstreamHandler, options = {}) {
   const parent = join(process.cwd(), "target/capture-http-fixtures");
   fs.mkdirSync(parent, { recursive: true });
