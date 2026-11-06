@@ -1220,7 +1220,7 @@ struct SetupArgs {
     #[arg(long, value_name = "INSTANCE")]
     trial: Vec<String>,
     /// Sample this many distinct trials; optionally scope as WORKLOAD=COUNT.
-    #[arg(long, value_name = "COUNT", conflicts_with_all = ["trial", "mode", "preset"])]
+    #[arg(long, value_name = "COUNT", conflicts_with_all = ["mode", "preset"])]
     trial_count: Vec<String>,
     /// Repeatable trial-set TOML; includes all enabled trials unless --trial is given.
     #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]

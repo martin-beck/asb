@@ -61,8 +61,10 @@ impl ReadySelection {
             ];
             if names.iter().any(|name| {
                 name.is_empty() || name.len() > 4096 || name.chars().any(char::is_control)
-            }) || !identities.insert(names)
-                || !cassette::valid_digest(&winner.cassette_sha256)
+            }) || !identities.insert((
+                Path::new(&winner.replay_config).components().next(),
+                &winner.trial,
+            )) || !cassette::valid_digest(&winner.cassette_sha256)
                 || !safe_reference(&winner.replay_config, "toml")
                 || !safe_reference(&winner.cassette, "zip")
             {
@@ -544,6 +546,13 @@ mod tests {
         value = ready();
         value.winners[0].cassette_sha256 = "not-a-digest".into();
         assert!(value.validate().is_err());
+        value = ready();
+        let mut distinct: Winner =
+            serde_json::from_value(serde_json::to_value(&value.winners[0]).unwrap()).unwrap();
+        distinct.replay_config = "another-group/candidate/replay.toml".into();
+        distinct.cassette = "another-group/candidate/recording.zip".into();
+        value.winners.push(distinct);
+        assert!(value.validate().is_ok());
         value = ready();
         let duplicate =
             serde_json::from_value(serde_json::to_value(&value.winners[0]).unwrap()).unwrap();
