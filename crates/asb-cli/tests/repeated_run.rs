@@ -541,6 +541,15 @@ fn sampled_preparation_replaces_a_failed_replay_and_reuses_success() {
 
 #[test]
 fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
+    sampled_sweep_fixture(false);
+}
+
+#[test]
+fn sampled_sweep_preserves_a_fixed_workload() {
+    sampled_sweep_fixture(true);
+}
+
+fn sampled_sweep_fixture(mixed: bool) {
     let project = Project::new();
     project.config(1);
     let agent = project.0.join("fixture-agent");
@@ -548,6 +557,11 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         "url = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
         "if (root/'attempts.jsonl').exists(): body['messages'] = [{'role':'user','content':'different-on-replay'}]\nurl = os.environ['ASB_PROVIDER_BASE_URL'].rstrip('/')",
     );
+    let script = if mixed {
+        script.replace("before = (workspace/'src/parser.py').read_text()", "(workspace/'src').mkdir(exist_ok=True)\nif not (workspace/'src/parser.py').exists(): (workspace/'src/parser.py').write_text('fixture')\nbefore = (workspace/'src/parser.py').read_text()")
+    } else {
+        script
+    };
     fs::write(agent, script).unwrap();
     fs::write(
         project.0.join("workloads/sample.workload.toml"),
@@ -573,7 +587,19 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    fs::write(project.0.join("sample-sweep.toml"), format!("configs=['benchmark.toml']\n[[sampled_trials]]\nworkload='bug-fix'\ncount=1\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
+    let configs = if mixed {
+        let fixed = text.replace("workload='bug-fix'", "workload='repository-navigation'");
+        fs::write(project.0.join("fixed.toml"), fixed).unwrap();
+        fs::write(
+            project.0.join("workloads/repository-navigation.txt"),
+            "Find the requested file.",
+        )
+        .unwrap();
+        "'benchmark.toml','fixed.toml'"
+    } else {
+        "'benchmark.toml'"
+    };
+    fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount=1\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
     let provider = RecordingProvider::new();
     let run = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
@@ -593,7 +619,8 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
             .output()
             .unwrap()
     };
-    for expected_calls in [2, 2] {
+    let expected_count = if mixed { 3 } else { 2 };
+    for expected_calls in [expected_count, expected_count] {
         let result = run();
         assert!(
             result.status.success(),
@@ -622,7 +649,7 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
     )
     .unwrap();
     let winners = ready["winners"].as_array().unwrap();
-    assert_eq!(winners.len(), 1);
+    assert_eq!(winners.len(), if mixed { 2 } else { 1 });
     assert_eq!(
         winners[0]["trial"].as_str(),
         Some(order.candidates()[1].as_str())
@@ -649,12 +676,28 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         .output()
         .unwrap();
     assert!(
-        result.status.success(),
+        result.status.success()
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("1 failed benchmark")),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    if mixed {
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains("repository-navigation, trial default")
+        );
+        assert!(
+            project
+                .0
+                .join("results/sample-sweep-comparison/report.html")
+                .is_file()
+        );
+    }
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
     let path = project
         .0
         .join(".sample-sweep-sample-preparation/ready.json");
@@ -664,7 +707,10 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("selection differs"));
     assert_eq!(fs::read(&path).unwrap(), b"unrelated existing evidence");
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        expected_count
+    );
     fs::write(path, original_ready).unwrap();
     drop(provider);
     let mut offline = Command::new(env!("CARGO_BIN_EXE_asb"));
@@ -677,7 +723,8 @@ fn sampled_sweep_prepares_replacement_and_reuses_its_group_ledger() {
         .output()
         .unwrap();
     assert!(
-        result.status.success(),
+        result.status.success()
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("1 failed benchmark")),
         "offline replay: stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)

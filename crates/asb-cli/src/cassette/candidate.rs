@@ -159,7 +159,9 @@ fn replay_configuration(
             .ok_or_else(|| Error("sampled artifact path must be valid UTF-8".into()))
     };
     let mut replay = base.clone();
-    replay.trial = Some(trial.to_owned());
+    if replay.trial.is_some() {
+        replay.trial = Some(trial.to_owned());
+    }
     replay.workspace = as_string(&directory.join("replay-workspace"))?;
     replay.log_file = as_string(&directory.join("replay.log"))?;
     if let Some(measurements) = replay.measurements.as_mut() {
@@ -190,8 +192,11 @@ pub fn record_and_replay_candidate(
     };
     let record = load(record_config)?;
     let replay = load(replay_config)?;
-    if record.concurrency != 1 || record.trial.is_none() || record.trial != replay.trial {
-        return Err(Error("sample recording and replay must select the same explicit trial, with one recording replica".into()));
+    if record.concurrency != 1 || record.trial != replay.trial {
+        return Err(Error(
+            "sample recording and replay must select the same trial, with one recording replica"
+                .into(),
+        ));
     }
     let mut comparable = record.clone();
     comparable.concurrency = replay.concurrency;

@@ -123,7 +123,11 @@ fn read_ready(path: &Path) -> Result<ReadySelection, Error> {
 struct Inputs {
     root: PathBuf,
     sweep_digest: String,
-    templates: BTreeMap<plan::SampledKey, crate::benchmark::BenchmarkConfig>,
+    groups: Vec<(
+        String,
+        crate::benchmark::BenchmarkConfig,
+        cassette::TrialOrder,
+    )>,
 }
 
 fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs, Error> {
@@ -139,13 +143,39 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
     let plan = plan::build_at(parent, sweep, base)?;
     let templates =
         plan::sampled_templates(sweep, plan.entries.iter().map(|entry| &entry.configuration))?;
-    if plan.entries.iter().any(|entry| {
-        !sweep
-            .sampled_trials
-            .iter()
-            .any(|sample| sample.workload == entry.configuration.workload)
-    }) {
-        return Err(Error::Input("preparing a mix of sampled and fixed workloads is not yet supported; no candidate was started".into()));
+    let samples: BTreeMap<_, _> = sweep
+        .sampled_trials
+        .iter()
+        .map(|sample| (sample.workload.as_str(), sample))
+        .collect();
+    let mut groups = Vec::new();
+    for (key, config) in templates {
+        let sample = samples[config.workload.as_str()];
+        let seed = u64::from_str_radix(&sample.seed, 16)
+            .map_err(|_| Error::Input("invalid sample seed".into()))?;
+        let order = cassette::TrialOrder::new(&sample.candidates, sample.count, seed)
+            .map_err(|error| Error::Input(error.to_string()))?;
+        let name = cassette::digest(
+            &serde_json::to_vec(&key)
+                .map_err(|_| Error::Input("cannot encode sampled combination".into()))?,
+        );
+        groups.push((name, config, order));
+    }
+    for (index, entry) in plan.entries.iter().enumerate() {
+        let config = &entry.configuration;
+        if samples.contains_key(config.workload.as_str()) {
+            continue;
+        }
+        // Fixed entries retain their exact trial, including an absent trial.
+        // Their distinct input index prevents unrelated configurations sharing a ledger.
+        let name = cassette::digest(format!("fixed-entry-v1:{index}").as_bytes());
+        let id = config
+            .trial
+            .clone()
+            .unwrap_or_else(|| config.workload.clone());
+        let order = cassette::TrialOrder::new(&[id], 1, 0)
+            .map_err(|error| Error::Input(error.to_string()))?;
+        groups.push((name, config.clone(), order));
     }
     let mut digest = Sha256::new();
     digest.update(b"asb-sampled-sweep-input-v1\0");
@@ -159,7 +189,7 @@ fn inputs(path: &Path, sweep: &SweepFile, options: Options<'_>) -> Result<Inputs
     Ok(Inputs {
         root: owner.join(format!(".{stem}-sample-preparation")),
         sweep_digest: format!("{:x}", digest.finalize()),
-        templates,
+        groups,
     })
 }
 
@@ -173,7 +203,7 @@ pub(crate) fn resolve(
     let Inputs {
         root,
         sweep_digest,
-        templates,
+        groups,
     } = inputs(path, sweep, options)?;
     let ready = read_ready(&root.join("ready.json")).map_err(|error| {
         Error::Input(format!(
@@ -188,22 +218,8 @@ pub(crate) fn resolve(
     {
         return Err(Error::Input("sampled replay inputs or max-steps changed; preserve the prepared evidence and create a new sweep".into()));
     }
-    let samples: BTreeMap<_, _> = sweep
-        .sampled_trials
-        .iter()
-        .map(|sample| (sample.workload.as_str(), sample))
-        .collect();
     let mut expected = Vec::new();
-    for (key, config) in templates {
-        let sample = samples[config.workload.as_str()];
-        let seed = u64::from_str_radix(&sample.seed, 16)
-            .map_err(|_| Error::Input("invalid sample seed".into()))?;
-        let order = cassette::TrialOrder::new(&sample.candidates, sample.count, seed)
-            .map_err(|error| Error::Input(error.to_string()))?;
-        let group_name = cassette::digest(
-            &serde_json::to_vec(&key)
-                .map_err(|_| Error::Input("cannot encode sampled combination".into()))?,
-        );
+    for (group_name, config, order) in groups {
         let group = root.join(&group_name);
         let template = group.join("template.toml");
         let expected_template = toml::to_string_pretty(&config)
@@ -295,7 +311,7 @@ pub(super) fn prepare(
     let Inputs {
         root,
         sweep_digest,
-        templates,
+        groups,
     } = inputs(path, sweep, options)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&root)
         && (!metadata.is_dir() || metadata.file_type().is_symlink())
@@ -305,21 +321,8 @@ pub(super) fn prepare(
         ));
     }
     std::fs::create_dir_all(&root).map_err(crate::io_error)?;
-    let samples: BTreeMap<_, _> = sweep
-        .sampled_trials
-        .iter()
-        .map(|sample| (sample.workload.as_str(), sample))
-        .collect();
     let mut winners = Vec::new();
-    for (key, config) in templates {
-        let sample = samples[config.workload.as_str()];
-        let seed = u64::from_str_radix(&sample.seed, 16)
-            .map_err(|_| Error::Input("invalid sample seed".into()))?;
-        let order = cassette::TrialOrder::new(&sample.candidates, sample.count, seed)
-            .map_err(|error| Error::Input(error.to_string()))?;
-        let key_bytes = serde_json::to_vec(&key)
-            .map_err(|_| Error::Input("cannot encode sampled combination".into()))?;
-        let group_name = cassette::digest(&key_bytes);
+    for (group_name, config, order) in groups {
         let group = root.join(&group_name);
         std::fs::create_dir_all(&group).map_err(crate::io_error)?;
         let template = group.join("template.toml");
