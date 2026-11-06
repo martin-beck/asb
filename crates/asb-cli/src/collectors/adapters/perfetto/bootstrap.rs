@@ -134,21 +134,30 @@ fn run(args: &[OsString]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
+// Linux statvfs f_flag ABI values. libc's musl bindings omit the atime
+// constants even though musl exposes the same values in bits/statvfs.h.
+const STATVFS_NOATIME: libc::c_ulong = 1024;
+#[cfg(target_os = "linux")]
+const STATVFS_NODIRATIME: libc::c_ulong = 2048;
+#[cfg(target_os = "linux")]
+const STATVFS_RELATIME: libc::c_ulong = 4096;
+
+#[cfg(target_os = "linux")]
 fn readonly_mount_flags(flags: libc::c_ulong) -> libc::c_ulong {
     let mut result = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
     for (source, target) in [
         (libc::ST_NOSUID, libc::MS_NOSUID),
         (libc::ST_NODEV, libc::MS_NODEV),
         (libc::ST_NOEXEC, libc::MS_NOEXEC),
-        (libc::ST_NOATIME, libc::MS_NOATIME),
-        (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-        (libc::ST_RELATIME, libc::MS_RELATIME),
+        (STATVFS_NOATIME, libc::MS_NOATIME),
+        (STATVFS_NODIRATIME, libc::MS_NODIRATIME),
+        (STATVFS_RELATIME, libc::MS_RELATIME),
     ] {
         if flags & source != 0 {
             result |= target;
         }
     }
-    if flags & (libc::ST_NOATIME | libc::ST_RELATIME) == 0 {
+    if flags & (STATVFS_NOATIME | STATVFS_RELATIME) == 0 {
         result |= libc::MS_STRICTATIME;
     }
     result
@@ -160,14 +169,22 @@ mod coverage_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn atime_statvfs_values_match_glibc_bindings() {
+        assert_eq!(super::STATVFS_NOATIME, libc::ST_NOATIME);
+        assert_eq!(super::STATVFS_NODIRATIME, libc::ST_NODIRATIME);
+        assert_eq!(super::STATVFS_RELATIME, libc::ST_RELATIME);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn readonly_bind_preserves_restrictive_and_actual_atime_flags() {
         let restriction = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
         for (input, expected) in [
-            (libc::ST_RELATIME, libc::MS_RELATIME),
+            (super::STATVFS_RELATIME, libc::MS_RELATIME),
             (
-                libc::ST_NOATIME | libc::ST_NODIRATIME,
+                super::STATVFS_NOATIME | super::STATVFS_NODIRATIME,
                 libc::MS_NOATIME | libc::MS_NODIRATIME,
             ),
             (0, libc::MS_STRICTATIME),

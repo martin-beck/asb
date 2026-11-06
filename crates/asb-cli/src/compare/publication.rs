@@ -339,7 +339,8 @@ pub(super) fn native_rename(
     // the report lock serializes ASB writers. Neither path is a broad root.
     #[cfg(target_os = "linux")]
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             stage.as_ptr(),
             libc::AT_FDCWD,
@@ -372,4 +373,33 @@ pub(super) fn native_rename(_: &Path, _: &Path, _: RenameOperation) -> std::io::
         std::io::ErrorKind::Unsupported,
         "this platform has no configured native no-replace/exchange report backend",
     ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_rename_tests {
+    use super::{RenameOperation, native_rename};
+
+    #[test]
+    fn linux_rename_preserves_no_replace_and_exchange_semantics() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("asb-native-rename-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let left = root.join("left");
+        let right = root.join("right");
+        std::fs::write(&left, b"left").unwrap();
+        std::fs::write(&right, b"right").unwrap();
+        assert_eq!(
+            native_rename(&left, &right, RenameOperation::NoReplace)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&left).unwrap(), b"left");
+        assert_eq!(std::fs::read(&right).unwrap(), b"right");
+        native_rename(&left, &right, RenameOperation::Exchange).unwrap();
+        assert_eq!(std::fs::read(&left).unwrap(), b"right");
+        assert_eq!(std::fs::read(&right).unwrap(), b"left");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
