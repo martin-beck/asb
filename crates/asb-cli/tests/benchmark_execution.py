@@ -311,6 +311,14 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertNotIn("kill", container.events)
 
+    def test_long_preparation_budget_does_not_change_agent_execution_timeout(self):
+        workspace, container, _, _ = self.workspace()
+        with workspace:
+            result = workspace.execute(["agent"], timeout=1, preparation_timeout=7200)
+            self.assertEqual(result["exit_code"], 0)
+            with self.assertRaisesRegex(RUNTIME.ExecutionError, "invalid execution preparation timeout"):
+                workspace.execute(["agent"], timeout=1, preparation_timeout=7201)
+
     def test_expired_or_cancelled_preparation_never_resumes_the_owned_gate(self):
         for cancel in (False, True):
             workspace, container, _, _ = self.workspace()

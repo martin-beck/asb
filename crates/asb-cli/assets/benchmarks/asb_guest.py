@@ -148,7 +148,7 @@ def export_agent_artifacts(task, output, receipts):
 class PreparationBudget:
     """One bounded monotonic deadline shared by all launch preparation stages."""
     def __init__(self, seconds):
-        if type(seconds) not in [int,float] or not math.isfinite(seconds) or not 0 < seconds <= 1800:
+        if type(seconds) not in [int,float] or not math.isfinite(seconds) or not 0 < seconds <= 7200:
             raise ExecutionError("invalid shared launch preparation budget")
         self.deadline, self.active = time.monotonic()+seconds, True
         self.on_failure, self.failed, self.lock = None, False, threading.Lock()

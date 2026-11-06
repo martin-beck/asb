@@ -134,8 +134,8 @@ impl BatchAdmissionPolicy {
     pub(crate) const fn current() -> Self {
         Self {
             scope: "verified-material-shared-launch-v1",
-            material_seconds: 1800,
-            launch_seconds: 1800,
+            material_seconds: 7200,
+            launch_seconds: 7200,
             material_arming: "batch-gate-construction",
             launch_arming: "first-post-material-slot-registration",
         }
@@ -1189,8 +1189,8 @@ mod tests {
             ..Default::default()
         };
         let admission = BatchAdmissionPolicy::current();
-        assert_eq!(admission.material_timeout().as_secs(), 1800);
-        assert_eq!(admission.launch_timeout().as_secs(), 1800);
+        assert_eq!(admission.material_timeout().as_secs(), 7200);
+        assert_eq!(admission.launch_timeout().as_secs(), 7200);
         let manual = protocol_fingerprint(&config, &resolve(&config).unwrap(), caps, 2).unwrap();
         let first = protocol_fingerprint_with_admission(
             &config,
