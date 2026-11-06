@@ -757,6 +757,14 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool, fixed_only:
     .unwrap();
     let winners = ready["winners"].as_array().unwrap();
     assert_eq!(winners.len(), count + 2 * usize::from(mixed));
+    if normalize {
+        assert_eq!(
+            winners[0]["normalization_sha256"].as_str().unwrap().len(),
+            64
+        );
+    } else {
+        assert!(winners[0].get("normalization_sha256").is_none());
+    }
     let actual_trials: Vec<_> = winners[..count]
         .iter()
         .map(|winner| winner["trial"].as_str().unwrap())
@@ -772,13 +780,12 @@ fn sampled_sweep_fixture(mixed: bool, count: usize, normalize: bool, fixed_only:
         sweep_dir.join(".sample-sweep-sample-preparation/cassettes/000-replay/recording.asb.zip");
     let mut archive =
         asb_cli::cassette::Archive::open(&alias, asb_cli::cassette::Limits::default()).unwrap();
-    assert_eq!(
+    assert!(
         archive
             .manifest()
             .compatibility
             .normalization_sha256
-            .is_some(),
-        normalize
+            .is_none()
     );
     if normalize {
         let raw = archive.read_track(1).unwrap();
