@@ -1,6 +1,8 @@
 """Offline failure-path tests for experimental workspace provisioning."""
 from pathlib import Path
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -133,6 +135,25 @@ class WorkspaceTest(unittest.TestCase):
                     workspace.prepare(source)
             self.assertEqual((root/'image').stat().st_size,8*1024**2)
             run.assert_not_called()
+
+    def test_creates_missing_loop_device_before_attaching(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
+            root = Path(directory); source = root/'source'; source.mkdir()
+            workspace = SnapshotWorkspace(root/'image',root/'mount',1024,['mkfs'],['btrfs'],['rsync'])
+            real_exists = Path.exists
+            def exists(path):
+                return False if path == Path('/dev/loop42') else real_exists(path)
+            with patch.object(Path,'exists',autospec=True,side_effect=exists), \
+                 patch('asb_snapshot_workspace.subprocess.run') as run, \
+                 patch('builtins.open',unittest.mock.mock_open()), \
+                 patch('asb_snapshot_workspace.fcntl.ioctl',return_value=42), \
+                 patch('asb_snapshot_workspace.os.mknod') as mknod:
+                workspace.prepare(source)
+                workspace.close()
+            mknod.assert_called_once_with(Path('/dev/loop42'),stat.S_IFBLK | 0o600,os.makedev(7,42))
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn(['losetup','/dev/loop42',str(root/'image')],commands)
+            self.assertIn(['losetup','-d','/dev/loop42'],commands)
 
     def test_loop_allocation_retries_busy_without_detaching_another_owner(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as directory:
