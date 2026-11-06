@@ -66,6 +66,9 @@ pub(crate) struct SourceBundle {
 }
 
 pub(super) trait WorkloadAdapter: Sync {
+    fn supports_native_snapshot_recording(&self) -> bool {
+        false
+    }
     fn task_architecture(&self) -> Option<&'static str> {
         None
     }

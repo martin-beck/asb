@@ -320,6 +320,16 @@ fn validate_explicit_tool_transport(
     Ok(())
 }
 
+fn select_adapter_recording_transport(config: &mut BenchmarkConfig, tool_mode: Option<tape::Mode>) {
+    if tool_mode == Some(tape::Mode::Record)
+        && agents::find(&config.agent)
+            .is_some_and(|agent| agent.prefers_native_snapshot_recording())
+        && workloads::supports_native_snapshot_recording(&config.workload)
+    {
+        config.native_snapshot_record = true;
+    }
+}
+
 pub(crate) fn validate_native_snapshot_record(
     config: &BenchmarkConfig,
     mode: Option<tape::Mode>,
@@ -344,8 +354,9 @@ pub(crate) fn run_with_diagnostics(
 ) -> Result<(), Error> {
     let config_path = Path::new(path);
     let text = read_config(config_path)?;
-    let config: BenchmarkConfig = toml::from_str(&text)
+    let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    select_adapter_recording_transport(&mut config, options.effective_tool_mode());
     let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
         .cassette
@@ -2294,6 +2305,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tool_replay.effective_tool_mode(), Some(Mode::Replay));
+    }
+
+    #[test]
+    fn claude_recording_preserves_native_tools_when_workload_supports_snapshots() {
+        use crate::tape::Mode;
+        let base =
+            "agent='claude-code'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='model'\n";
+        let mut record: BenchmarkConfig = toml::from_str(base).unwrap();
+        super::select_adapter_recording_transport(&mut record, Some(Mode::Record));
+        assert!(record.native_snapshot_record);
+        for mode in [None, Some(Mode::Replay)] {
+            let mut config: BenchmarkConfig = toml::from_str(base).unwrap();
+            super::select_adapter_recording_transport(&mut config, mode);
+            assert!(!config.native_snapshot_record);
+        }
+        let mut other: BenchmarkConfig = toml::from_str(base).unwrap();
+        other.agent = "pi".into();
+        super::select_adapter_recording_transport(&mut other, Some(Mode::Record));
+        assert!(!other.native_snapshot_record);
+        let mut unsupported: BenchmarkConfig = toml::from_str(base).unwrap();
+        unsupported.workload = "bug-fix".into();
+        super::select_adapter_recording_transport(&mut unsupported, Some(Mode::Record));
+        assert!(!unsupported.native_snapshot_record);
     }
 
     #[test]

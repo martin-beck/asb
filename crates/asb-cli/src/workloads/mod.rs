@@ -76,6 +76,10 @@ pub(crate) mod contracts;
 mod evaluation;
 pub(crate) use evaluation::{KnownEvaluationKind, SavedEvaluationKind};
 
+pub(crate) fn supports_native_snapshot_recording(name: &str) -> bool {
+    adapters::find(name).is_some_and(|adapter| adapter.supports_native_snapshot_recording())
+}
+
 pub(crate) fn descriptor(name: &str) -> Option<contracts::ModuleDescriptor> {
     let descriptor = adapters::find(name).map(|adapter| adapter.descriptor(name));
     #[cfg(test)]
