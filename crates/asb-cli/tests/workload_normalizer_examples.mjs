@@ -7,6 +7,23 @@ import { normalizeToolResult as search } from "../assets/examples/normalizers/op
 import { normalizeToolResult as ls } from "../assets/examples/normalizers/shell-ls-diagnostics.mjs";
 import { normalizeToolResult as repr } from "../assets/examples/normalizers/python-repr-address.mjs";
 import { normalizeToolResult as pip } from "../assets/examples/normalizers/pip-transfer-progress.mjs";
+import { normalizeToolResult as grepOrder } from "../assets/examples/normalizers/grep-recursive-order.mjs";
+
+test("recursive grep ordering is normalized only for complete unambiguous results", () => {
+  const tool = {name:'Bash', arguments:{command:'grep -rn "_latex" sympy/vector/ | head -50'}};
+  const a = 'sympy/vector/z.py:2: foo\nsympy/vector/a.py:3: bar\n';
+  const b = 'sympy/vector/a.py:3: bar\nsympy/vector/z.py:2: foo\n';
+  assert.equal(grepOrder({text:a,tool}), grepOrder({text:b,tool}));
+  assert.notEqual(grepOrder({text:a.replace('foo','changed'),tool}), grepOrder({text:b,tool}));
+  const incomplete = a.slice(0, -1);
+  assert.equal(grepOrder({text:incomplete,tool}), incomplete);
+  const joined = 'sympy/vector/a.py:3: barsympy/vector/z.py:2: foo\n';
+  assert.equal(grepOrder({text:joined,tool}), joined);
+  const truncated = {...tool, arguments:{command:'grep -rn "_latex" sympy/vector/ | head -2'}};
+  assert.equal(grepOrder({text:a,tool:truncated}), a);
+  const unrelated = {...tool, arguments:{command:'cat log'}};
+  assert.equal(grepOrder({text:a,tool:unrelated}), a);
+});
 
 test("unittest elapsed normalization requires the command and a complete summary", () => {
   const tool = { name: "bash", arguments: { command: "python3 -m unittest tests" } };
