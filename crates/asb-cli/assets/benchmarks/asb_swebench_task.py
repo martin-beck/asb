@@ -130,7 +130,10 @@ class SweBenchTask:
 
     def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None):
         if timeout is None:
-            timeout = _REPOSITORY_COMMAND_SECONDS if self.preparing_repository else 60
+            # Staging and submission helpers run outside repository setup but
+            # still precede or follow the agent's separately timed execution.
+            # Their Docker transport can be slow on emulated architectures.
+            timeout = _REPOSITORY_COMMAND_SECONDS
         options = {"environment": environment, "timeout": timeout,
                    "output_limit": output_limit, "cancelled": self.cancelled}
         if self.preparing_repository:
