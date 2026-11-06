@@ -54,6 +54,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Build
         run: cargo build --locked
+      - name: Check standalone replay debugger
+        run: |
+          cargo test --locked -p asb-replay-debug
+          cargo clippy --locked -p asb-replay-debug --all-targets -- -D warnings
       - name: Verify pull-request test selection
         if: github.event_name == 'pull_request'
         run: python3 scripts/test_ci_pr_tests.py

@@ -61,6 +61,10 @@ when the recorded provider delays should be reproduced. Cassettes contain provid
 responses; keep them private. The offline track viewer and sweep bundle support
 are separate pending integration steps.
 
+For retained replay mismatches, the separate `asb-replay-debug` Ratatui binary
+provides an offline field and text diff. See the [replay debugger tutorial](REPLAY_DEBUGGER.md)
+for building it, opening a campaign, and switching between replicas.
+
 For cli2key model discovery, install the bridge once and query it directly:
 
 ```sh

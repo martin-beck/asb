@@ -30,7 +30,7 @@ update:
 	bash scripts/update_checkout.sh
 
 build:
-	cargo build --locked
+	cargo build --locked --workspace
 	$(MAKE) rust-doc
 	$(MAKE) completions
 
@@ -77,7 +77,8 @@ install: build
 	mkdir -p "$$HOME/.local/bin"
 	mkdir -p "$$HOME/.local/share/bash-completion/completions"
 	mkdir -p "$$HOME/.local/share/zsh/site-functions"
-	install -m 755 target/debug/asb "$$HOME/.local/bin/asb"
+	install -m 755 "$(CARGO_TARGET_DIR)/debug/asb" "$$HOME/.local/bin/asb"
+	install -m 755 "$(CARGO_TARGET_DIR)/debug/asb-replay-debug" "$$HOME/.local/bin/asb-replay-debug"
 	install -m 644 "$(BASH_COMPLETION)" "$$HOME/.local/share/bash-completion/completions/asb"
 	install -m 644 "$(ZSH_COMPLETION)" "$$HOME/.local/share/zsh/site-functions/_asb"
 
