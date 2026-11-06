@@ -156,7 +156,7 @@ fn build_with_catalog(
             selection,
         });
     }
-    validate_sampled_population(manifest, entries.iter().map(|entry| &entry.configuration))?;
+    sampled_templates(manifest, entries.iter().map(|entry| &entry.configuration))?;
     Ok(SweepPlan {
         schema_version: 1,
         execution: None,
@@ -169,14 +169,16 @@ fn build_with_catalog(
     })
 }
 
-fn validate_sampled_population<'a>(
+type SampledKey = (String, String, String, String);
+
+pub(super) fn sampled_templates<'a>(
     manifest: &SweepFile,
     configurations: impl Iterator<Item = &'a BenchmarkConfig>,
-) -> Result<(), Error> {
+) -> Result<BTreeMap<SampledKey, BenchmarkConfig>, Error> {
     use std::collections::{BTreeMap, BTreeSet};
-    type Group = (String, String, String, String);
-    let mut groups: BTreeMap<Group, BTreeSet<String>> = BTreeMap::new();
-    let mut configurations_by_group = BTreeMap::<Group, String>::new();
+    let mut groups: BTreeMap<SampledKey, BTreeSet<String>> = BTreeMap::new();
+    let mut configurations_by_group = BTreeMap::<SampledKey, String>::new();
+    let mut templates = BTreeMap::new();
     let samples: BTreeMap<_, _> = manifest
         .sampled_trials
         .iter()
@@ -220,6 +222,9 @@ fn validate_sampled_population<'a>(
             )));
         }
         configurations_by_group.insert(key.clone(), fingerprint);
+        templates
+            .entry(key.clone())
+            .or_insert_with(|| config.clone());
         if !groups.entry(key).or_default().insert(trial.clone()) {
             return Err(Error::Input(format!(
                 "sampled workload `{}` contains a duplicate trial in a benchmark combination",
@@ -258,7 +263,7 @@ fn validate_sampled_population<'a>(
             )));
         }
     }
-    Ok(())
+    Ok(templates)
 }
 
 impl SweepPlan {
@@ -624,15 +629,21 @@ mod tests {
                 configs.push(config);
             }
         }
-        assert!(validate_sampled_population(&manifest, configs.iter()).is_ok());
+        let templates = sampled_templates(&manifest, configs.iter()).unwrap();
+        assert_eq!(templates.len(), 2);
+        assert!(
+            templates
+                .values()
+                .all(|template| template.trial.as_deref() == Some(order.initial()[0].as_str()))
+        );
         configs[0].concurrency = 2;
-        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
         configs[0].concurrency = 1;
         let removed = configs.pop().unwrap();
-        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
         configs.push(removed);
         configs.push(configs[0].clone());
-        assert!(validate_sampled_population(&manifest, configs.iter()).is_err());
+        assert!(sampled_templates(&manifest, configs.iter()).is_err());
     }
 
     #[test]
