@@ -44,6 +44,30 @@ struct Identity {
     runtime_arguments: Option<(String, String)>,
 }
 
+fn executable_matches(proc: &Path, executable: &Path) -> bool {
+    if fs::read_link(proc.join("exe")).is_ok_and(|path| path == executable) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if proc.parent() != Some(Path::new("/proc")) {
+            return false;
+        }
+        let Some(pid) = proc
+            .file_name()
+            .and_then(|v| v.to_str())
+            .and_then(|v| v.parse().ok())
+        else {
+            return false;
+        };
+        executable_observation(pid)
+            .is_some_and(|value| value.path == executable.as_os_str().as_bytes())
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 #[derive(Default)]
 struct Totals {
     seen: BTreeSet<(u32, u64)>,
@@ -57,13 +81,149 @@ struct Totals {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ProcessImage(u64, u64);
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExecutableObservation {
+    path: Vec<u8>,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn direct_executable(pid: u32) -> Option<ExecutableObservation> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let path = PathBuf::from(format!("/proc/{pid}/exe"));
+    let executable = fs::read_link(&path).ok()?;
+    let metadata = fs::metadata(&path).ok()?;
+    let confirm = fs::metadata(&path).ok()?;
+    if fs::read_link(&path).ok()? != executable
+        || (metadata.dev(), metadata.ino()) != (confirm.dev(), confirm.ino())
+    {
+        return None;
+    }
+    let path = executable.as_os_str().as_bytes();
+    (path.len() <= 4096).then(|| ExecutableObservation {
+        path: path.to_vec(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+/// Private, unprivileged subprocess entry; the kernel still enforces proc access.
+#[cfg(target_os = "linux")]
+pub(crate) fn proc_exe_entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    use std::io::Write;
+    let Some(pid) = args
+        .first()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.parse::<u32>().ok())
+    else {
+        return std::process::ExitCode::from(2);
+    };
+    if args.len() != 1 {
+        return std::process::ExitCode::from(2);
+    }
+    let Some(observation) = direct_executable(pid) else {
+        return std::process::ExitCode::from(1);
+    };
+    if serde_json::to_writer(std::io::stdout().lock(), &observation).is_err()
+        || std::io::stdout().flush().is_err()
+    {
+        return std::process::ExitCode::from(1);
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+#[cfg(target_os = "linux")]
+fn executable_observation(pid: u32) -> Option<ExecutableObservation> {
+    executable_observation_with(pid, Path::new("/proc/self/exe"))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)] // geteuid has no pointer arguments or side effects.
+fn executable_observation_with(pid: u32, helper: &Path) -> Option<ExecutableObservation> {
+    use std::os::unix::process::CommandExt;
+    if let Some(value) = direct_executable(pid) {
+        return Some(value);
+    }
+    // An isolated guest can run its agent under a different UID. Docker's
+    // default capabilities do not let root inspect that process's exe link.
+    // The helper has the target's credentials and runs outside its tree.
+    let identity = measurements::ProcessIdentity::read(pid)?;
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let ids = |name: &str| -> Option<u32> {
+        let line = status.lines().find_map(|line| line.strip_prefix(name))?;
+        let mut values = line.split_whitespace().map(str::parse::<u32>);
+        let real = values.next()?.ok()?;
+        let effective = values.next()?.ok()?;
+        let saved = values.next()?.ok()?;
+        (real == effective && effective == saved).then_some(real)
+    };
+    let uid = ids("Uid:")?;
+    let gid = ids("Gid:")?;
+    // Only the privileged namespace controller may change helper identity.
+    if unsafe { libc::geteuid() } != 0 || uid == 0 {
+        return None;
+    }
+    let mut command = std::process::Command::new(helper);
+    command
+        .arg("__asb-proc-exe")
+        .arg(pid.to_string())
+        .env_clear()
+        .uid(uid)
+        .gid(gid);
+    let bytes = bounded_observer_output(&mut command, Duration::from_secs(2))?;
+    if !identity.matches() {
+        return None;
+    }
+    let result: ExecutableObservation = serde_json::from_slice(&bytes).ok()?;
+    (result.path.len() <= 4096).then_some(result)
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_observer_output(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.by_ref().take(16385).read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()??;
+    if !status.is_some_and(|status| status.success()) || bytes.len() > 16384 {
+        return None;
+    }
+    Some(bytes)
+}
 impl ProcessImage {
     fn read(pid: u32) -> Option<Self> {
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::metadata(format!("/proc/{pid}/exe")).ok()?;
-            Some(Self(metadata.dev(), metadata.ino()))
+            let observation = executable_observation(pid)?;
+            Some(Self(observation.device, observation.inode))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -529,14 +689,14 @@ impl Identity {
         // process using the same interpreter.
         if admitted {
             let executable = self.interpreter.as_ref().unwrap_or(&self.executable);
-            return fs::read_link(proc.join("exe")).is_ok_and(|path| path == *executable);
+            return executable_matches(proc, executable);
         }
         self.matches(proc)
     }
 
     fn matches(&self, proc: &Path) -> bool {
         if let Some((flag, entry)) = &self.runtime_arguments {
-            if !fs::read_link(proc.join("exe")).is_ok_and(|path| path == self.executable) {
+            if !executable_matches(proc, &self.executable) {
                 return false;
             }
             let Ok(args) = read_bounded(&proc.join("cmdline"), 64 * 1024) else {
@@ -546,9 +706,9 @@ impl Identity {
             return args.next() == Some(flag.as_bytes()) && args.next() == Some(entry.as_bytes());
         }
         let Some(interpreter) = &self.interpreter else {
-            return fs::read_link(proc.join("exe")).is_ok_and(|path| path == self.executable);
+            return executable_matches(proc, &self.executable);
         };
-        if !fs::read_link(proc.join("exe")).is_ok_and(|path| path == *interpreter) {
+        if !executable_matches(proc, interpreter) {
             return false;
         }
         // Match the interpreter's entry point, never an arbitrary later argument
@@ -732,6 +892,57 @@ fn process_memory(proc: &Path) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires root, an unprivileged UID, and ASB_TEST_OBSERVER_BINARY"]
+    #[cfg(target_os = "linux")]
+    fn executable_observer_reads_different_uid_with_real_helper() {
+        use std::os::unix::process::CommandExt;
+        let helper = std::env::var_os("ASB_TEST_OBSERVER_BINARY").expect("observer binary");
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .uid(65534)
+            .gid(65534)
+            .spawn()
+            .expect("spawn unprivileged process");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let pid = child.id();
+        assert!(
+            super::direct_executable(pid).is_none(),
+            "test requires default container ptrace restrictions"
+        );
+        let observation = super::executable_observation_with(pid, std::path::Path::new(&helper));
+        let _ = child.kill();
+        child.wait().unwrap();
+        let observation = observation.expect("same-UID helper observation");
+        assert!(observation.path.ends_with(b"/sleep"));
+        assert_ne!(observation.inode, 0);
+        assert!(super::executable_observation_with(pid, std::path::Path::new(&helper)).is_none());
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn executable_observer_kills_and_reaps_a_stalled_helper() {
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("3");
+        let start = std::time::Instant::now();
+        assert!(
+            super::bounded_observer_output(&mut command, std::time::Duration::from_millis(50))
+                .is_none()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn executable_observer_checks_real_process_and_rejects_invalid_requests() {
+        let own = super::executable_observation(std::process::id()).unwrap();
+        assert!(!own.path.is_empty());
+        assert_ne!(own.inode, 0);
+        assert!(super::executable_observation(u32::MAX).is_none());
+        assert_eq!(super::proc_exe_entry(&[]), std::process::ExitCode::from(2));
+        assert_eq!(
+            super::proc_exe_entry(&["1".into(), "extra".into()]),
+            std::process::ExitCode::from(2)
+        );
+    }
     use super::*;
 
     #[cfg(target_os = "linux")]

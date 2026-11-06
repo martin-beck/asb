@@ -3,7 +3,7 @@
 use super::CollectorAdapter;
 
 mod agent_memory;
-mod agent_processes;
+pub(crate) mod agent_processes;
 mod agent_workers;
 mod agentsysperf;
 pub(crate) mod arm_platform;
