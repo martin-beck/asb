@@ -1828,7 +1828,7 @@ fetch(process.env.OPENAI_BASE_URL.replace(/\/$/, '') + '/responses', {method:'PO
     if (!response.ok) { process.exitCode = 1; return; }
     fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
     fs.mkdirSync(require('path').dirname(usage), {recursive:true});
-    fs.writeFileSync(usage, JSON.stringify({input_tokens:12,output_tokens:4,cache_read_tokens:2,total_tokens:18}));
+    fs.writeFileSync(usage, JSON.stringify({input_tokens:12,output_tokens:4,cache_read_tokens:2,cache_write_tokens:0,total_tokens:18}));
     process.stdout.write('done\n');
   }).catch(() => { process.exitCode = 1; });
 "##,
@@ -1851,10 +1851,10 @@ fetch(process.env.OPENAI_BASE_URL.replace(/\/$/, '') + '/responses', {method:'PO
     );
     expect_success(&result);
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(json["token_usage"]["input_tokens"], 12);
+    assert_eq!(json["token_usage"]["input_tokens"], 14);
     assert_eq!(json["token_usage"]["output_tokens"], 4);
     assert_eq!(json["token_usage"]["cached_tokens"], 2);
-    assert_eq!(json["token_usage"]["total_tokens"], 16);
+    assert_eq!(json["token_usage"]["total_tokens"], 18);
     let measurement: serde_json::Value =
         serde_json::from_slice(&std::fs::read(project.0.join("measurements/run.json")).unwrap())
             .unwrap();
