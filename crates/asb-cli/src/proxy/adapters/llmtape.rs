@@ -65,6 +65,16 @@ fn materialize_normalizers(
         ));
     }
     entry.push_str("  return body;\n}\n");
+    entry.push_str(
+        "\nexport function normalizeComparison(request) {\n  let body = request?.body;\n",
+    );
+    for (index, script) in scripts.iter().enumerate() {
+        entry.push_str(&format!(
+            "  const value{index} = script{index}.normalizeComparison?.({{ ...request, body }});\n  if (value{index} !== undefined && (!value{index} || typeof value{index} !== 'object' || Array.isArray(value{index}))) throw new Error('adapter replay comparison normalizer {} must return an object or undefined');\n  if (value{index} !== undefined) body = value{index};\n",
+            script.id
+        ));
+    }
+    entry.push_str("  return body;\n}\n");
     let path = scratch.join("agent-normalizer.mjs");
     std::fs::write(&path, entry).map_err(|error| {
         Error::Run(format!(
@@ -4036,7 +4046,7 @@ mod tests {
                 id: "first",
                 workloads: &["fixture"],
                 tasks: &[],
-                source: "export function normalizeRequest(request) { return { ...request.body, first: true }; }",
+                source: "export function normalizeRequest(request) { return { ...request.body, first: true }; } export function normalizeComparison(request) { return { ...request.body, compared: true }; }",
             },
             crate::agents::TapeNormalizationScript {
                 id: "second",
@@ -4049,7 +4059,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let source = format!(
-            "import {{ normalizeRequest }} from '{}'; console.log(JSON.stringify(normalizeRequest({{ body: {{}} }})));",
+            "import {{ normalizeRequest, normalizeComparison }} from '{}'; console.log(JSON.stringify(normalizeComparison({{ body: normalizeRequest({{ body: {{}} }}) }})));",
             entry.display()
         );
         let output = std::process::Command::new("node")
@@ -4063,7 +4073,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-            serde_json::json!({ "first": true, "second": true })
+            serde_json::json!({ "first": true, "second": true, "compared": true })
         );
         let invalid = [crate::agents::TapeNormalizationScript {
             id: "invalid",
