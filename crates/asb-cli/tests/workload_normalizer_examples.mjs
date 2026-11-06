@@ -8,6 +8,20 @@ import { normalizeToolResult as ls } from "../assets/examples/normalizers/shell-
 import { normalizeToolResult as repr } from "../assets/examples/normalizers/python-repr-address.mjs";
 import { normalizeToolResult as pip } from "../assets/examples/normalizers/pip-transfer-progress.mjs";
 import { normalizeToolResult as grepOrder } from "../assets/examples/normalizers/grep-recursive-order.mjs";
+import { normalizeToolResult as tmpListing } from "../assets/examples/normalizers/tmp-listing-time.mjs";
+
+test('temporary listings normalize only modification times', () => {
+  const tool = {name:'Bash',arguments:{command:'cd /tmp && pip download sympy==1.6 --no-deps -q 2>&1 | tail -3; ls -la /tmp | head'}};
+  const text = 'total 5660\ndrwxrwxrwt  2 root root 4096 Nov  6 14:43 .\n-rw-rw-rw-  1 nobody nogroup 5783941 Nov  6 14:43 sympy.whl\nShell cwd was reset to /testbed';
+  const other = text.replaceAll('14:43','14:46');
+  const canonical = tmpListing({text,tool});
+  assert.equal(tmpListing({text:other,tool}), canonical);
+  assert.notEqual(tmpListing({text:other.replace('5783941','5783942'),tool}), canonical);
+  assert.notEqual(tmpListing({text:other.replace('sympy.whl','different.whl'),tool}), canonical);
+  assert.equal(tmpListing({text,tool:{...tool,arguments:{command:'cat output'}}}),text);
+  const warning = text + '\nls: denied';
+  assert.equal(tmpListing({text:warning,tool}), warning);
+});
 
 test("recursive grep ordering is normalized only for complete unambiguous results", () => {
   const tool = {name:'Bash', arguments:{command:'grep -rn "_latex" sympy/vector/ | head -50'}};
