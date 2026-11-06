@@ -108,6 +108,47 @@ test("unittest elapsed normalization requires the command and a complete summary
   assert.notEqual(unittest({ text: text.replace("3 tests", "4 tests"), tool }), expected);
 });
 
+test("Django and unittest runners share the same narrowly scoped elapsed normalizer", () => {
+  const command = 'source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && cd /testbed && python -c "import django, asgiref; print(django.__file__)" && python tests/runtests.py utils_tests.test_numberformat -v 2 2>&1 | tail -25';
+  const tool = {name: 'bash', arguments: {command}};
+  const recorded = 'test_format ... ok\n\nRan 6 tests in 0.001s\n\nOK\n';
+  const replayed = recorded.replace('0.001s', '0.002s');
+  const canonical = unittest({text: recorded, tool});
+  assert.equal(unittest({text: replayed, tool}), canonical);
+  assert.equal(unittest({text: canonical, tool}), canonical);
+  for (const changed of [replayed.replace('6 tests', '7 tests'), replayed.replace('OK', 'FAILED (failures=1)'), replayed.replace('test_format', 'test_other')]) {
+    assert.notEqual(unittest({text: changed, tool}), canonical);
+  }
+  for (const unrelated of ['cat tests/runtests.py', 'python -c "print(\'python tests/runtests.py\')"', 'python other/runtests.py']) {
+    assert.equal(unittest({text: replayed, tool: {...tool, arguments: {command: unrelated}}}), replayed);
+  }
+  const truncated = 'Ran 6 tests in 0.002s\n';
+  assert.equal(unittest({text: truncated, tool}), truncated);
+});
+
+test("Django unittest normalization works through the configured supervisor", async () => {
+  const source = readFileSync(new URL('../assets/examples/normalizers/python-unittest-elapsed.mjs', import.meta.url), 'utf8');
+  const supervisor = new NormalizerSupervisor([{id: 'unittest', source}], {callTimeoutMs: 500});
+  try {
+    const tool = {name: 'bash', arguments: {command: 'cd /testbed && python tests/runtests.py utils_tests'}};
+    const before = 'Ran 6 tests in 0.001s\n\nOK\n';
+    const after = before.replace('0.001s', '0.002s');
+    assert.equal(await supervisor.normalize({text: before, tool}), await supervisor.normalize({text: after, tool}));
+    assert.notEqual(await supervisor.normalize({text: before, tool}), await supervisor.normalize({text: after.replace('OK', 'FAILED'), tool}));
+  } finally { await supervisor.close(); }
+});
+
+test("reported unified diff timestamp is normalized without concealing patch changes", () => {
+  const tool = {name: 'bash', arguments: {command: 'cd /tmp/skdl && tar xzf scikit-learn-0.21.1.tar.gz && diff -u /testbed/sklearn/linear_model/logistic.py scikit-learn-0.21.1/sklearn/linear_model/logistic.py | head -400'}};
+  const recorded = '--- /testbed/sklearn/linear_model/logistic.py\t2026-11-04 14:48:00.257132838 +0000\n+++ scikit-learn-0.21.1/sklearn/linear_model/logistic.py\t2019-05-15 09:30:00.000000000 +0000\n@@ -1 +1 @@\n-old\n+new\n';
+  const replayed = recorded.replace('14:48:00.257132838', '14:58:31.449839575');
+  const canonical = diff({text: recorded, tool});
+  assert.equal(diff({text: replayed, tool}), canonical);
+  for (const changed of [replayed.replace('logistic.py', 'other.py'), replayed.replace('@@ -1 +1 @@', '@@ -2 +1 @@'), replayed.replace('+new', '+other')]) {
+    assert.notEqual(diff({text: changed, tool}), canonical);
+  }
+});
+
 test("pytest normalization is confined to associated pytest output", () => {
   const tool = { name: "bash", arguments: { command: "python -m pytest tests" } };
   const text = "1 passed, 2 skipped in 3.45s\n";
