@@ -367,6 +367,20 @@ fn fetch_authenticated(spec: providers::ModelSpec, url: &str, key: &str) -> Resu
     fetch_config(config, spec.name)
 }
 
+fn capture_with_dns_retry(
+    mut capture: impl FnMut() -> Result<transport::Captured, Error>,
+    mut backoff: impl FnMut(usize),
+) -> Result<transport::Captured, Error> {
+    for attempt in 0..3 {
+        let result = capture()?;
+        if attempt == 2 || !matches!(result.status.code(), Some(5 | 6)) {
+            return Ok(result);
+        }
+        backoff(attempt);
+    }
+    unreachable!("bounded retry loop always returns")
+}
+
 pub(crate) fn fetch_config(config: String, provider: &str) -> Result<Vec<u8>, Error> {
     let mut command = Command::new("curl");
     command.current_dir(crate::project::network_invocation_dir());
@@ -395,7 +409,10 @@ pub(crate) fn fetch_config(config: String, provider: &str) -> Result<Vec<u8>, Er
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let captured = transport::capture(&mut command, config.as_bytes(), provider)?;
+    let captured = capture_with_dns_retry(
+        || transport::capture(&mut command, config.as_bytes(), provider),
+        |attempt| std::thread::sleep(std::time::Duration::from_millis(250 * (1 << attempt))),
+    )?;
     let status = captured.status;
     let body = captured.stdout;
     let metadata = CurlMetadata::parse(&captured.stderr);
@@ -742,6 +759,34 @@ mod coverage_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_retry_recovers_and_stops_for_permanent_or_exhausted_errors() {
+        use std::os::unix::process::ExitStatusExt;
+        for (statuses, expected, retries) in [
+            (vec![6, 0], 0, 1),
+            (vec![5, 6, 0], 0, 2),
+            (vec![6, 6, 6], 6, 2),
+            (vec![22, 0], 22, 0),
+        ] {
+            let mut statuses = statuses.into_iter();
+            let mut waits = Vec::new();
+            let result = capture_with_dns_retry(
+                || {
+                    Ok(transport::Captured {
+                        status: std::process::ExitStatus::from_raw(statuses.next().unwrap() << 8),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    })
+                },
+                |attempt| waits.push(attempt),
+            )
+            .unwrap();
+            assert_eq!(result.status.code(), Some(expected));
+            assert_eq!(waits.len(), retries);
+        }
+    }
 
     #[test]
     fn adapter_catalog_schema_drives_pagination_and_collection() {
