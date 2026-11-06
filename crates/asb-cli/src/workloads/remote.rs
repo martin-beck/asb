@@ -896,9 +896,6 @@ pub(crate) fn launch(
     let snapshot = context.native_snapshot_replay
         || std::env::var_os("ASB_EXPERIMENTAL_SNAPSHOT").as_deref()
             == Some(std::ffi::OsStr::new("1"));
-    if context.native_snapshot_replay && !workload.starts_with("swe-bench") {
-        return Err("native snapshot replay is not supported by this workload".into());
-    }
     command.env(
         "ASB_EXPERIMENTAL_SNAPSHOT",
         if snapshot { "1" } else { "0" },

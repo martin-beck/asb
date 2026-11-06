@@ -650,6 +650,30 @@ impl WorkloadSession for FileSession {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_snapshot_replay_rejects_unsupported_workloads_before_preparation() {
+        let project = crate::project::ProjectConfig::default();
+        let root = std::path::Path::new("/nonexistent-snapshot-test");
+        let context = super::PreparationContext {
+            tool_mode: Some(crate::tape::Mode::Replay),
+            native_snapshot_replay: true,
+            verify_initial_material: false,
+            budgets: Default::default(),
+            on_allocation: None,
+            workload: "bug-fix",
+            trial: None,
+            trial_set: None,
+            workload_directory: root,
+            workspace: root,
+            project_root: root,
+            project_config: &project,
+        };
+        let error = match super::super::prepare_task(&context) {
+            Ok(_) => panic!("unsupported workload accepted snapshot replay"),
+            Err(error) => error,
+        };
+        assert!(error.contains("native snapshot replay is not supported"));
+    }
+    #[test]
     fn recorded_settlement_is_strict_without_inventing_legacy_removal() {
         use super::ResourceDisposition as D;
         use serde_json::json;
