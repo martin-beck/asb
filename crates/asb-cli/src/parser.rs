@@ -1199,6 +1199,9 @@ struct SetupArgs {
     /// Repeat to select models; use PROVIDER=MODEL to scope a model to one provider.
     #[arg(long)]
     model: Vec<String>,
+    /// Experimentally capture Pi native tools and supported filesystem effects when recording SWE-bench.
+    #[arg(long, conflicts_with_all = ["mode", "preset"])]
+    native_snapshot_record: bool,
     /// Repeat to select collectors (alias: --collector). Dependencies are included.
     #[arg(long, alias = "collector")]
     measure: Vec<String>,
@@ -1223,6 +1226,7 @@ impl From<SetupArgs> for config::SetupOptions {
             trial_set: value.trial_set,
             provider: value.provider,
             model: value.model,
+            native_snapshot_record: value.native_snapshot_record,
             measure: value.measure,
             concurrency: value.concurrency,
             workspace: value.workspace,
@@ -1659,6 +1663,13 @@ mod tests {
         assert!(rendered.contains("gpt-6.1-sol"));
         assert!(rendered.contains("benchmark.toml"));
         assert!(rendered.contains("selected.workload.toml"));
+    }
+
+    #[test]
+    fn setup_accepts_explicit_native_snapshot_recording() {
+        let cli = Cli::try_parse_from(["asb", "setup", "--native-snapshot-record"]).unwrap();
+        assert!(format!("{cli:?}").contains("native_snapshot_record: true"));
+        assert!(Cli::try_parse_from(["asb", "setup", "tui", "--native-snapshot-record"]).is_err());
     }
 
     #[test]

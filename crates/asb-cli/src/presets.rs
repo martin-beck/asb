@@ -63,6 +63,7 @@ pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
         trial_set: Vec::new(),
         provider: preset.providers,
         model: preset.models,
+        native_snapshot_record: false,
         measure: preset.measurements,
         concurrency: Some(preset.concurrency),
         workspace: None,

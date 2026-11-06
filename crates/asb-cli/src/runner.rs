@@ -264,6 +264,7 @@ fn validate_explicit_tool_transport(
     config: &BenchmarkConfig,
     options: RunOptions<'_>,
 ) -> Result<(), Error> {
+    validate_native_snapshot_record(config, options.mode, options.effective_tool_mode())?;
     if options.tool_mode_explicit
         && options.effective_tool_mode().is_some()
         && let Some(adapter) = agents::find(&config.agent)
@@ -273,6 +274,24 @@ fn validate_explicit_tool_transport(
             "agent `{}` does not yet provide an ASB tool interception transport; use --llm-record/--llm-replay or choose an adapter with sealed tool replay",
             config.agent
         )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_native_snapshot_record(
+    config: &BenchmarkConfig,
+    mode: Option<tape::Mode>,
+    tool_mode: Option<tape::Mode>,
+) -> Result<(), Error> {
+    if config.native_snapshot_record {
+        if config.agent != "pi" || !config.workload.starts_with("swe-bench") {
+            return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
+        }
+        if mode == Some(tape::Mode::Record) && tool_mode != Some(tape::Mode::Record) {
+            return Err(Error::Input(
+                "native snapshot recording requires tool recording; use --record".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2191,6 +2210,31 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_recording_is_validated_before_execution() {
+        use crate::tape::Mode;
+        let mut config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='model'\nnative_snapshot_record=true\n",
+        ).unwrap();
+        assert!(
+            super::validate_native_snapshot_record(&config, Some(Mode::Record), Some(Mode::Record))
+                .is_ok()
+        );
+        assert!(super::validate_native_snapshot_record(&config, Some(Mode::Record), None).is_err());
+        assert!(super::validate_native_snapshot_record(&config, Some(Mode::Replay), None).is_ok());
+        config.agent = "opencode".into();
+        assert!(
+            super::validate_native_snapshot_record(&config, Some(Mode::Record), Some(Mode::Record))
+                .is_err()
+        );
+        config.agent = "pi".into();
+        config.workload = "bug-fix".into();
+        assert!(
+            super::validate_native_snapshot_record(&config, Some(Mode::Record), Some(Mode::Record))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn trial_start_uses_the_selected_name_without_record_or_replay_metadata() {
         let mut config: BenchmarkConfig = toml::from_str(
             "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\ntrial='case-42'\n",
@@ -3307,6 +3351,7 @@ mod tests {
     #[test]
     fn cli2key_command_mappings_place_workload_once() {
         let config = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "openhands".into(),
             workload: "bug-fix".into(),
@@ -3335,6 +3380,7 @@ mod tests {
     #[test]
     fn token_reporting_commands_request_machine_readable_agent_output() {
         let base = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "mini-swe".into(),
             workload: "bug-fix".into(),
@@ -3401,6 +3447,7 @@ mod tests {
             ("continue", "cn", "--auto"),
         ] {
             let config = BenchmarkConfig {
+                native_snapshot_record: false,
                 planning: None,
                 agent: agent.into(),
                 workload: "bug-fix".into(),
@@ -3433,6 +3480,7 @@ mod tests {
     #[test]
     fn pi_cli2key_uses_compact_print_mode_with_adapter_summary() {
         let config = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "pi".into(),
             workload: "bug-fix".into(),
@@ -3553,6 +3601,7 @@ mod tests {
     #[test]
     fn opencode_command_uses_generic_provider_model_namespace() {
         let config = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "opencode".into(),
             workload: "bug-fix".into(),
@@ -3584,6 +3633,7 @@ mod tests {
     #[test]
     fn unknown_agent_suggests_a_close_match() {
         let config = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "opencod".into(),
             workload: "bug-fix".into(),

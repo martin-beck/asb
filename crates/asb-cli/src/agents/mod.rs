@@ -1443,6 +1443,7 @@ mod tests {
     #[test]
     fn every_registered_adapter_builds_a_noninteractive_command() {
         let config = BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: "unused".into(),
             workload: "bug-fix".into(),

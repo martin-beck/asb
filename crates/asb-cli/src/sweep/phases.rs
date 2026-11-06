@@ -78,6 +78,15 @@ impl<'a> PreparedSweep<'a> {
         // rotation.  Do not let a valid early entry hide a later input error.
         for entry in &plan.entries {
             crate::runner::validate_mcp_configuration(&entry.configuration, options.mcp_mode)?;
+            crate::runner::validate_native_snapshot_record(
+                &entry.configuration,
+                options.mode,
+                if options.tool_mode_explicit {
+                    options.tool_mode
+                } else {
+                    options.mode
+                },
+            )?;
         }
         plan.execution_mode = match mode {
             None => plan::SavedExecutionMode::Live,

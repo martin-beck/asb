@@ -213,6 +213,7 @@ mod tests {
             measure: vec![ALL.into()],
             workload: vec!["bug-fix".into()],
             model: vec!["explicit-offline-model".into()],
+            native_snapshot_record: false,
             trial: vec![],
             trial_set: vec![],
             concurrency: None,

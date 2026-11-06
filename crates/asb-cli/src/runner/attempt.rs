@@ -541,6 +541,8 @@ impl<'a> ReadyAttempt<'a> {
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
                     tool_mode: options.effective_tool_mode(),
                     native_snapshot_replay: options.native_snapshot_replay(),
+                    native_snapshot_record: config.native_snapshot_record
+                        && options.effective_tool_mode() == Some(tape::Mode::Record),
                     verify_initial_material: options.preparation_gate.is_some()
                         || options.verify_initial_material,
                     budgets: policy.budgets,
@@ -1885,6 +1887,7 @@ mod tests {
 
     fn config(agent: &str) -> BenchmarkConfig {
         BenchmarkConfig {
+            native_snapshot_record: false,
             planning: None,
             agent: agent.into(),
             workload: "bug-fix".into(),

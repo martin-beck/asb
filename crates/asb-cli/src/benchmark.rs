@@ -22,6 +22,9 @@ pub struct BenchmarkConfig {
     pub workload: String,
     pub provider: String,
     pub model: String,
+    /// Opt in to experimental native snapshot capture when recording.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub native_snapshot_record: bool,
     /// Number of identical agent executions to run concurrently.
     #[serde(
         default = "default_concurrency",
@@ -57,6 +60,10 @@ pub struct BenchmarkConfig {
         deserialize_with = "deserialize_mcp_servers"
     )]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Storage policy for one benchmark execution.
@@ -273,6 +280,26 @@ mod tests {
         assert_eq!(config.mcp_servers[0].args.len(), 3);
         let encoded = toml::to_string(&config).expect("configuration serializes");
         assert!(encoded.contains("[[mcp_servers]]"));
+    }
+
+    #[test]
+    fn native_snapshot_setting_round_trips_and_old_config_stays_unchanged() {
+        let text = "agent='pi'\nworkload='swe-bench'\nprovider='openrouter'\nmodel='model'\n";
+        let mut config: BenchmarkConfig = toml::from_str(text).unwrap();
+        assert!(!config.native_snapshot_record);
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("native_snapshot_record")
+        );
+        config.native_snapshot_record = true;
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("native_snapshot_record = true"));
+        assert!(
+            toml::from_str::<BenchmarkConfig>(&encoded)
+                .unwrap()
+                .native_snapshot_record
+        );
     }
 
     #[test]

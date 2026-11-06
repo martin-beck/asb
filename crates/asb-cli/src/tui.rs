@@ -196,12 +196,25 @@ struct App {
     collector_description: String,
     configured_collectors: BTreeSet<String>,
     collector_selections: BTreeMap<String, BTreeSet<String>>,
+    native_snapshot_record: bool,
     message: String,
     message_color: Color,
     message_until: Option<std::time::Instant>,
 }
 
 impl App {
+    fn toggle_native_snapshot_record(&mut self) {
+        self.native_snapshot_record = !self.native_snapshot_record;
+        self.message = if self.native_snapshot_record {
+            "Experimental snapshot recording enabled for Pi and SWE-bench; use --record to capture."
+                .into()
+        } else {
+            "Experimental snapshot recording disabled.".into()
+        };
+        self.message_color = Color::Yellow;
+        self.message_until = None;
+    }
+
     fn pane(&self, kind: PaneKind) -> &Pane {
         &self.panes[kind.index()]
     }
@@ -355,6 +368,7 @@ impl App {
             collector_description: PaneKind::CollectorOptions.description().into(),
             configured_collectors: BTreeSet::new(),
             collector_selections: BTreeMap::new(),
+            native_snapshot_record: false,
             message: "Space selects; arrows move; Tab or Enter advances; Esc cancels.".into(),
             message_color: Color::Yellow,
             message_until: None,
@@ -411,6 +425,17 @@ impl App {
                 input.display()
             )));
         }
+        let native_snapshot_record = configs[0].native_snapshot_record;
+        if configs
+            .iter()
+            .any(|config| config.native_snapshot_record != native_snapshot_record)
+        {
+            return Err(Error::Input(format!(
+                "{} contains mixed native snapshot recording settings; the setup TUI edits one shared setting",
+                input.display()
+            )));
+        }
+        self.native_snapshot_record = native_snapshot_record;
 
         for config in &configs {
             select_choice(
@@ -1008,14 +1033,20 @@ impl App {
 struct Generated {
     tests: usize,
     sweep: PathBuf,
+    native_snapshot_record: bool,
 }
 
 fn generated_summary(generated: &Generated) -> String {
     format!(
-        "Generated {} benchmark configurations and sweep {}\nRun it with: asb sweep {}",
+        "Generated {} benchmark configurations and sweep {}\nRun it with: asb sweep {}{}",
         generated.tests,
         generated.sweep.display(),
         generated.sweep.display(),
+        if generated.native_snapshot_record {
+            " --record"
+        } else {
+            ""
+        },
     )
 }
 
@@ -1981,6 +2012,13 @@ fn run_loop(
                 return Err(Error::Usage("setup TUI cancelled"));
             }
             KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                app.toggle_native_snapshot_record();
+            }
+            KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers,
                 ..
@@ -2430,6 +2468,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
                     Span::raw(" | ⓘ green=ready red=missing yellow=unknown | Enter next")
                 },
             ]),
+            Line::from(format!(
+                "Ctrl-N: snapshot record {} (Pi/SWE)",
+                if app.native_snapshot_record {
+                    "on"
+                } else {
+                    "off"
+                }
+            )),
             Line::from(Span::styled(
                 visible_message(&app.message, app.message_until),
                 Style::default().fg(app.message_color),
@@ -2876,7 +2922,11 @@ fn default_model(provider: &str) -> &'static str {
 fn generate_configs(app: &App) -> Result<Generated, Error> {
     let (tests, sweep, configs) = prepare_configs(app)?;
     crate::config::matrix::publish_sweep(&sweep, configs, &mut std::io::sink())?;
-    Ok(Generated { tests, sweep })
+    Ok(Generated {
+        tests,
+        sweep,
+        native_snapshot_record: app.native_snapshot_record,
+    })
 }
 
 struct GenerationProgress {
@@ -3002,7 +3052,11 @@ fn generate_configs_with_progress(
                     .map_err(|error| {
                         Error::Io(format!("cannot draw completed setup publication: {error}"))
                     })?;
-                return Ok(Generated { tests, sweep });
+                return Ok(Generated {
+                    tests,
+                    sweep,
+                    native_snapshot_record: app.native_snapshot_record,
+                });
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -3040,6 +3094,14 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
         .filter(|choice| !choice.key.is_control())
         .map(|choice| selected_workload_trials(app, &choice.key))
         .collect::<Result<Vec<_>, _>>()?;
+    if app.native_snapshot_record
+        && (agents.iter().any(|agent| agent != "pi")
+            || workloads
+                .iter()
+                .any(|(workload, _, _)| !workload.starts_with("swe-bench")))
+    {
+        return Err(Error::Input("experimental native snapshot recording currently supports Pi with SWE-bench workloads only".into()));
+    }
     let mut measures = crate::collectors::expand_dependencies(
         &app.panes[PaneKind::Measurements.index()]
             .selected_choices()
@@ -3124,6 +3186,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                     for trial in trials {
                         let name = format!("asb-test-{stamp}-{index:03}.toml");
                         let config = BenchmarkConfig {
+                            native_snapshot_record: app.native_snapshot_record,
                             planning: None,
                             agent: agent.clone(),
                             workload: workload.clone(),
@@ -4464,8 +4527,15 @@ mod tests {
         let summary = generated_summary(&Generated {
             tests: 2,
             sweep: std::path::PathBuf::from("asb-sweep-123.toml"),
+            native_snapshot_record: false,
         });
         assert!(summary.contains("Run it with: asb sweep asb-sweep-123.toml"));
+        let recording = generated_summary(&Generated {
+            tests: 1,
+            sweep: std::path::PathBuf::from("capture.toml"),
+            native_snapshot_record: true,
+        });
+        assert!(recording.contains("asb sweep capture.toml --record"));
     }
 
     #[test]
@@ -4500,6 +4570,7 @@ mod tests {
             &Generated {
                 tests: 2,
                 sweep: sweep.clone(),
+                native_snapshot_record: false,
             },
         )
         .unwrap();
@@ -4567,6 +4638,35 @@ mod tests {
                             if workload == "terminal-bench-2.0" && value == "smoke"
                     )
                 })
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preselection_preserves_snapshot_setting_and_rejects_incompatible_output() {
+        let root =
+            std::env::temp_dir().join(format!("asb-tui-snapshot-setting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("benchmark.toml");
+        std::fs::write(&input, "agent='pi'\nprovider='openrouter'\nmodel='configured-model'\nworkload='bug-fix'\nnative_snapshot_record=true\n").unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.preselect(&input).unwrap();
+        assert!(app.native_snapshot_record);
+        app.toggle_native_snapshot_record();
+        assert!(!app.native_snapshot_record);
+        app.toggle_native_snapshot_record();
+        assert!(app.native_snapshot_record);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| super::draw(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..24)
+            .flat_map(|y| (0..80).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(screen.contains("Ctrl-N: snapshot record on (Pi/SWE)"));
+        assert!(
+            matches!(super::prepare_configs(&app), Err(error) if error.to_string().contains("Pi with SWE-bench"))
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4683,6 +4783,15 @@ mod tests {
             .preselect(&sweep)
             .unwrap_err();
         assert!(error.to_string().contains("multiple concurrency values"));
+        std::fs::write(
+            root.join("two.toml"),
+            "agent='opencode'\nprovider='openrouter'\nmodel='second-model'\nworkload='build-repair'\nconcurrency=3\nnative_snapshot_record=true\n",
+        )
+        .unwrap();
+        let error = App::new(root.clone(), ProjectConfig::default())
+            .preselect(&sweep)
+            .unwrap_err();
+        assert!(error.to_string().contains("mixed native snapshot"));
         let _ = std::fs::remove_dir_all(root);
     }
 
