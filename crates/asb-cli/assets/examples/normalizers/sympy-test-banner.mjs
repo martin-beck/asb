@@ -11,11 +11,16 @@ export function normalizeToolResult({ text, tool }) {
   const seedLines = [...text.matchAll(/^random seed:/gm)];
   // tail may remove the start banner, but only accept an exact contiguous
   // metadata suffix with an optional executable line, not an arbitrary seed.
-  const tailed = /^(?:executable:[ \t]+\/[^\r\n]+[ \t]+\([^\r\n]+\)[ \t]+\[[^\r\n]+\]\r?\n)?architecture:[ \t]+[^\r\n]+\r?\ncache:[ \t]+[^\r\n]+\r?\nground types:[ \t]+[^\r\n]+\r?\nnumpy:[ \t]+[^\r\n]+\r?\nrandom seed:[ \t]*(?:\d+|<asb-seed>)\r?\nhash randomization:[ \t]+off\r?\n/.test(text);
+  const tailed = /^(?:executable:[ \t]+\/[^\r\n]+[ \t]+\([^\r\n]+\)[ \t]+\[[^\r\n]+\]\r?\n)?architecture:[ \t]+[^\r\n]+\r?\ncache:[ \t]+[^\r\n]+\r?\nground types:[ \t]+[^\r\n]+\r?\nnumpy:[ \t]+[^\r\n]+\r?\nrandom seed:[ \t]*(?:\d+|<asb-seed>)\r?\nhash randomization:[ \t]+(?:off|on \(PYTHONHASHSEED=(?:\d+|<asb-hash-seed>)\))\r?\n/.test(text);
   if (finishes.length !== 1 || starts.length > 1 || seeds.length > 1) return text;
   const seedSafe = seeds.length === 1 && seedLines.length === 1 && seeds[0].index < finishes[0].index
       && (starts.length === 1 ? starts[0].index < seeds[0].index : tailed && elapsed.test(finishes[0][0]));
-  const withSeed = seedSafe ? text.replace(/^(random seed:[ \t]*)\d+(?=\r?$)/m, '$1<asb-seed>') : text;
+  let withSeed = seedSafe ? text.replace(/^(random seed:[ \t]*)\d+(?=\r?$)/m, '$1<asb-seed>') : text;
+  // Only normalize the immediately adjacent, unique SymPy metadata line.
+  // Preserve whether hash randomization is enabled and all other content.
+  if (seedSafe && [...text.matchAll(/^hash randomization:/gm)].length === 1) {
+    withSeed = withSeed.replace(/^(random seed:[ \t]*<asb-seed>\r?\nhash randomization:[ \t]+on \(PYTHONHASHSEED=)\d+(\))(?=\r?$)/m, '$1<asb-hash-seed>$2');
+  }
   // Centering changes the count of '=' when the duration gains a digit. Bind
   // the original width and surrounding whitespace so other layout changes
   // remain significant, while the duration and its balancing padding vary.

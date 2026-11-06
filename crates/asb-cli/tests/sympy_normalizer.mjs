@@ -18,6 +18,23 @@ test("only a complete SymPy banner from a matching shell command loses its seed"
   assert.notEqual(normalizeToolResult({ text: changed, tool }), normalized);
 });
 
+test('normalizes only the hash seed in an intact SymPy metadata banner', () => {
+  const tool = {name:'bash', arguments:{command:'python bin/test sympy/vector/tests/test_coordsysrect.py'}};
+  const prefix = 'architecture: 64-bit\ncache: yes\nground types: python\nnumpy: None\nrandom seed: 123\nhash randomization: on (PYTHONHASHSEED=';
+  const suffix = ')\nwarning: something\n tests finished: 1 passed, in 1.00 seconds\n';
+  const record = prefix + '3849647123' + suffix;
+  const replay = prefix.replace('123', '456') + '950920009' + suffix;
+  const canonical = normalizeToolResult({text:record,tool});
+  assert.equal(normalizeToolResult({text:replay,tool}), canonical);
+  assert.equal(normalizeToolResult({text:canonical,tool}), canonical);
+  assert.notEqual(normalizeToolResult({text:replay.replace('warning: something', 'warning: different'),tool}), canonical);
+  assert.notEqual(normalizeToolResult({text:replay.replace('on (PYTHONHASHSEED=950920009)', 'off'),tool}), canonical);
+  const ambiguous = replay + 'hash randomization: on (PYTHONHASHSEED=4)\n';
+  assert.match(normalizeToolResult({text:ambiguous,tool}), /PYTHONHASHSEED=950920009/);
+  const unrelated = {...tool, arguments:{command:'cat log'}};
+  assert.equal(normalizeToolResult({text:replay,tool:unrelated}), replay);
+});
+
 test('tailed SymPy metadata and elapsed summaries preserve substantive differences', () => {
   const tool = {name:'bash', arguments:{command:'cd /testbed && python bin/test sympy/example.py 2>&1 | tail -40'}};
   const metadata = 'architecture:       64-bit\ncache:              yes\nground types:       python \nnumpy:              None\nrandom seed:        12345\nhash randomization: off\n';
