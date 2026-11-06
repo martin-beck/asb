@@ -4000,6 +4000,135 @@ fn cpu_and_io_collectors_use_project_local_pidstat_in_preflight_and_run() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_collector_failure_can_be_ignored_with_durable_evidence() {
+    use std::os::unix::fs::PermissionsExt;
+    for ignored in [false, true] {
+        let project = replay_project(1);
+        project.write(".asb-tools/bpftrace/bin/bpftrace", "#!/bin/sh\nif [ \"$1\" = -B ]; then echo ASB_BPFTRACE_READY; sleep 0.3; exit 7; fi\nexit 0\n");
+        std::fs::set_permissions(
+            project.0.join(".asb-tools/bpftrace/bin/bpftrace"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+            + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace']\n";
+        project.write("benchmark.toml", &config);
+        let mut args = vec![
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+        ];
+        if ignored {
+            args.push("--ignore-collector");
+        }
+        let result = project.command_with_env(
+            &args,
+            &[
+                ("ASB_FIXTURE_BEHAVIOR", "bpf-clock"),
+                ("ASB_BPFTRACE_PROFILES", "sched-latency"),
+            ],
+        );
+        assert_eq!(
+            result.status.success(),
+            ignored,
+            "stdout={} stderr={}",
+            stdout(&result),
+            stderr(&result)
+        );
+        if ignored {
+            let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            let events = row["ignored_failures"].as_array().unwrap();
+            assert!(events.iter().any(|event| event["kind"] == "collector_error"
+                && event["ignored"] == true
+                && event["severity"] == "warning"));
+            let log: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
+            let measurement_dir = row["measurement_directory"]
+                .as_str()
+                .expect("measurement directory");
+            let measured: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(project.0.join(measurement_dir).join("run.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(log["ignored_failures"], row["ignored_failures"]);
+            assert_eq!(measured["ignored_failures"], row["ignored_failures"]);
+            let collector: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    project
+                        .0
+                        .join(measurement_dir)
+                        .join("bpftrace-sched-latency.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(collector["status"], "failed");
+            assert!(collector["metrics"].as_object().unwrap().is_empty());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_cannot_ignore_unknown_collector_custody() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = replay_project(1);
+    let marker = project.0.join("pidstat-preflight-done");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; exit 0; fi\nexit 7\n",
+        marker.display(),
+        marker.display()
+    );
+    project.write(".asb-tools/mpstat/bin/pidstat", &script);
+    std::fs::set_permissions(
+        project.0.join(".asb-tools/mpstat/bin/pidstat"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
+        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
+    project.write("benchmark.toml", &config);
+    let result = replay(&project, "bpf-clock", &["--json", "--ignore-collector"]);
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("collector cleanup is unconfirmed"),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn collector_ignore_without_a_failure_does_not_invent_a_warning() {
+    let project = replay_project(1);
+    let result = replay(
+        &project,
+        "success",
+        &[
+            "--json",
+            "--measurements",
+            "measurements",
+            "--ignore-collector",
+        ],
+    );
+    expect_success(&result);
+    let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(row.get("ignored_failures").is_none());
+    let measurement_dir = row["measurement_directory"].as_str().unwrap();
+    let measured: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.0.join(measurement_dir).join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(measured.get("ignored_failures").is_none());
+    let rejected = project.command(&["run", "benchmark.toml", "--ignore-collector"]);
+    assert!(!rejected.status.success());
+}
+
 #[test]
 fn host_reconfiguration_preserves_project_data_and_rejects_reset_combination() {
     let project = Project::new();

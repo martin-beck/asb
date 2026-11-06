@@ -457,6 +457,8 @@ pub struct Session {
     pub(crate) test_attach_failure: bool,
     #[cfg(test)]
     pub(crate) test_event_failure: Option<collectors::LifecycleEvent>,
+    #[cfg(test)]
+    pub(crate) test_collector_cleanup_unconfirmed: bool,
     pub(crate) trace_id: String,
     sudo_collectors: BTreeSet<String>,
     component_starts: BTreeMap<String, Instant>,
@@ -646,6 +648,8 @@ impl Session {
             test_attach_failure: false,
             #[cfg(test)]
             test_event_failure: None,
+            #[cfg(test)]
+            test_collector_cleanup_unconfirmed: false,
             trace_id: format!(
                 "{}-{}",
                 std::process::id(),
@@ -1105,6 +1109,89 @@ impl Session {
         } else {
             Err(errors.join("; "))
         }
+    }
+
+    /// Finish optional collectors, retaining their failures in durable run
+    /// evidence. Publication failures and unconfirmed producer cleanup remain
+    /// fatal: an ignored measurement cannot imply safe ownership or a record.
+    pub(crate) fn finish_ignoring_collector_failures<'a>(
+        mut self,
+        measurement: RunMeasurement<'a>,
+    ) -> Result<Vec<String>, String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.stop_collector_processes(false) {
+            errors.push(error);
+        }
+        let cleanup_unconfirmed = self.stopped_collectors.iter().any(|stopped| {
+            let completion = &stopped.completion;
+            completion.guardian_cleanup_confirmed == Some(false)
+                || (!completion.capture_complete
+                    && completion.guardian_cleanup_confirmed != Some(true))
+        });
+        #[cfg(test)]
+        let cleanup_unconfirmed = cleanup_unconfirmed || self.test_collector_cleanup_unconfirmed;
+        if let Err(error) = self.process_stopped_collectors() {
+            errors.push(error);
+        }
+        let mut observe = |result: Result<(), String>| {
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        };
+        for adapter in self.adapters.clone() {
+            observe(adapter.finish(&mut self));
+        }
+        observe(self.write_component_measurements());
+        observe(write_json(
+            &self.dir.join("execution-window.json"),
+            &self.execution_window_document(),
+        ));
+        let analysis = analysis::publish(&self.dir, self.component_timing("agent.execute"));
+        if let Err(error) = &analysis {
+            observe(Err(error.clone()));
+        }
+        for adapter in self.adapters.clone() {
+            observe(adapter.after_analysis(&mut self, analysis.as_ref().ok()));
+        }
+        self.run_finishing = true;
+        if cleanup_unconfirmed {
+            return Err(format!(
+                "collector cleanup is unconfirmed; {}",
+                errors.join("; ")
+            ));
+        }
+        write_json(
+            &self.dir.join("tool-calls.json"),
+            &ToolCallMeasurements {
+                schema_version: 1,
+                count: measurement.tool_call_count,
+                availability: if measurement.tool_call_count.is_some() {
+                    "observed"
+                } else {
+                    "unavailable"
+                },
+                calls: measurement.tool_calls,
+            },
+        )?;
+        if self.run_started {
+            write_json(&self.dir.join("lifecycle.json"), &self.lifecycle)?;
+        }
+        let mut record = serde_json::to_value(&measurement).map_err(|error| error.to_string())?;
+        if !errors.is_empty() {
+            let events = record
+                .as_object_mut()
+                .ok_or("measurement is not an object")?
+                .entry("ignored_failures")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .ok_or("ignored failures are not an array")?;
+            for error in &errors {
+                events.push(serde_json::json!({"kind":"collector_error", "reason":error, "ignored":true, "severity":"warning"}));
+            }
+        }
+        write_json(&self.dir.join("run.json"), &record)?;
+        crate::workloads::summary::update_summary(&self.dir, record)?;
+        Ok(errors)
     }
 
     fn stop_collector_processes(&mut self, execution_only: bool) -> Result<(), String> {

@@ -288,6 +288,103 @@ fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn replay_sweep_ignores_confirmed_collector_failure_and_resumes() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    let agent = project.0.join("tools/pi/bin/pi");
+    let script = fs::read_to_string(&agent)
+        .unwrap()
+        .replace("time.sleep(.06)", "time.sleep(1)");
+    fixture_writer::write_file(&project.0, &agent, script).unwrap();
+    let bpftrace = project.0.join("tools/bpftrace/bin/bpftrace");
+    fs::create_dir_all(bpftrace.parent().unwrap()).unwrap();
+    fs::write(&bpftrace, "#!/bin/sh\nif [ \"$1\" = -B ]; then echo ASB_BPFTRACE_READY; sleep 0.2; exit 7; fi\nexit 0\n").unwrap();
+    fs::set_permissions(&bpftrace, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let text = fs::read_to_string(&config).unwrap()
+        + "\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['bpftrace']\n";
+    fs::write(config, text).unwrap();
+    let args = [
+        "--replay",
+        "--repeat",
+        "1",
+        "--cassette-root",
+        "replay-input",
+        "--ignore-collector",
+    ];
+    let output = sweep_command(&project, None, &args)
+        .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .expect("ignored collector event");
+    assert_eq!(row["ignored_failures"][0]["kind"], "collector_error");
+    assert_eq!(row["ignored_failures"][0]["ignored"], true);
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_collector"], true);
+    let resumed = sweep_command(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-collector",
+        ],
+    )
+    .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+    .output()
+    .unwrap();
+    assert!(
+        resumed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let changed = sweep_command(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    )
+    .env("ASB_BPFTRACE_PROFILES", "sched-latency")
+    .output()
+    .unwrap();
+    assert!(
+        !changed.status.success(),
+        "resume must retain its original ignore policy"
+    );
+}
+
 #[test]
 fn continuation_metadata_recovery_cli_rejects_execution_options_without_provider_setup() {
     let project = registered_project(1);

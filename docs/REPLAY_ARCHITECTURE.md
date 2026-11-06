@@ -195,6 +195,13 @@ For exploratory replay, `asb run --replay --ignore-evaluation CONFIG` and
 or a grader error to be reported without failing the command solely for that
 reason. `--ignore-agent` separately allows a failed agent process to be treated
 likewise. The flags may be combined and also apply to the explicit replay modes.
+`--ignore-collector` permits a replay to continue after collector or optional
+measurement analysis failures, recording each as an ignored warning while
+retaining incomplete captures and leaving failed measurements unavailable.
+The task, JSON output, log and measurement summary retain the warning. It does
+not suppress an unconfirmed collector cleanup or failure to publish run and
+summary evidence; those remain fatal. Inspect measurement availability before
+using a result for performance comparisons.
 Each ignored failure is printed as a warning, or emitted in JSON under
 `ignored_failures` with its original kind and reason and `ignored: true`.
 The same evidence is retained in the run log and measurement summary. The
@@ -206,6 +213,6 @@ sweep plans freeze these choices; resume requires the original sweep choices.
 These flags cover only failures observed after an attempt reaches a disposition.
 They cannot manufacture missing or corrupt cassette data, turn a rejected
 provider/tool request into a valid recorded response, recover an agent that
-cannot start, or establish missing resource cleanup and measurement evidence.
+cannot start, or establish missing resource cleanup or required run and summary evidence.
 Such independent failures still fail the command. ASB does not contact a live
 provider to replace a missing replay response.

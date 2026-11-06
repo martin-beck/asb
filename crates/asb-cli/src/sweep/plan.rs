@@ -29,6 +29,8 @@ pub(crate) struct SweepPlan {
     pub ignore_evaluation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_agent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ignore_collector: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduling: Option<super::scheduler::Scheduling>,
     pub entries: Vec<PlannedBenchmark>,
@@ -169,6 +171,7 @@ fn build_with_catalog(
         respect_record_timings: false,
         ignore_evaluation: false,
         ignore_agent: false,
+        ignore_collector: false,
         scheduling: None,
         entries,
         resources: manifest.resources,
@@ -418,7 +421,10 @@ impl SweepPlan {
             Error::Input(format!("invalid sweep plan {}: {error}", path.display()))
         })?;
         if !matches!(plan.schema_version, 1 | 2)
-            || ((plan.respect_record_timings || plan.ignore_evaluation || plan.ignore_agent)
+            || ((plan.respect_record_timings
+                || plan.ignore_evaluation
+                || plan.ignore_agent
+                || plan.ignore_collector)
                 && plan.execution_mode != SavedExecutionMode::Replay)
             || plan.run_id.is_empty()
             || plan.run_id.len() > 128

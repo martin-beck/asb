@@ -33,6 +33,7 @@ impl SweepPlan {
                     || layout.plan.respect_record_timings != self.respect_record_timings
                     || layout.plan.ignore_evaluation != self.ignore_evaluation
                     || layout.plan.ignore_agent != self.ignore_agent
+                    || layout.plan.ignore_collector != self.ignore_collector
                     || !intent.matches_replay(&layout.plan)
                 {
                     return Err(Error::Input(

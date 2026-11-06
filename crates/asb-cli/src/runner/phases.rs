@@ -619,11 +619,12 @@ pub(super) fn final_outcome(
 
 pub(super) enum MeasurementCompletion {
     Confirmed,
+    Ignored,
     Incomplete(Vec<String>),
 }
 impl MeasurementCompletion {
     pub fn confirmed(&self) -> bool {
-        matches!(self, Self::Confirmed)
+        matches!(self, Self::Confirmed | Self::Ignored)
     }
     pub fn with_artifact_evidence(self, paths: &[String]) -> Self {
         match self {
@@ -637,6 +638,7 @@ impl MeasurementCompletion {
     pub fn into_error(self) -> Option<Error> {
         match self {
             Self::Confirmed => None,
+            Self::Ignored => None,
             Self::Incomplete(errors) => Some(Error::Run(format!(
                 "measurement finalization failed after task evaluation: {}; inspect saved task/measurement evidence; do not repeat the agent to repair reporting",
                 errors.join("; ")
@@ -649,7 +651,8 @@ impl MeasurementCompletion {
 /// prohibits a completion receipt, but must not hide a freshly computed grade.
 pub(super) fn finish_measurements(
     session: Option<measurements::Session>,
-    result: &RunResult<'_>,
+    result: &mut RunResult<'_>,
+    ignore_collector: bool,
 ) -> MeasurementCompletion {
     let Some(mut session) = session else {
         return MeasurementCompletion::Confirmed;
@@ -659,6 +662,14 @@ pub(super) fn finish_measurements(
         issues.event(Some(&mut session), LifecycleEvent::RunFailed);
     }
     issues.event(Some(&mut session), LifecycleEvent::RunFinishing);
+    if ignore_collector {
+        for error in std::mem::take(&mut issues.collector_errors) {
+            let mut failure = RunFailure::new(FailureKind::CollectorError, error);
+            failure.ignored = true;
+            failure.severity = "warning";
+            result.disposition.ignored_failures.push(failure);
+        }
+    }
     let measured = measurements::RunMeasurement {
         ignored_failures: &result.disposition.ignored_failures,
         replay_selection: result.replay_selection,
@@ -710,7 +721,30 @@ pub(super) fn finish_measurements(
         started_unix_ms: session.started_unix_ms(),
     };
 
-    if let Err(error) = session.finish(measured) {
+    if ignore_collector {
+        match session.finish_ignoring_collector_failures(measured) {
+            Ok(errors) => {
+                let ignored = !errors.is_empty()
+                    || result
+                        .disposition
+                        .ignored_failures
+                        .iter()
+                        .any(|failure| failure.kind == FailureKind::CollectorError);
+                for error in errors {
+                    let mut failure = RunFailure::new(FailureKind::CollectorError, error);
+                    failure.ignored = true;
+                    failure.severity = "warning";
+                    result.disposition.ignored_failures.push(failure);
+                }
+                return if ignored {
+                    MeasurementCompletion::Ignored
+                } else {
+                    MeasurementCompletion::Confirmed
+                };
+            }
+            Err(error) => issues.collector_errors.push(error),
+        }
+    } else if let Err(error) = session.finish(measured) {
         issues.collector_errors.push(error);
     }
     if issues.collector_errors.is_empty() {
