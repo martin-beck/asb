@@ -143,7 +143,7 @@ fn preparation_root(path: &Path, options: Options<'_>) -> Result<PathBuf, Error>
     Ok(owner.join(format!(".{stem}-sample-preparation")))
 }
 
-pub(super) fn has_preparation(path: &Path, options: Options<'_>) -> Result<bool, Error> {
+pub(crate) fn has_preparation(path: &Path, options: Options<'_>) -> Result<bool, Error> {
     let root = preparation_root(path, options)?;
     match std::fs::symlink_metadata(root) {
         Ok(_) => Ok(true),

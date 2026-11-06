@@ -152,38 +152,51 @@ impl Request {
         // Reopen the exact prepared winner set when reporting a sampled replay.
         // Resolving validates the retained ledgers and archives and never records.
         let plan_path = sweep_results.join("plan.json");
-        let sampled_replay = match fs::symlink_metadata(&plan_path) {
-            Ok(_) => {
-                let text = read_text_limit(
-                    &plan_path,
-                    "sweep plan",
-                    crate::sweep::plan::MAX_PLAN_BYTES as u64,
-                )?;
-                let value: Value = serde_json::from_str(&text)
-                    .map_err(|error| Error::Input(format!("invalid sweep plan: {error}")))?;
-                let replay = value.get("execution_mode").and_then(Value::as_str) == Some("replay");
-                let references = value
-                    .get("entries")
-                    .and_then(Value::as_array)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter_map(|entry| entry.get("reference").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                    });
-                let originals = sweep.configs.iter().map(String::as_str).collect::<Vec<_>>();
-                replay
-                    && (!sweep.sampled_trials.is_empty()
-                        || references.is_some_and(|refs| refs != originals))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(Error::Input(format!(
-                    "cannot inspect sweep plan {}: {error}",
-                    plan_path.display()
-                )));
-            }
-        };
+        let may_be_prepared = !sweep.sampled_trials.is_empty()
+            || crate::sweep::sampled::has_preparation(
+                sweep_path,
+                crate::sweep::Options {
+                    invocation_dir: invocation.or(Some(output_parent)),
+                    ..Default::default()
+                },
+            )?;
+        let sampled_replay = may_be_prepared
+            && match fs::symlink_metadata(&plan_path) {
+                Ok(_) => {
+                    let text = read_text_limit(
+                        &plan_path,
+                        "sweep plan",
+                        crate::sweep::plan::MAX_PLAN_BYTES as u64,
+                    )?;
+                    let value: Value = serde_json::from_str(&text)
+                        .map_err(|error| Error::Input(format!("invalid sweep plan: {error}")))?;
+                    let replay =
+                        value.get("execution_mode").and_then(Value::as_str) == Some("replay");
+                    let references =
+                        value
+                            .get("entries")
+                            .and_then(Value::as_array)
+                            .map(|entries| {
+                                entries
+                                    .iter()
+                                    .filter_map(|entry| {
+                                        entry.get("reference").and_then(Value::as_str)
+                                    })
+                                    .collect::<Vec<_>>()
+                            });
+                    let originals = sweep.configs.iter().map(String::as_str).collect::<Vec<_>>();
+                    replay
+                        && (!sweep.sampled_trials.is_empty()
+                            || references.is_some_and(|refs| refs != originals))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(Error::Input(format!(
+                        "cannot inspect sweep plan {}: {error}",
+                        plan_path.display()
+                    )));
+                }
+            };
         let selected = if sampled_replay {
             Some(crate::sweep::sampled::resolve(
                 sweep_path,
