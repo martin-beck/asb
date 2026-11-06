@@ -22,6 +22,15 @@ impl CollectorAdapter for IostatCollector {
     fn requires_pid(&self) -> bool {
         true
     }
+    fn preflight_unavailable(
+        &self,
+        selected: &[String],
+        tools: Option<&std::path::Path>,
+    ) -> Option<super::super::PreflightUnavailable> {
+        super::super::selected_or_environment("iostat", selected)
+            .then(|| super::pidstat::preflight_unavailable(tools))
+            .flatten()
+    }
     fn preflight(&self, context: &mut super::super::PreflightContext<'_>) -> Result<(), String> {
         if super::super::selected_or_environment("iostat", context.selected) {
             super::pidstat::preflight(context.tool_dir, "-d")

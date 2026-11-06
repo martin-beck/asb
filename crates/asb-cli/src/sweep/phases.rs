@@ -194,12 +194,13 @@ impl<'a> PreparedSweep<'a> {
                 crate::install::execution_requirements(&entry.configuration, options.mode);
             if prepared_execution.insert((root.clone(), preparation_key)) {
                 let mut messages = Vec::new();
-                crate::install::ensure_execution_requirements(
+                crate::install::ensure_execution_requirements_with_policy(
                     &entry.configuration,
                     &parent.join(&entry.reference),
                     options.mode,
                     options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     &mut messages,
+                    options.ignore_collector,
                 )?;
                 if !options.json {
                     output.write_all(&messages).map_err(crate::io_error)?;

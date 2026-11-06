@@ -23,6 +23,13 @@ pub(super) fn executable(tools: Option<&Path>) -> PathBuf {
     PathBuf::from("pidstat")
 }
 
+pub(super) fn preflight_unavailable(
+    tools: Option<&Path>,
+) -> Option<super::super::PreflightUnavailable> {
+    let executable = executable(tools);
+    super::super::PreflightUnavailable::missing_executable(&executable, tools, "pidstat")
+}
+
 pub(super) fn preflight(tools: Option<&Path>, flag: &str) -> Result<(), String> {
     let executable = executable(tools);
     let mut child = Command::new(&executable)

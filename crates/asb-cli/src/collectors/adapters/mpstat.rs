@@ -22,6 +22,15 @@ impl CollectorAdapter for MpstatCollector {
     fn requires_pid(&self) -> bool {
         true
     }
+    fn preflight_unavailable(
+        &self,
+        selected: &[String],
+        tools: Option<&std::path::Path>,
+    ) -> Option<super::super::PreflightUnavailable> {
+        super::super::selected_or_environment("mpstat", selected)
+            .then(|| super::pidstat::preflight_unavailable(tools))
+            .flatten()
+    }
     fn preflight(&self, context: &mut super::super::PreflightContext<'_>) -> Result<(), String> {
         if super::super::selected_or_environment("mpstat", context.selected) {
             super::pidstat::preflight(context.tool_dir, "-u")
