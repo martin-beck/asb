@@ -18,7 +18,7 @@ from asb_execution import ExecutionError
 from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
-from asb_guest import experimental_snapshot_roots, isolate_snapshot_replay_network
+from asb_guest import experimental_snapshot_roots
 
 
 def elf(interpreter=False):
@@ -111,50 +111,18 @@ class GuestBootstrapTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             PreparationBudget(7201)
 
-    def test_snapshot_replay_disconnects_only_owned_routed_networks(self):
-        class Network:
-            def __init__(self, name): self.name = name
-            def disconnect(self, container):
-                calls.append(self.name)
-                del container.attrs['NetworkSettings']['Networks'][self.name]
-        calls = []
-        container = SimpleNamespace(attrs={
-            'Config':{'Labels':{'asb.owner':'asb','asb.attempt':'attempt'}},
-            'HostConfig':{'NetworkMode':'bridge'},
-            'NetworkSettings':{'Networks':{'bridge':{'IPAddress':'172.17.0.2'},'extra':{}}},
-        }, reload=lambda:None, client=SimpleNamespace(networks=SimpleNamespace(get=Network)))
-        task = SimpleNamespace(workspace=SimpleNamespace(container=container,attempt='attempt'))
-        isolate_snapshot_replay_network(task)
-        self.assertEqual(calls,['bridge','extra'])
-        self.assertEqual(container.attrs['NetworkSettings']['Networks'],{})
-
-        for mode in ('host','container:other',None):
-            container.attrs['HostConfig']['NetworkMode'] = mode
-            with self.subTest(mode=mode), self.assertRaises(ExecutionError):
-                isolate_snapshot_replay_network(task)
-        container.attrs['HostConfig']['NetworkMode'] = 'bridge'
-        container.attrs['Config']['Labels']['asb.attempt'] = 'different'
-        with self.assertRaises(ExecutionError): isolate_snapshot_replay_network(task)
-
-    def test_snapshot_replay_rejects_incomplete_network_disconnection(self):
-        container = SimpleNamespace(attrs={
-            'Config':{'Labels':{'asb.owner':'asb','asb.attempt':'attempt'}},
-            'HostConfig':{'NetworkMode':'bridge'},
-            'NetworkSettings':{'Networks':{'bridge':{'IPAddress':'172.17.0.2'}}},
-        }, reload=lambda:None, client=SimpleNamespace(networks=SimpleNamespace(
-            get=lambda _:SimpleNamespace(disconnect=lambda _:None))))
-        task = SimpleNamespace(workspace=SimpleNamespace(container=container,attempt='attempt'))
-        with self.assertRaises(ExecutionError): isolate_snapshot_replay_network(task)
-
-    def test_snapshot_replay_network_failure_stops_before_agent_launch(self):
+    def test_snapshot_replay_keeps_existing_container_network(self):
         with tempfile.TemporaryDirectory() as directory:
+            def started(*_args, **_kwargs):
+                raise RuntimeError('agent launch reached')
+            container = Container()
             def forbidden(*_args, **_kwargs):
-                raise AssertionError('agent started without network isolation')
+                raise AssertionError('replay changed the task network')
+            container.client = SimpleNamespace(networks=SimpleNamespace(get=forbidden))
             task = SimpleNamespace(snapshot=True, tool_mode='replay', artifacts=Path(directory),
-                workspace=SimpleNamespace(container=Container(),execute=forbidden))
-            with patch('asb_guest.prepare_agent',return_value=({},{})), \
-                 patch('asb_guest.isolate_snapshot_replay_network',side_effect=ExecutionError('network unavailable')):
-                with self.assertRaisesRegex(ExecutionError,'network unavailable'):
+                workspace=SimpleNamespace(container=container,execute=started))
+            with patch('asb_guest.prepare_agent',return_value=({},{})):
+                with self.assertRaisesRegex(RuntimeError,'agent launch reached'):
                     execute_agent(task,{},None,None,None)
 
     def test_experimental_snapshot_roots_reject_invalid_configuration(self):
