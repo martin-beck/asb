@@ -5,10 +5,12 @@ the separate `asb sweep SWEEP.toml --prepare-replay` mode is the only proposed
 mode here that may make fresh live provider calls to build replacement tapes.
 
 Current draft: setup writes sampled metadata and the explicit preparation mode
-parses, but sampled sweeps still refuse execution. The next implementation step
-is the sweep-owned executor: persist and bind each `BoundTrialPreparation`,
-record a candidate, replay it through the real runner, pass its per-replica
-`ReplayObservation`s to `settle_replay`, and publish immutable winning
+parses, but sampled sweeps still refuse execution. `prepare_file` now owns a
+locked durable `BoundTrialPreparation`; `record_and_replay_candidate` calls the
+real runner for live recording and offline replay. An offline fixture combines
+them to verify a failed replay, a replacement recording and replay, and reuse of
+the successful ledger without extra provider calls. The next step is to connect
+these pieces to every sweep combination and publish immutable winning
 configuration/cassette mappings only after every requested combination is
 complete. Then resolve that published mapping only for ordinary replay. Do not
 remove the refusal until both paths are implemented and exercised end to end.
