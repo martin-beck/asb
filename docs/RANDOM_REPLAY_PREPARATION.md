@@ -10,6 +10,8 @@ asb sweep sample.toml --replay
 ```
 
 Use `--trial-count WORKLOAD=COUNT` to scope a count to a particular workload.
+You can combine it with `--trial OTHER_WORKLOAD=INSTANCE`; the two options must
+not select the same workload.
 Preparation makes live provider calls and tests recordings by replaying them;
 ordinary replay only uses previously verified recordings and stays offline.
 Fixed workload entries in a mixed sweep are also recorded and checked, with their

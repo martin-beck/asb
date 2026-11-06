@@ -39,11 +39,6 @@ pub(super) fn setup_at(
     {
         required(Some(value.clone()))?;
     }
-    if !options.trial_count.is_empty() && !options.trial.is_empty() {
-        return Err(Error::Input(
-            "--trial-count cannot be combined with --trial".into(),
-        ));
-    }
     for value in &options.trial_count {
         let count = value
             .split_once('=')
@@ -67,6 +62,15 @@ pub(super) fn setup_at(
         .into_iter()
         .any(|values| values.iter().any(|value| value == "all"));
     selections::expand(&mut options, base)?;
+    for workload in &options.workload {
+        if !scoped(&options.trial_count, workload).is_empty()
+            && !scoped(&options.trial, workload).is_empty()
+        {
+            return Err(Error::Input(format!(
+                "--trial-count and --trial cannot both select workload `{workload}`; scope them to different workloads"
+            )));
+        }
+    }
     crate::workloads::ensure_native_architecture(
         options.workload.iter().map(String::as_str),
         std::env::consts::ARCH,
@@ -194,7 +198,9 @@ pub(super) fn setup_at(
                 candidates: order.candidates().to_vec(),
             });
             trials
-        } else if options.trial.is_empty() {
+        } else if options.trial.is_empty()
+            || (!options.trial_count.is_empty() && scoped(&options.trial, workload).is_empty())
+        {
             set.map_or_else(
                 || vec![None],
                 |(_, set)| {

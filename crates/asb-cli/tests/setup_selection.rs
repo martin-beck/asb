@@ -171,6 +171,87 @@ fn trial_count_writes_a_sampled_sweep_with_a_frozen_replacement_pool() {
 }
 
 #[test]
+fn sampled_and_explicit_trials_can_target_different_workloads() {
+    let project = Project::new();
+    project.seed_pi();
+    project.write(
+        "catalogs/agentbench/ASB-BUNDLE",
+        "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+    );
+    project.write(
+        "catalogs/agentbench/asb-trial/ASB-ADAPTER-FIXTURE",
+        "fixture\n",
+    );
+    project.write("catalogs/agentbench.txt", "fixture workload\n");
+    for id in ["one", "two"] {
+        project.write(
+            &format!("catalogs/agentbench/source/configs/tasks/{id}.yaml"),
+            "name: fixture\n",
+        );
+    }
+    project.write(
+        "catalogs/selected.workload.toml",
+        "workload='agentbench'\n[[trials]]\nid='one'\n[[trials]]\nid='two'\n",
+    );
+    project.write(
+        "catalogs/fixed.workload.toml",
+        "workload='bug-fix'\n[[trials]]\nid='bug-fix'\n",
+    );
+    let common = [
+        "setup",
+        "--agent",
+        "pi",
+        "--provider",
+        "openrouter",
+        "--model",
+        "offline-fixture",
+        "--workload",
+        "agentbench",
+        "--workload",
+        "bug-fix",
+        "--trial-set",
+        "selected.workload.toml",
+        "--trial-set",
+        "fixed.workload.toml",
+    ];
+    let mut args = common.to_vec();
+    args.extend([
+        "--trial-count",
+        "agentbench=1",
+        "--trial",
+        "bug-fix=bug-fix",
+        "--output",
+        "mixed.toml",
+    ]);
+    let result = project.command(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = std::fs::read_to_string(project.0.join("mixed.toml")).unwrap();
+    let sweep: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(sweep["configs"].as_array().unwrap().len(), 2);
+    assert_eq!(sweep["sampled_trials"].as_array().unwrap().len(), 1);
+    let mut overlapping = common.to_vec();
+    overlapping.extend([
+        "--trial-count",
+        "agentbench=1",
+        "--trial",
+        "agentbench=one",
+        "--output",
+        "rejected.toml",
+    ]);
+    let rejected = project.command(&overlapping);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("cannot both select workload `agentbench`")
+    );
+    assert!(!project.0.join("rejected.toml").exists());
+}
+
+#[test]
 fn all_five_catalogs_accept_explicit_instances_and_reject_missing_or_unknown_before_writing() {
     for (workload, source, revision, split, population, sdk, version) in [
         (

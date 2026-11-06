@@ -602,13 +602,15 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
         .join(",");
     if mixed {
         let fixed = text.replace("workload='bug-fix'", "workload='repository-navigation'");
-        fs::write(project.0.join("fixed.toml"), fixed).unwrap();
+        fs::write(project.0.join("fixed.toml"), &fixed).unwrap();
+        fs::write(project.0.join("fixed-second.toml"), format!("{fixed}\n[measurements]\nenabled=false\ndirectory='other-measures'\ncollectors=[]\n")).unwrap();
         fs::write(
             project.0.join("workloads/repository-navigation.txt"),
             "Find the requested file.",
         )
         .unwrap();
         configs.push("'fixed.toml'".into());
+        configs.push("'fixed-second.toml'".into());
     }
     let configs = configs.join(",");
     fs::write(project.0.join("sample-sweep.toml"), format!("configs=[{configs}]\n[[sampled_trials]]\nworkload='bug-fix'\ncount={count}\nseed='0000000000000007'\ncandidates=[{candidates}]\n")).unwrap();
@@ -631,7 +633,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
             .output()
             .unwrap()
     };
-    let expected_count = count + 1 + usize::from(mixed);
+    let expected_count = count + 1 + 2 * usize::from(mixed);
     for expected_calls in [expected_count, expected_count] {
         let result = run();
         assert!(
@@ -685,7 +687,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
     )
     .unwrap();
     let winners = ready["winners"].as_array().unwrap();
-    assert_eq!(winners.len(), count + usize::from(mixed));
+    assert_eq!(winners.len(), count + 2 * usize::from(mixed));
     let actual_trials: Vec<_> = winners[..count]
         .iter()
         .map(|winner| winner["trial"].as_str().unwrap())
@@ -718,7 +720,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
         .unwrap();
     assert!(
         result.status.success()
-            || (mixed && String::from_utf8_lossy(&result.stderr).contains("1 failed benchmark")),
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("2 failed benchmark")),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
@@ -771,7 +773,7 @@ fn sampled_sweep_fixture(mixed: bool, count: usize) {
         .unwrap();
     assert!(
         result.status.success()
-            || (mixed && String::from_utf8_lossy(&result.stderr).contains("1 failed benchmark")),
+            || (mixed && String::from_utf8_lossy(&result.stderr).contains("2 failed benchmark")),
         "offline replay: stdout={} stderr={}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
