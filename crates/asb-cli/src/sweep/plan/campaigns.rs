@@ -38,6 +38,7 @@ impl SweepPlan {
                     || layout.plan.ignore_provider_unconsumed != self.ignore_provider_unconsumed
                     || layout.plan.ignore_tool_mismatch != self.ignore_tool_mismatch
                     || layout.plan.ignore_mcp_mismatch != self.ignore_mcp_mismatch
+                    || layout.plan.ignore_compatibility != self.ignore_compatibility
                     || !intent.matches_replay(&layout.plan)
                 {
                     return Err(Error::Input(

@@ -190,6 +190,19 @@ back into the owning extension.
 
 ### Ignoring specific completed-attempt failures
 
+`--ignore-compatibility` opts into an approximate replay when the cassette's
+recorded agent, provider, model, workload, task, prompt, dataset, prepared
+material or protocol identity differs from the actual prepared execution.
+ASB reports each differing field name in an immediate warning and in the
+retained run and measurement evidence; comparison JSON and HTML mark the
+result approximate. The recorded identity remains in the campaign plan and
+the actual identity is published as prepared evidence. All replicas and
+subsequent batches must still agree on their actual prepared identity. Resume
+requires the same option. This option does not choose or manufacture missing
+recorded responses, override source integrity checks, or relax errors from
+another class. A changed normalization-policy identity still requires a raw
+policy-3 recording, as checked by replay staging before agent launch.
+
 For exploratory replay, `asb run --replay --ignore-evaluation CONFIG` and
 `asb sweep --replay --ignore-evaluation SWEEP` allow an unresolved workload
 or a grader error to be reported without failing the command solely for that

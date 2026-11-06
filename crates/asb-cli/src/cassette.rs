@@ -116,6 +116,25 @@ pub struct Compatibility {
 }
 
 impl Compatibility {
+    pub(crate) fn differing_fields(&self, requested: &Self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        macro_rules! compare {
+            ($($field:ident),+ $(,)?) => { $(if self.$field != requested.$field { fields.push(stringify!($field)); })+ };
+        }
+        compare!(
+            agent,
+            provider,
+            model,
+            workload,
+            task,
+            dataset_sha256,
+            prompt_sha256,
+            material_sha256,
+            protocol_sha256,
+            normalization_sha256
+        );
+        fields
+    }
     /// Validate bounded logical identities and canonical lowercase SHA-256 values.
     pub fn validate(&self) -> Result<(), Error> {
         for value in [

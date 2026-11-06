@@ -712,6 +712,37 @@ fn replay_can_ignore_mcp_argument_divergence_with_offline_evidence() {
             .iter()
             .any(|row| row["approximate_replay"] == true && row["ignored_failures"].is_array())
     );
+    fs::write(project.0.join("new-recording.jsonl"), &cassette_bytes).unwrap();
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "another-model".into()
+    });
+    let combined_compatibility = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-mcp-mismatch", "--ignore-compatibility"],
+        true,
+        "--replay",
+    );
+    assert!(
+        combined_compatibility.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&combined_compatibility.stdout),
+        String::from_utf8_lossy(&combined_compatibility.stderr)
+    );
+    let rows = records(&combined_compatibility.stdout);
+    let row = rows.iter().find(|row| row.get("task").is_some()).unwrap();
+    assert_eq!(row["approximate_replay"], true);
+    let failures = row["ignored_failures"].as_array().unwrap();
+    assert!(
+        failures
+            .iter()
+            .any(|event| event["kind"] == "replay_compatibility" && event["ignored"] == true)
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|event| event["kind"] == "mcp_mismatch" && event["ignored"] == true)
+    );
     fs::write(project.0.join("other-mcp"), "1").unwrap();
     let different = replay_using_mode(
         &project,
@@ -1128,6 +1159,21 @@ fn changed_policy_rejects_legacy_normalized_track_before_agent_launch() {
         fs::read(project.0.join("attempts.jsonl")).unwrap(),
         attempts_before
     );
+    let with_override = replay_using_mode(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-compatibility"],
+        true,
+        "--llm-replay",
+    );
+    assert!(!with_override.status.success());
+    assert!(
+        String::from_utf8_lossy(&with_override.stderr).contains("does not contain raw requests")
+    );
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts_before
+    );
 }
 
 #[test]
@@ -1195,6 +1241,18 @@ fn normalizer_added_after_raw_recording_enables_offline_replay() {
         replayed.status.success(),
         "{}",
         String::from_utf8_lossy(&replayed.stderr)
+    );
+    let with_override = replay_using_mode(
+        &project,
+        Some("raw.zip"),
+        &["--ignore-compatibility"],
+        true,
+        "--llm-replay",
+    );
+    assert!(
+        with_override.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_override.stderr)
     );
     assert_eq!(
         records(&replayed.stdout)
@@ -1612,6 +1670,169 @@ fn bundled_replay_rejects_each_compatibility_difference_before_client_launch() {
     assert_eq!(
         fs::read_to_string(project.0.join("workspace/preserve-user-file")).unwrap(),
         "untouched user material"
+    );
+}
+
+#[test]
+fn replay_can_explicitly_ignore_recorded_compatibility_but_never_integrity() {
+    let project = Project::new();
+    project.config(1);
+    let provider = RecordingProvider::new();
+    assert!(record(&project, &provider, None).status.success());
+    drop(provider);
+    let identical = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(
+        identical.status.success(),
+        "{}",
+        String::from_utf8_lossy(&identical.stderr)
+    );
+    assert!(
+        !records(&identical.stdout)
+            .iter()
+            .any(|event| event["type"] == "replay-compatibility-warning"
+                || event["ignored_failures"].is_array())
+    );
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.model = "different-model".into();
+        manifest.compatibility.prompt_sha256 = "e".repeat(64);
+    });
+    let strict = replay_bundle(&project, &[]);
+    assert!(!strict.status.success());
+    let output = replay_bundle(&project, &["--ignore-compatibility", "--repeat", "2"]);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let events: Vec<_> = rows
+        .iter()
+        .filter(|v| v["type"] == "replay-compatibility-warning")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| {
+        event["ignored"] == true
+            && event["reason"]
+                .as_str()
+                .unwrap()
+                .contains("model, prompt_sha256")
+    }));
+    let runs: Vec<_> = rows.iter().filter(|v| v.get("task").is_some()).collect();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(
+        |row| row["ignored_failures"][0]["kind"] == "replay_compatibility"
+            && row["ignored_failures"][0]["ignored"] == true
+    ));
+    let plan_path = rows
+        .iter()
+        .find(|row| row["type"] == "execution-plan")
+        .unwrap()["path"]
+        .as_str()
+        .unwrap();
+    let plan: Value = serde_json::from_slice(&fs::read(plan_path).unwrap()).unwrap();
+    assert_eq!(plan["ignore_compatibility"], true);
+    assert_eq!(plan["replay_compatibility"]["model"], "different-model");
+    let human = replay_with_format(
+        &project,
+        Some("new-recording.jsonl"),
+        &["--ignore-compatibility"],
+        false,
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Warning: ignored replay compatibility:")
+    );
+    let invalid = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&project.0)
+        .args(["run", "benchmark.toml", "--ignore-compatibility"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    let original_bundle = fs::read(project.0.join("new-recording.jsonl")).unwrap();
+    rewrite_bundle(&project, |manifest, _| {
+        manifest.compatibility.normalization_sha256 = Some("a".repeat(64));
+    });
+    let changed_policy = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(
+        changed_policy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed_policy.stderr)
+    );
+    fs::write(project.0.join("new-recording.jsonl"), &original_bundle).unwrap();
+    rewrite_bundle(&project, |manifest, payloads| {
+        let payload = payloads.get_mut(&1).unwrap();
+        let mut row: Value =
+            serde_json::from_slice(payload.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        row["request"]["method"] = json!("PATCH");
+        *payload = format!("{row}\n").into_bytes();
+        manifest.tracks[0].bytes = payload.len() as u64;
+        manifest.tracks[0].sha256 = asb_cli::cassette::digest(payload);
+    });
+    let divergence = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(!divergence.status.success());
+    assert!(
+        records(&divergence.stdout).iter().any(|event| event["type"]
+            == "replay-compatibility-warning"
+            && event["ignored"] == true)
+    );
+    assert!(
+        records(&divergence.stdout)
+            .iter()
+            .any(|event| event["ignored_failures"][0]["kind"] == "replay_compatibility")
+    );
+    let divergence_plan = campaign_plan(&divergence);
+    let durable: Value = serde_json::from_slice(
+        &fs::read(
+            divergence_plan
+                .parent()
+                .unwrap()
+                .join("batch-1/compatibility-warning-1.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(durable["kind"], "replay_compatibility");
+    assert_eq!(durable["ignored"], true);
+    let both = replay_bundle(
+        &project,
+        &["--ignore-compatibility", "--ignore-provider-mismatch"],
+    );
+    assert!(
+        both.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&both.stdout),
+        String::from_utf8_lossy(&both.stderr)
+    );
+    let combined = records(&both.stdout)
+        .into_iter()
+        .find(|event| event.get("task").is_some())
+        .unwrap();
+    assert_eq!(combined["approximate_replay"], true);
+    let ignored = combined["ignored_failures"].as_array().unwrap();
+    assert!(
+        ignored
+            .iter()
+            .any(|event| event["kind"] == "replay_compatibility" && event["ignored"] == true)
+    );
+    assert!(
+        ignored
+            .iter()
+            .any(|event| event["kind"] == "provider_mismatch" && event["ignored"] == true)
+    );
+    let attempts = fs::read(project.0.join("attempts.jsonl")).unwrap();
+    rewrite_bundle(&project, |_, payloads| {
+        payloads.get_mut(&1).unwrap()[0] ^= 1
+    });
+    let corrupted = replay_bundle(&project, &["--ignore-compatibility"]);
+    assert!(!corrupted.status.success());
+    assert_eq!(
+        fs::read(project.0.join("attempts.jsonl")).unwrap(),
+        attempts
     );
 }
 
