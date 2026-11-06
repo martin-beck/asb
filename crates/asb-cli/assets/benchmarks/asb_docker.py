@@ -7,6 +7,7 @@ is elevated; the benchmark controller and dataset code remain unprivileged.
 """
 
 import os
+import ipaddress
 import shutil
 import signal
 import socket
@@ -45,6 +46,37 @@ def docker_command():
     if not executable:
         raise DockerProbeError("Docker CLI is missing; install Docker Engine and retry")
     environment = os.environ.copy()
+    direct = [executable]
+    if environment.get("ASB_WORKLOAD_TOOL_MODE") == "replay":
+        # A Docker CLI probe can itself connect to a remote daemon. Resolve the
+        # configured endpoint locally and pin it before the first probe.
+        if environment.get("DOCKER_CONTEXT"):
+            raise DockerProbeError("replay requires a local Docker endpoint; unset DOCKER_CONTEXT and set DOCKER_HOST to a local Unix socket")
+        endpoint = environment.get("DOCKER_HOST")
+        if not endpoint:
+            try:
+                endpoint = subprocess.check_output(
+                    [executable, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+                    stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=_ACCESS_PROBE_TIMEOUT_SECONDS, env=environment, text=True,
+                ).strip()
+            except (OSError, subprocess.SubprocessError) as error:
+                raise DockerProbeError("cannot determine the local Docker endpoint for offline replay") from error
+        try:
+            parsed = urlsplit(endpoint)
+        except ValueError as error:
+            raise DockerProbeError("replay requires a valid local Docker endpoint") from error
+        local = parsed.scheme == "unix" and bool(parsed.path) and not parsed.netloc
+        if parsed.scheme in ("tcp", "http", "https") and parsed.hostname:
+            try:
+                local = ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                # Do not resolve hostnames during replay: even a name spelled
+                # localhost can be configured to resolve outside loopback.
+                local = False
+        if not local:
+            raise DockerProbeError("replay requires a local Docker endpoint; prepare replay inputs before running offline")
+        direct.extend(["--host", endpoint])
     timed_out = False
     # This is transport access, not an outbound provider request.
     def probe(command):
@@ -58,12 +90,11 @@ def docker_command():
             return False
         except OSError:
             return False
-    direct = [executable]
     if probe(direct):
         return direct
     # Match the user's actual selected endpoint, not root's default context.
     try:
-        endpoint = environment.get("DOCKER_HOST")
+        endpoint = direct[2] if len(direct) == 3 else environment.get("DOCKER_HOST")
         if not endpoint:
             endpoint = subprocess.check_output(
                 [executable, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
