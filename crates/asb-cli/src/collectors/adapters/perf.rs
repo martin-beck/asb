@@ -159,7 +159,11 @@ impl CollectorAdapter for PerfCollector {
             stream_bytes: 256 * 1024 * 1024,
             graceful: match name {
                 "perf-symbol-custody" => Some(std::time::Duration::from_secs(60)),
-                "perf" | "perf-stat" => Some(std::time::Duration::from_secs(5)),
+                // Large recordings can need longer to flush their final data
+                // and metadata. Symbol custody waits up to 35 seconds for the
+                // recorder, so its own bounded finalization remains ordered.
+                "perf" => Some(std::time::Duration::from_secs(30)),
+                "perf-stat" => Some(std::time::Duration::from_secs(5)),
                 _ => None,
             },
         }

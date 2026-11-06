@@ -115,6 +115,37 @@ fn actual_requested_sigint_preserves_real_exit_and_requires_complete_stat_data()
 }
 
 #[test]
+fn perf_record_allows_delayed_flush_without_accepting_incomplete_capture() {
+    let fixture = Fixture::new();
+    let stdout = fixture.0.join("slow-stdout");
+    let stderr = fixture.0.join("slow-stderr");
+    let script = "import os,signal,time\ndef finish(*_):\n time.sleep(6)\n print('FLUSHED',flush=True)\n signal.signal(signal.SIGINT,signal.SIG_DFL)\n os.kill(os.getpid(),signal.SIGINT)\nsignal.signal(signal.SIGINT,finish)\nprint('READY',flush=True)\nsignal.pause()\n";
+    let mut launch = crate::launch::ProcessLaunch::new("python3");
+    launch.arg("-I").arg("-S").arg("-u").arg("-c").arg(script);
+    let (mut command, route) = measurements::producer_command(&mut launch).unwrap();
+    let policy = ADAPTER.producer_policy("perf");
+    assert_eq!(policy.graceful, Some(Duration::from_secs(30)));
+    let mut producer = measurements::Producer::spawn_with_dependency(
+        &mut command,
+        route,
+        policy,
+        [
+            File::create(&stdout).unwrap(),
+            File::create(&stderr).unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    until(|| fs::read(&stdout).is_ok_and(|data| data.starts_with(b"READY\n")));
+    let completion = producer.stop();
+    assert!(completion.capture_complete);
+    assert!(completion.interruption_requested && completion.interruption_acknowledged);
+    assert_eq!(completion.guardian_cleanup_confirmed, Some(true));
+    assert!(ADAPTER.accepts_termination("perf", &completion));
+    assert!(fs::read(&stdout).unwrap().ends_with(b"FLUSHED\n"));
+}
+
+#[test]
 fn installed_offline_decoder_runs_once_with_closed_environment_and_retains_failed_captures() {
     for mode in ["valid", "nonzero", "timeout", "overflow"] {
         let fixture = Fixture::new();
