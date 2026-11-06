@@ -133,6 +133,8 @@ impl BatchRun<'_> {
                 native_capsule_record: self.options.native_capsule_record.as_deref(),
                 native_capsule_replay: self.options.native_capsule_replay.as_deref(),
                 respect_record_timings: self.plan.respect_record_timings,
+                ignore_evaluation: self.plan.ignore_evaluation,
+                ignore_agent: self.plan.ignore_agent,
                 policy: Some(&policy),
                 requirements_prepared: self.options.requirements_prepared,
                 batch: Some(&self.identity),

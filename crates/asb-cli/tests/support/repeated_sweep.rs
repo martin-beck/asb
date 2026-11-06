@@ -211,6 +211,84 @@ pub(super) fn registered_project(concurrency: usize) -> Project {
 }
 
 #[test]
+fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
+    let project = registered_project(1);
+    let input = project.0.join("replay-input/000-benchmark/cassettes");
+    fs::create_dir_all(&input).unwrap();
+    fs::copy(
+        project.0.join("input.jsonl"),
+        input.join("benchmark-pi-bug-fix-fixture.jsonl"),
+    )
+    .unwrap();
+    fs::write(project.0.join("false-grade-first"), "true").unwrap();
+    let output = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-evaluation",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = records(&output.stdout);
+    let row = rows
+        .iter()
+        .find(|row| row["ignored_failures"].is_array())
+        .unwrap();
+    assert_eq!(row["ignored_failures"][0]["kind"], "workload_check_failed");
+    assert_eq!(row["ignored_failures"][0]["ignored"], true);
+    assert_eq!(row["success_rate"], 0.0);
+    let plan: Value =
+        serde_json::from_slice(&fs::read(project.0.join("sweep-results/plan.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan["ignore_evaluation"], true);
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+        ],
+    );
+    assert!(
+        !resumed.status.success(),
+        "resume must not silently change the saved policy"
+    );
+    let resumed = sweep(
+        &project,
+        None,
+        &[
+            "--replay",
+            "--resume",
+            "--repeat",
+            "1",
+            "--cassette-root",
+            "replay-input",
+            "--ignore-evaluation",
+        ],
+    );
+    assert!(
+        resumed.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+}
+
+#[test]
 fn continuation_metadata_recovery_cli_rejects_execution_options_without_provider_setup() {
     let project = registered_project(1);
     for arguments in [

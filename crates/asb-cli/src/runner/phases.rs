@@ -660,6 +660,7 @@ pub(super) fn finish_measurements(
     }
     issues.event(Some(&mut session), LifecycleEvent::RunFinishing);
     let measured = measurements::RunMeasurement {
+        ignored_failures: &result.disposition.ignored_failures,
         replay_selection: result.replay_selection,
         native_replay_consumed: result.native_replay_consumed,
         planning: Some(&result.planning),

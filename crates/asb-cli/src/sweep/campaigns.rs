@@ -259,6 +259,8 @@ pub(super) fn prepare(
                 track: options.track,
                 replay_seed: if *bundle { seed } else { options.seed },
                 respect_record_timings: options.respect_record_timings,
+                ignore_evaluation: options.ignore_evaluation,
+                ignore_agent: options.ignore_agent,
                 // PreparedSweep warmed this fresh population before campaign
                 // construction, so each repeated task must not revalidate the
                 // same shared installations.

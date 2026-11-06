@@ -813,6 +813,7 @@ pub(in crate::sweep) fn measurement_matches(measured: &Value, summary: &Value) -
         "steps",
         "failure_kind",
         "failure_reason",
+        "ignored_failures",
         "workload_failure",
         "adapter_smoke_success",
         "workload_resource_disposition",

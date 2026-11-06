@@ -300,6 +300,8 @@ pub(crate) fn run_with_interactive(
                     native_capsule_record: native_capsule_record.as_deref(),
                     native_capsule_replay: native_capsule_replay.as_deref(),
                     respect_record_timings: options.respect_record_timings,
+                    ignore_evaluation: options.ignore_evaluation,
+                    ignore_agent: options.ignore_agent,
                     interactive: interactive && !options.json,
                     ..Default::default()
                 },
@@ -376,6 +378,8 @@ pub(crate) fn run_with_interactive(
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
                     respect_record_timings: options.respect_record_timings,
+                    ignore_evaluation: options.ignore_evaluation,
+                    ignore_agent: options.ignore_agent,
                     cassette_root: cassette_root.as_deref(),
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
@@ -1250,6 +1254,12 @@ impl From<SetupArgs> for config::SetupOptions {
     group(ArgGroup::new("replay-direction").args(["replay", "llm_replay", "tool_replay", "mcp_replay"]).multiple(true))
 )]
 struct RunArgs {
+    /// Ignore workload evaluation failure for replay while retaining the actual grade.
+    #[arg(long, requires = "replay-direction")]
+    ignore_evaluation: bool,
+    /// Ignore an agent process failure for replay while retaining its actual status.
+    #[arg(long, requires = "replay-direction")]
+    ignore_agent: bool,
     #[arg(value_name = "CONFIG", value_hint = clap::ValueHint::FilePath)]
     path: String,
     /// Sequential batches of fresh isolated executions at configured concurrency.
@@ -1314,6 +1324,12 @@ struct RunArgs {
     group(ArgGroup::new("sweep-input").args(["path", "preset"]).required(true).multiple(false))
 )]
 struct SweepArgs {
+    /// Ignore workload evaluation failure for replay while retaining the actual grade.
+    #[arg(long, requires = "replay-direction")]
+    ignore_evaluation: bool,
+    /// Ignore an agent process failure for replay while retaining its actual status.
+    #[arg(long, requires = "replay-direction")]
+    ignore_agent: bool,
     #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath, group = "sweep-input")]
     path: Option<String>,
     /// Materialize a repository-owned preset in this initialized project, then run its sweep.

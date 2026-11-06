@@ -1428,6 +1428,8 @@ impl ResultFacts {
         let resolution_eligible = evaluation_kind.resolution_eligible();
         let disposition = RunDisposition::from_facts(RunFacts {
             evaluation: &evaluation,
+            ignore_evaluation: options.ignore_evaluation,
+            ignore_agent: options.ignore_agent,
             evaluation_kind,
             process_success,
             agent_failure: agent_failure.as_deref(),
@@ -1756,7 +1758,7 @@ impl Publication<'_, '_> {
         // collector captures remain project inputs or sealed evidence.
         let compact_workspace = super::compaction::eligible(
             config.retention.compact_completed_attempts,
-            result.disposition.success,
+            result.disposition.success && result.disposition.ignored_failures.is_empty(),
             workload_cleanup_confirmed && proxy_evidence.cleanup_confirmed,
             result.workload_resource_disposition,
         );
