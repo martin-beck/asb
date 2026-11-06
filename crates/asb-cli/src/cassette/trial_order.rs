@@ -21,6 +21,7 @@ pub struct TrialPreparation {
     target: usize,
     candidates: Vec<String>,
     outcomes: Vec<TrialOutcome>,
+    in_flight: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,6 +39,7 @@ impl TrialPreparation {
             target: order.target,
             candidates: order.candidates,
             outcomes: Vec::new(),
+            in_flight: None,
         }
     }
 
@@ -99,23 +101,42 @@ impl TrialPreparation {
                 "trial preparation contains outcomes after completion".into(),
             ));
         }
+        if let Some(trial) = &self.in_flight
+            && (successes == self.target || self.candidates.get(self.outcomes.len()) != Some(trial))
+        {
+            return Err(Error(
+                "trial preparation has invalid in-flight ownership".into(),
+            ));
+        }
         Ok(())
     }
 
     /// Next candidate, or none once the target is met or the pool is exhausted.
     pub fn next(&self) -> Result<Option<&str>, Error> {
         self.validate()?;
+        if self.in_flight.is_some() {
+            return Err(Error("trial preparation has an unsettled attempt; inspect its retained evidence before continuing".into()));
+        }
         if self.successful().len() == self.target {
             return Ok(None);
         }
         Ok(self.candidates.get(self.outcomes.len()).map(String::as_str))
     }
 
-    /// Record one outcome in candidate order after the attempt has settled.
+    /// Mark the next candidate as in-flight before starting its recording.
+    /// The owner must persist this transition before starting any process.
+    pub fn start(&mut self) -> Result<Option<String>, Error> {
+        let next = self.next()?.map(str::to_owned);
+        self.in_flight = next.clone();
+        Ok(next)
+    }
+
+    /// Record one outcome after the in-flight attempt has settled.
     /// A digest means recording and offline replay both succeeded; `None`
     /// marks a failed candidate and advances to a different trial.
     pub fn settle(&mut self, trial: &str, cassette_sha256: Option<String>) -> Result<(), Error> {
-        if self.next()? != Some(trial) {
+        self.validate()?;
+        if self.in_flight.as_deref() != Some(trial) {
             return Err(Error(
                 "trial outcome is not the next preparation candidate".into(),
             ));
@@ -124,9 +145,11 @@ impl TrialPreparation {
             trial: trial.into(),
             cassette_sha256,
         };
+        self.in_flight = None;
         self.outcomes.push(outcome);
         if let Err(error) = self.validate() {
             self.outcomes.pop();
+            self.in_flight = Some(trial.into());
             return Err(error);
         }
         Ok(())
@@ -260,14 +283,14 @@ mod tests {
     fn failed_replay_uses_a_distinct_replacement_and_recovers_successes() {
         let ids = (0..4).map(|n| format!("trial-{n}")).collect::<Vec<_>>();
         let mut state = TrialPreparation::new(TrialOrder::new(&ids, 2, 4).unwrap());
-        let first = state.next().unwrap().unwrap().to_owned();
+        let first = state.start().unwrap().unwrap();
         state.settle(&first, None).unwrap();
-        let second = state.next().unwrap().unwrap().to_owned();
+        let second = state.start().unwrap().unwrap();
         assert_ne!(first, second);
         state.settle(&second, Some("a".repeat(64))).unwrap();
         let serialized = serde_json::to_string(&state).unwrap();
         let mut restored: TrialPreparation = serde_json::from_str(&serialized).unwrap();
-        let third = restored.next().unwrap().unwrap().to_owned();
+        let third = restored.start().unwrap().unwrap();
         assert_ne!(first, third);
         assert_ne!(second, third);
         restored.settle(&third, Some("b".repeat(64))).unwrap();
@@ -287,16 +310,29 @@ mod tests {
     fn exhausted_pool_and_tampered_receipts_do_not_qualify() {
         let ids = vec!["a".into(), "b".into()];
         let mut state = TrialPreparation::new(TrialOrder::new(&ids, 2, 9).unwrap());
-        let first = state.next().unwrap().unwrap().to_owned();
+        let first = state.start().unwrap().unwrap();
         assert!(state.settle(&first, Some("bad-digest".into())).is_err());
-        assert_eq!(state.next().unwrap(), Some(first.as_str()));
+        assert!(state.next().is_err());
         state.settle(&first, None).unwrap();
-        let second = state.next().unwrap().unwrap().to_owned();
+        let second = state.start().unwrap().unwrap();
         state.settle(&second, None).unwrap();
         assert_eq!(state.next().unwrap(), None);
         assert!(!state.complete().unwrap());
         let mut bad = state.clone();
         bad.outcomes[0].trial = "unrelated".into();
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn interrupted_attempt_cannot_silently_start_another_trial() {
+        let ids = vec!["a".into(), "b".into()];
+        let mut state = TrialPreparation::new(TrialOrder::new(&ids, 1, 3).unwrap());
+        let started = state.start().unwrap().unwrap();
+        let encoded = serde_json::to_vec(&state).unwrap();
+        let mut restored: TrialPreparation = serde_json::from_slice(&encoded).unwrap();
+        assert!(restored.start().is_err());
+        assert!(!restored.complete().unwrap());
+        restored.settle(&started, None).unwrap();
+        assert_ne!(restored.start().unwrap().unwrap(), started);
     }
 }
