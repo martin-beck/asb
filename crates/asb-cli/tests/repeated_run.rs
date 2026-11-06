@@ -466,34 +466,49 @@ fn sampled_candidate_child() {
     if std::env::var_os("ASB_SAMPLED_RETRY").is_some() {
         let ids = vec!["one".to_owned(), "two".to_owned()];
         let order = asb_cli::cassette::TrialOrder::new(&ids, 1, 7).unwrap();
-        let template = fs::read_to_string(&config).unwrap();
-        let state = asb_cli::cassette::BoundTrialPreparation::prepare_file(
+        let state = asb_cli::cassette::prepare_sampled_group(
             &root.join("sample-ledger.json"),
+            &root.join("sample-artifacts"),
+            &config,
+            &root,
             &"a".repeat(64),
-            &"b".repeat(64),
             order.clone(),
-            |trial| {
-                let selected = root.join(format!("candidate-{trial}.toml"));
-                fs::write(
-                    &selected,
-                    template.replace("trial='bug-fix'", &format!("trial='{trial}'")),
-                )
-                .unwrap();
-                let cassette = root.join(format!("candidate-{trial}.asb.zip"));
-                asb_cli::cassette::record_and_replay_candidate(
-                    &selected, &selected, &cassette, &root, None,
-                )
-            },
+            None,
         )
         .expect("failed replay should be replaced by another recorded trial");
         assert!(state.preparation().complete().unwrap());
         assert_eq!(state.preparation().successful().len(), 1);
-        asb_cli::cassette::BoundTrialPreparation::prepare_file(
+        let trial = state.preparation().successful()[0].0;
+        let cassette = root
+            .join("sample-artifacts")
+            .join(format!(
+                "candidate-{}",
+                asb_cli::cassette::digest(trial.as_bytes())
+            ))
+            .join("recording.asb.zip");
+        let original = fs::read(&cassette).unwrap();
+        fs::write(&cassette, b"changed cassette").unwrap();
+        assert!(
+            asb_cli::cassette::prepare_sampled_group(
+                &root.join("sample-ledger.json"),
+                &root.join("sample-artifacts"),
+                &config,
+                &root,
+                &"a".repeat(64),
+                order.clone(),
+                None,
+            )
+            .is_err()
+        );
+        fs::write(&cassette, original).unwrap();
+        asb_cli::cassette::prepare_sampled_group(
             &root.join("sample-ledger.json"),
+            &root.join("sample-artifacts"),
+            &config,
+            &root,
             &"a".repeat(64),
-            &"b".repeat(64),
             order,
-            |_| panic!("completed preparation must reuse its verified cassette"),
+            None,
         )
         .unwrap();
         return;
