@@ -35,6 +35,7 @@ const Y_TICKS: usize = 5;
 #[derive(Debug)]
 struct BenchmarkData {
     observation: crate::process_termination::Observation,
+    native_replay_consumed: Option<bool>,
     id: RowId,
     execution: Option<Value>,
     planned_normalization_policy: Option<crate::project::replay_normalization::PolicyDescriptor>,
@@ -606,6 +607,11 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             },
         );
         let analysis_details = analysis::html(&benchmark.collector_documents);
+        let native_replay_details = if benchmark.native_replay_consumed == Some(true) {
+            "<p>Pi native snapshot broker consumed its recorded tool stream. This does not establish coverage of all processes, filesystem effects, or network access.</p>"
+        } else {
+            ""
+        };
         let execution_details = benchmark.execution.as_ref().map_or_else(String::new, |execution| {
             let text = serde_json::to_string_pretty(execution).unwrap_or_else(|_| "{}".into());
             format!("<details><summary>Execution / replay identity</summary><pre class=\"json-details\">{}</pre></details>", escape(&text))
@@ -712,7 +718,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
-            format_args!("{execution_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
+            format_args!("{execution_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
             host_details,
             metrics_details,
             artifacts,

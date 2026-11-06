@@ -201,6 +201,10 @@ fn default_timeout() -> f64 {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct GuestResult {
+    /// The Pi snapshot broker settled after consuming its complete tool stream.
+    /// This does not attest coverage of arbitrary guest effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_replay_consumed: Option<bool>,
     #[serde(flatten)]
     pub observation: crate::process_termination::Observation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1045,9 +1049,11 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             captured.observation,
         )
     };
-    if let Some(service) = auxiliary.as_mut() {
-        service.settle()?;
-    }
+    let native_replay_selected = request.config.agent == "pi"
+        && request.tool_replay
+        && request.native_tool_launch.is_some()
+        && request.snapshot_archive_sha256.is_some();
+    let native_replay_consumed = settle_auxiliary(&mut auxiliary, native_replay_selected)?;
     let namespace_collectors = capture
         .as_mut()
         .map(|session| session.export_execution_namespace_state())
@@ -1089,6 +1095,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     // Until the first durable publication transfers the frozen evidence, Drop
     // retains raw artifacts. This interim record never asserts settlement.
     let mut result = GuestResult {
+        native_replay_consumed,
         observation,
         artifact_error: Some(
             "agent scratch settlement pending; source or custody may remain".into(),
@@ -1215,6 +1222,22 @@ fn snapshot_guest_requires_the_matching_marker_before_launch() {
         assert!(validate_snapshot_marker(true, false, replay, record, replay_socket).is_err());
         assert!(validate_snapshot_marker(true, true, !replay, record, replay_socket).is_err());
     }
+}
+
+// Successful broker settlement checks the complete selected native stream.
+fn settle_auxiliary(
+    auxiliary: &mut Option<super::auxiliary::AuxiliaryService>,
+    native_replay_selected: bool,
+) -> Result<Option<bool>, Error> {
+    if native_replay_selected && auxiliary.is_none() {
+        return Err(Error::Run(
+            "Pi native replay has no settlement service".into(),
+        ));
+    }
+    if let Some(service) = auxiliary.as_mut() {
+        service.settle()?;
+    }
+    Ok(native_replay_selected.then_some(true))
 }
 
 /// Move replay sidecars into receipt-backed files before the result reaches
@@ -1385,6 +1408,27 @@ pub(crate) fn entry() -> std::process::ExitCode {
 mod artifact_publication_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn native_consumption_requires_a_successfully_settled_service() {
+        assert!(settle_auxiliary(&mut None, true).is_err());
+        assert_eq!(settle_auxiliary(&mut None, false).unwrap(), None);
+        for (exit, selected, expected) in [(0, true, Some(true)), (0, false, None)] {
+            let mut command = std::process::Command::new("sh");
+            command.arg("-c").arg(format!(
+                "printf 'READY\\n'; read x; test \"$x\" = S || exit 2; exit {exit}"
+            ));
+            let mut service =
+                Some(super::super::auxiliary::AuxiliaryService::start(&mut command).unwrap());
+            assert_eq!(settle_auxiliary(&mut service, selected).unwrap(), expected);
+        }
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg("printf 'READY\\n'; read x; exit 1");
+        let mut failed =
+            Some(super::super::auxiliary::AuxiliaryService::start(&mut command).unwrap());
+        assert!(settle_auxiliary(&mut failed, true).is_err());
+    }
+
     #[test]
     fn replay_sidecars_leave_the_controller_result_before_receipt_export() {
         let mut artifacts = super::super::AgentArtifacts {
@@ -1454,6 +1498,7 @@ mod artifact_publication_tests {
             fs::write(&raw, r#"{"answer":"submission","usage":34,"steps":4}"#).unwrap();
             let frozen = owner.freeze();
             let mut result = GuestResult {
+                native_replay_consumed: None,
                 observation: Default::default(),
                 owned_instrumentation: None,
                 execution_workspace: None,

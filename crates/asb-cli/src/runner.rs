@@ -79,6 +79,9 @@ fn emit_warning(
 
 #[derive(Serialize)]
 struct RunResult<'a> {
+    /// Guest-attested Pi native tool stream consumption, not total effect coverage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_replay_consumed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recording: Option<recording::Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2723,6 +2726,7 @@ mod tests {
             .unwrap();
         session
             .finish(crate::measurements::RunMeasurement {
+                native_replay_consumed: None,
                 planning: None,
                 effective_budgets: None,
                 execution: None,
@@ -3169,6 +3173,7 @@ mod tests {
 
     fn result<'a>() -> RunResult<'a> {
         RunResult {
+            native_replay_consumed: None,
             observation: Default::default(),
             recording: None,
             execution: None,

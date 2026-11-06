@@ -53,6 +53,11 @@ experimental mode requires a snapshot-capable Linux guest and available
 `btrfs`, `mkfs.btrfs`, and `rsync` tools. Replay restores the
 recorded extra-root layout when present; an explicit override must match it.
 Automatic mode selection is not evidence of complete filesystem coverage.
+For newly completed Pi snapshot replays, comparison evidence reports
+`native_replay_consumed` only after the guest broker settles successfully. It
+indicates that the captured native tool stream was consumed, not that every
+agent process or effect was captured. Historical or missing observations remain
+unknown; a task grade is not a substitute for this receipt.
 
 ## Implementation sequence
 

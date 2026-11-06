@@ -1350,6 +1350,7 @@ fn recording_setup_failure_retains_partial_bytes_with_unknown_outcomes() {
 
 fn result() -> RunResult<'static> {
     RunResult {
+        native_replay_consumed: None,
         observation: Default::default(),
         recording: None,
         execution: None,
