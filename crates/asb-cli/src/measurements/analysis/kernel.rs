@@ -12,6 +12,8 @@ pub(super) struct Diagnostic {
     value: Option<f64>,
     unit: &'static str,
     unavailable_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'static str>,
     evidence: Vec<&'static str>,
     limitations: &'static str,
 }
@@ -68,6 +70,7 @@ impl Rule for RunnablePressure {
             unavailable_reason: value.is_none().then_some(
                 "requires complete loss-free scoped scheduler states with execution bounds",
             ),
+            scope: None,
             evidence: vec![
                 "perfetto.json",
                 "perfetto-tracepoints.json",
@@ -107,6 +110,7 @@ impl Rule for BpfTime {
             unavailable_reason: value
                 .is_none()
                 .then_some("requires completed scoped BPF collector and numeric observation"),
+            scope: None,
             evidence: vec![self.artifact, self.metric],
             limitations: self.limitations,
         }

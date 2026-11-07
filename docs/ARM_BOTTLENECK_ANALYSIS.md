@@ -196,6 +196,12 @@ throttling and memory-limit diagnostics. Comparison regenerates findings and
 produces the normal JSON, SVG line/bar charts and interactive HTML, with bytes,
 bytes/s, ms/s and percentage units. The summary contains observations rather
 than a second graph metric set. Findings describe symptoms, not proven causes.
+The analysis accepts only either an exclusive ASB-owned agent cgroup or a
+verified ASB-owned workload-container cgroup. Every pressure diagnostic carries
+its exact scope. Container-scoped findings are benchmark-execution observations:
+they may include workload runtime helpers and are never labelled or interpreted
+as agent-only measurements. Host and arbitrary-container pressure remain
+ineligible evidence.
 
 Linux must expose the corresponding controllers and enable PSI. On a kernel
 built with `CONFIG_PSI_DEFAULT_DISABLED=y`, PSI requires `psi=1` in that
