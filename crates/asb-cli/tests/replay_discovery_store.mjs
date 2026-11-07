@@ -39,3 +39,14 @@ test('exploration directories may not redirect through symlinks', t => {
   const {root,store}=fixture(t);fs.symlinkSync(root,store);
   assert.throws(()=>prepareStore(store));
 });
+
+test('old stored service-error substitutions are refused', t => {
+  const {store}=fixture(t);prepareStore(store);
+  const entries=[[JSON.stringify([{name:'bash',arguments:{command:'x'}},'normal']),
+    'ASB local tool service exited with status 2: lock held']];
+  const bytes=Buffer.from(JSON.stringify({schema_version:1,entries}));
+  const name=`candidate-${createHash('sha256').update(bytes).digest('hex')}.json`;
+  fs.writeFileSync(join(store,name),bytes,{mode:0o600});
+  assert.deepEqual(loadCandidates(store),{candidates:[],failures:1});
+  assert.throws(()=>saveCandidate(store,entries));
+});

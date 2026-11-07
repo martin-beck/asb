@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findNormalizer } from '../assets/scripts/replay-normalizer-discovery.mjs';
+import { findNormalizer, temporaryNormalizerSource } from '../assets/scripts/replay-normalizer-discovery.mjs';
 import { normalizeToolResult } from '../assets/examples/normalizers/python-unittest-elapsed.mjs';
 import { NormalizerSupervisor } from '../assets/scripts/normalizer-supervisor.mjs';
 import { normalizeToolResultsAsync } from '../assets/scripts/tool-result-normalization.mjs';
@@ -54,4 +54,20 @@ test('handles multiple distinct results but rejects conflicting or ambiguous ass
 test('oversized temporary suggestions report a limit rather than a negative match', async () => {
   const left=request('a'.repeat(17000)), right=request('b'.repeat(17000));
   assert.deepEqual(await findNormalizer(left,right,[]),{kind:'limited'});
+});
+
+test('service failures cannot become exploratory rules or loaded stored rules', async () => {
+  const failures = [
+    'ASB local tool service exited with status 2: ASB local-tool service: local-tool persistent transcript is already in use',
+    'ASB local tool service failed to start: spawnSync /example/asb ETIMEDOUT',
+  ];
+  const candidate = {id:'overbroad', normalizeToolResult: () => 'same'};
+  for (const failure of failures) {
+    assert.equal(await findNormalizer(request('normal output'), request(failure), [candidate]), null);
+    assert.equal(await findNormalizer(request(failure), request('normal output'), []), null);
+    const tool = {name:'bash', arguments:{command:'python -m unittest tests'}};
+    assert.equal(temporaryNormalizerSource([[JSON.stringify([tool, failure]), 'normal output']]), null);
+    assert.equal(temporaryNormalizerSource([[JSON.stringify([tool, 'normal output']), failure]]), null);
+  }
+  assert.equal((await findNormalizer(request('normal 1'), request('normal 2'), [])).kind, 'temporary');
 });
