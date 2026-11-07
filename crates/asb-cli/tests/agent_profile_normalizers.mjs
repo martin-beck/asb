@@ -5,6 +5,17 @@ import { normalizeRequest as hermes } from "../assets/scripts/agent-normalizers/
 import { normalizeRequest as openhands } from "../assets/scripts/agent-normalizers/openhands.mjs";
 import { normalizeRequest as workbuddy } from "../assets/scripts/agent-normalizers/workbuddy.mjs";
 
+test("WorkBuddy normalizes only generated persisted tool-result paths", () => {
+  const path = (session, suffix, tool = "run_command") => `/opt/asb-private/agent-state/workbuddy/config/projects/testbed/${session}/tool-results/mcp-asb-local-tools-${tool}-${suffix}.txt`;
+  const first = path("123e4567-e89b-12d3-a456-426614174000", "1794046319666-380df9");
+  const second = path("123e4567-e89b-12d3-a456-426614174001", "1794046379340-905948");
+  const normalize = (p, role = "tool") => workbuddy({ profileActive: true, body: { messages: [{ role, content: `Output saved to ${p}` }] } }).messages[0].content;
+  assert.equal(normalize(first), normalize(second));
+  assert.notEqual(normalize(first, "user"), normalize(second, "user"));
+  assert.notEqual(normalize(first), normalize(path("123e4567-e89b-12d3-a456-426614174001", "1794046379340-905948", "read_file")));
+  assert.notEqual(normalize(first), normalize(second.replace("/testbed/", "/elsewhere/")));
+});
+
 test("profile mode keeps historical recursive agent rewrites away from literal text", () => {
   for (const [normalize, text] of [
     [hermes, "/opt/asb-private/agent-state/tmp/hermes-verify-abc.py"],
