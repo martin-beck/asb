@@ -695,6 +695,11 @@ corresponding Compose/Buildx capabilities; SDKs are installed project-locally,
 but ASB does not install or reconfigure the host Docker daemon. Large task
 images need substantial disk space and memory. Preparation reports missing
 prerequisites before starting the selected client where they can be checked.
+When SWE-bench needs to build a task image from source, its build memory limit
+defaults to 8 GiB. On a host with sufficient memory, set
+`ASB_SWEBENCH_BUILD_MEMORY_GIB=16` for the ASB command to raise that limit;
+accepted values are whole GiB from 1 through 256. The selected limit is recorded
+in the attempt's source-image receipt.
 
 For example, in an initialized benchmark project:
 
