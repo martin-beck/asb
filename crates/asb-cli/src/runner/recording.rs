@@ -923,7 +923,7 @@ fn association_budget(repeat: u64, concurrency: usize) -> Result<u64, Error> {
         .checked_mul(concurrency as u64)
         .filter(|count| {
             repeat > 0
-                && (1..=64).contains(&concurrency)
+                && (1..=crate::benchmark::MAX_CONCURRENCY).contains(&concurrency)
                 && *count <= Limits::default().max_tracks as u64
         })
         .and_then(|count| count.checked_mul(ASSOCIATION_BOUND))
@@ -1376,7 +1376,13 @@ mod tests {
             association_budget(65_533, 1).unwrap(),
             65_533 * ASSOCIATION_BOUND
         );
-        for (repeat, concurrency) in [(0, 1), (1, 0), (1, 65), (1024, 64), (u64::MAX, 2)] {
+        for (repeat, concurrency) in [
+            (0, 1),
+            (1, 0),
+            (1, crate::benchmark::MAX_CONCURRENCY + 1),
+            (1024, crate::benchmark::MAX_CONCURRENCY),
+            (u64::MAX, 2),
+        ] {
             assert!(association_budget(repeat, concurrency).is_err());
         }
         let association = Association {

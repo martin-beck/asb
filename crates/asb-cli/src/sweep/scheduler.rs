@@ -661,7 +661,7 @@ mod tests {
             (0, None, vec![1]),
             (33, None, vec![1]),
             (1, Some(0), vec![1]),
-            (1, Some(65), vec![1]),
+            (1, Some(crate::benchmark::MAX_CONCURRENCY + 1), vec![1]),
             (2, Some(1), vec![2]),
             (1, None, vec![0]),
         ] {

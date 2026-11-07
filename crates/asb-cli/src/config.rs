@@ -455,7 +455,7 @@ mod tests {
             setup(selection, &mut output)
                 .unwrap_err()
                 .to_string()
-                .contains("must not exceed 64")
+                .contains("must not exceed 512")
         );
         assert!(output.is_empty());
     }

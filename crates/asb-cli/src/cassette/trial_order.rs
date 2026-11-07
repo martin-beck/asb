@@ -126,7 +126,7 @@ impl ReplayAttempt {
                 "replay result or cassette identity exceeds its bound or is invalid".into(),
             ));
         }
-        if expected_replicas == 0 || expected_replicas > 64 {
+        if expected_replicas == 0 || expected_replicas > crate::benchmark::MAX_CONCURRENCY {
             return Err(Error("invalid replay qualification replica count".into()));
         }
         let mut replicas = Vec::new();
@@ -673,7 +673,10 @@ impl TrialPreparation {
         replicas: &[ReplayObservation],
         expected_replicas: usize,
     ) -> Result<bool, Error> {
-        if expected_replicas == 0 || expected_replicas > 64 || replicas.len() != expected_replicas {
+        if expected_replicas == 0
+            || expected_replicas > crate::benchmark::MAX_CONCURRENCY
+            || replicas.len() != expected_replicas
+        {
             return Err(Error(
                 "replay qualification lacks the expected replica observations".into(),
             ));

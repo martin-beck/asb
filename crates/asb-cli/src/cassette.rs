@@ -384,7 +384,7 @@ impl Manifest {
             }
         }
         if !valid_recording_id(&self.recording_id)
-            || !(1..=64).contains(&self.concurrency)
+            || !(1..=crate::benchmark::MAX_CONCURRENCY as u64).contains(&self.concurrency)
             || self.tracks.len() > limits.max_tracks
         {
             return Err(Error(

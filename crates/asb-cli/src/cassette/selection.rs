@@ -141,7 +141,9 @@ impl SelectionPlan {
         manifest.validate(Limits::default())?;
         let count = repeat
             .checked_mul(concurrency)
-            .filter(|_| repeat > 0 && (1..=64).contains(&concurrency))
+            .filter(|_| {
+                repeat > 0 && (1..=crate::benchmark::MAX_CONCURRENCY as u64).contains(&concurrency)
+            })
             .and_then(|count| usize::try_from(count).ok())
             .filter(|count| *count <= max_executions.min(1_000_000))
             .ok_or_else(|| {

@@ -52,7 +52,7 @@ impl OriginPlan {
     pub fn validate(&self, concurrency: u64, limits: Limits) -> Result<(), Error> {
         limits.validate()?;
         if self.schema_version != 1
-            || !(1..=64).contains(&concurrency)
+            || !(1..=crate::benchmark::MAX_CONCURRENCY as u64).contains(&concurrency)
             || self.population == 0
             || self.population > limits.max_tracks as u64
             || !self.population.is_multiple_of(concurrency)

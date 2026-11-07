@@ -1026,7 +1026,7 @@ mod tests {
             json!({"jobs":0,"max_active_attempts":1}),
             json!({"jobs":33,"max_active_attempts":1}),
             json!({"jobs":2,"max_active_attempts":0}),
-            json!({"jobs":1,"max_active_attempts":65}),
+            json!({"jobs":1,"max_active_attempts":crate::benchmark::MAX_CONCURRENCY + 1}),
         ] {
             let mut malformed = original.clone();
             malformed["scheduling"] = scheduling;

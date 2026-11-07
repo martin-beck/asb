@@ -85,14 +85,14 @@ mod tests {
     #[test]
     fn replica_slots_are_bounded_one_based_and_preserve_selected_paths() {
         let config: crate::benchmark::BenchmarkConfig = toml::from_str(
-            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=64\nworkspace='a/workspace'\nlog_file='a/run.log'\n[measurements]\nenabled=true\ndirectory='a/measures'\ncollectors=[]\n").unwrap();
+            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=512\nworkspace='a/workspace'\nlog_file='a/run.log'\n[measurements]\nenabled=true\ndirectory='a/measures'\ncollectors=[]\n").unwrap();
         for (index, total, valid) in [
-            (0, 64, false),
+            (0, 512, false),
             (1, 0, false),
-            (65, 64, false),
-            (1, 65, false),
-            (1, 64, true),
-            (64, 64, true),
+            (513, 512, false),
+            (1, 513, false),
+            (1, 512, true),
+            (512, 512, true),
         ] {
             let identity = Identity { index, total };
             assert_eq!(identity.valid(), valid);

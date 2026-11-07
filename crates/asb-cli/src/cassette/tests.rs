@@ -1258,7 +1258,7 @@ fn schema_identity_bounds_order_and_checked_slot_mapping() {
     let mutations: [fn(&mut Manifest); 11] = [
         |m| m.schema_version = SCHEMA_VERSION + 1,
         |m| m.recording_id = "../elsewhere".into(),
-        |m| m.concurrency = 65,
+        |m| m.concurrency = crate::benchmark::MAX_CONCURRENCY as u64 + 1,
         |m| m.compatibility.prompt_sha256 = "G".repeat(64),
         |m| m.compatibility.agent = "\x1b[2J".into(),
         |m| m.tracks.swap(0, 1),
@@ -1267,7 +1267,7 @@ fn schema_identity_bounds_order_and_checked_slot_mapping() {
         |m| m.tracks[0].id = 0,
         |m| m.tracks[0].sha256 = "not a hash".into(),
         |m| {
-            m.concurrency = 64;
+            m.concurrency = crate::benchmark::MAX_CONCURRENCY as u64;
             m.tracks[0].batch = u64::MAX;
         },
     ];
@@ -1459,8 +1459,8 @@ fn selection_counts_and_eligibility_do_not_depend_on_success() {
     for (repeat, concurrency, limit) in [
         (0, 1, 100),
         (1, 0, 100),
-        (1, 65, 100),
-        (u64::MAX, 64, 100),
+        (1, crate::benchmark::MAX_CONCURRENCY as u64 + 1, 100),
+        (u64::MAX, crate::benchmark::MAX_CONCURRENCY as u64, 100),
         (2, 4, 7),
     ] {
         assert!(SelectionPlan::build(&m, repeat, concurrency, 0, None, limit).is_err());

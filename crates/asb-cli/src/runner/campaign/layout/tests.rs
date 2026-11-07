@@ -304,7 +304,13 @@ fn emitted_layouts_cover_all_modes_counts_and_external_measurement_roots() {
             }
         }
     }
-    for (repeat, concurrency) in [(0, 1), (1, 0), (1, 65), (u64::MAX, 64), (65_534, 1)] {
+    for (repeat, concurrency) in [
+        (0, 1),
+        (1, 0),
+        (1, crate::benchmark::MAX_CONCURRENCY + 1),
+        (u64::MAX, crate::benchmark::MAX_CONCURRENCY),
+        (65_534, 1),
+    ] {
         assert!(population(repeat, concurrency).is_err());
     }
 }
@@ -359,7 +365,7 @@ fn structural_mutations_reject_without_observing_any_artifacts() {
         ("repeat", json!(0)),
         ("repeat", json!(u64::MAX)),
         ("concurrency", json!(1)),
-        ("concurrency", json!(65)),
+        ("concurrency", json!(crate::benchmark::MAX_CONCURRENCY + 1)),
         ("configuration_sha256", json!("f".repeat(64))),
         ("source", json!("")),
         ("recording", json!("/foreign.zip")),

@@ -128,7 +128,10 @@ impl Admission {
         total: usize,
         mut participants: Vec<usize>,
     ) -> Result<crate::measurements::ExecutionCohort, Error> {
-        if !(1..=64).contains(&total) || participants.is_empty() || participants.len() > total {
+        if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&total)
+            || participants.is_empty()
+            || participants.len() > total
+        {
             return Err(Error::Input("invalid batch admission population".into()));
         }
         participants.sort_unstable();
@@ -255,7 +258,7 @@ impl SettlementBarrier {
         admitted: &[usize],
         timeout: Duration,
     ) -> Result<Self, Error> {
-        if !(1..=64).contains(&total)
+        if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&total)
             || admitted.is_empty()
             || admitted.len() > total
             || timeout.is_zero()
@@ -392,7 +395,7 @@ impl Gate {
         expected: Option<Compatibility>,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        if total > 64 {
+        if total > crate::benchmark::MAX_CONCURRENCY {
             return Err(Error::Input("invalid preparation gate population".into()));
         }
         Self::selected(total, &(1..=total).collect::<Vec<_>>(), expected, timeout)
@@ -406,7 +409,7 @@ impl Gate {
         expected: Option<Compatibility>,
         timeout: Duration,
     ) -> Result<Self, Error> {
-        if !(1..=64).contains(&total) || timeout.is_zero() {
+        if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&total) || timeout.is_zero() {
             return Err(Error::Input(
                 "invalid preparation gate population or timeout".into(),
             ));
@@ -453,7 +456,7 @@ impl Gate {
     /// A separate launch budget starts at the first post-material registration.
     #[cfg(test)]
     pub(crate) fn deferred(total: usize, timeout: Duration) -> Result<Self, Error> {
-        if total > 64 {
+        if total > crate::benchmark::MAX_CONCURRENCY {
             return Err(Error::Input("invalid preparation gate population".into()));
         }
         Self::deferred_selected(total, &(1..=total).collect::<Vec<_>>(), timeout)
@@ -913,7 +916,7 @@ mod tests {
         }
         for (total, members) in [
             (0, vec![1]),
-            (65, vec![1]),
+            (crate::benchmark::MAX_CONCURRENCY + 1, vec![1]),
             (4, vec![]),
             (4, vec![2, 2]),
             (4, vec![0, 2]),
@@ -1218,7 +1221,22 @@ mod tests {
                 .is_err()
         );
         assert!(Gate::new(0, None, Duration::from_secs(1)).is_err());
-        assert!(Gate::new(65, None, Duration::from_secs(1)).is_err());
+        assert!(
+            Gate::new(
+                crate::benchmark::MAX_CONCURRENCY,
+                None,
+                Duration::from_secs(1)
+            )
+            .is_ok()
+        );
+        assert!(
+            Gate::new(
+                crate::benchmark::MAX_CONCURRENCY + 1,
+                None,
+                Duration::from_secs(1)
+            )
+            .is_err()
+        );
         assert!(Gate::new(usize::MAX, None, Duration::from_secs(1)).is_err());
         assert!(Gate::deferred(usize::MAX, Duration::from_secs(1)).is_err());
         assert!(Gate::new(1, None, Duration::ZERO).is_err());

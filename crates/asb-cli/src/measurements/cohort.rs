@@ -15,7 +15,7 @@ pub struct ExecutionCohort {
 impl ExecutionCohort {
     pub(crate) fn admits(&self, index: usize, total: usize) -> bool {
         self.selected_replicas == total
-            && (1..=64).contains(&total)
+            && (1..=crate::benchmark::MAX_CONCURRENCY).contains(&total)
             && !self.id.is_empty()
             && self.id.len() <= 128
             && self

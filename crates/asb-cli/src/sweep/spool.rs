@@ -199,7 +199,7 @@ mod tests {
     fn campaign_presentation_counts_every_execution_without_changing_legacy_replica_bounds() {
         let root = Directory::new();
         let path = root.0.join("campaign");
-        assert!(Output::create(&path, 65).is_err());
+        assert!(Output::create(&path, benchmark::MAX_CONCURRENCY + 1).is_err());
         assert!(!path.exists());
         assert!(Output::create_campaign(&path, 65_534).is_err());
         let mut output = Output::create_campaign(&path, 65).unwrap();
@@ -208,7 +208,7 @@ mod tests {
         output.flush().unwrap();
         drop(output);
         let mut bytes = Vec::new();
-        assert!(drain(&path, 65, &mut bytes).is_err());
+        assert!(drain(&path, benchmark::MAX_CONCURRENCY + 1, &mut bytes).is_err());
         assert!(path.exists());
         drain_campaign(&path, 65, &mut bytes).unwrap();
         assert_eq!(bytes, b"one campaign block\n");
@@ -280,7 +280,7 @@ mod tests {
         let source = root.0.join("output");
         let history = root.0.join("history");
         std::fs::write(&source, b"campaign output").unwrap();
-        assert!(preserve(&source, 65, &history).is_err());
+        assert!(preserve(&source, benchmark::MAX_CONCURRENCY + 1, &history).is_err());
         assert!(preserve_campaign(&source, 65_534, &history).is_err());
         assert_eq!(std::fs::read(&source).unwrap(), b"campaign output");
         preserve_campaign(&source, 65, &history).unwrap();
@@ -342,7 +342,7 @@ mod tests {
             "retained"
         );
         assert!(Output::create(&path, 0).is_err());
-        assert!(Output::create(&path, 65).is_err());
+        assert!(Output::create(&path, benchmark::MAX_CONCURRENCY + 1).is_err());
     }
 
     #[cfg(unix)]
