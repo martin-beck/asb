@@ -2,6 +2,13 @@
 // tool-result text and associated tool metadata, never the whole request.
 import { normalizeToolResults, normalizeToolResultsAsync } from "./tool-result-normalization.mjs";
 
+// An adapter service failure is not a nondeterministic tool result. Matching
+// it to another output would hide a broken replay and poison future searches.
+function localToolServiceFailure(text) {
+  return text.startsWith('ASB local tool service exited with status ')
+    || text.startsWith('ASB local tool service failed to start:');
+}
+
 function results(body) {
   const found = [];
   normalizeToolResults(body, ({ text, tool, location }) => {
@@ -29,6 +36,7 @@ export function temporaryNormalizerSource(entries) {
     try { key = JSON.parse(entry[0]); } catch { return null; }
     if (!Array.isArray(key) || key.length !== 2 || !key[0] || typeof key[0] !== 'object'
         || Array.isArray(key[0]) || typeof key[0].name !== 'string' || typeof key[1] !== 'string') return null;
+    if (localToolServiceFailure(key[1]) || localToolServiceFailure(entry[1])) return null;
   }
   const json = JSON.stringify(entries);
   const data = Array.from({length: json.length}, (_, index) => `\\u${json.charCodeAt(index).toString(16).padStart(4, '0')}`).join('');
@@ -50,6 +58,7 @@ export async function findNormalizer(expected, actual, candidates) {
   const differing = left.map((entry, index) => ({expected: entry, actual: right[index]}))
     .filter(({expected: a, actual: b}) => a.text !== b.text);
   if (!differing.length || differing.some(({expected}) => !expected.tool)) return null;
+  if (differing.some(({expected, actual}) => localToolServiceFailure(expected.text) || localToolServiceFailure(actual.text))) return null;
   const locations = new Set(differing.map(({expected}) => expected.location));
   const mask = (body) => normalizeToolResults(body, ({text, location}) => locations.has(location) ? '<asb-discovery-result>' : text);
   if (!sameRequest({...expected, body: mask(expected.body)}, {...actual, body: mask(actual.body)})) return null;
