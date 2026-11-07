@@ -136,6 +136,13 @@ Native preparation/evaluation overrides are rejected. A blanket
 unsupported because local bootstrap and guest installation do not yet share a
 configurable end-to-end deadline.
 
+SWE-bench source-image builds default to 7200 seconds. For unusually slow
+native builds, `ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS` sets a limit from 1 to
+86400 seconds; the effective limit is recorded in the source-image receipt.
+Set `planning.budgets.environment_preparation_seconds` high enough to cover
+that build and its setup and cleanup. Cohort material admission has its own
+deadline, so this setting does not extend concurrent admission waits.
+
 Collector descriptors distinguish agent-process, whole-container, host-context
 and run-observation targets and execution versus run scope. Declarations do not
 prove host permission or successful collection: existing capability probes and

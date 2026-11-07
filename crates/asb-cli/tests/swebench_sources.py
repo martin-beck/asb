@@ -275,7 +275,7 @@ class SourceContracts(unittest.TestCase):
         def execute(arguments, directory, log, timeout, **options):
             calls.append(arguments)
             self.assertEqual(directory, artifacts)
-            self.assertEqual(timeout, sources.SOURCE_BUILD_TIMEOUT_SECONDS)
+            self.assertEqual(timeout, sources.source_build_timeout_seconds())
             self.assertGreater(timeout, 600)
             self.assertIs(options["cancelled"], cancelled)
             if journaled:
@@ -347,6 +347,20 @@ class SourceContracts(unittest.TestCase):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"ASB_SWEBENCH_BUILD_MEMORY_GIB": value}):
                 invoke, artifacts, _, _, calls = self.build_fixture(Path(temporary))
                 with self.assertRaisesRegex(sources.CatalogError, "ASB_SWEBENCH_BUILD_MEMORY_GIB"):
+                    invoke()
+                self.assertEqual(calls, [])
+                self.assertFalse((artifacts / "source-build").exists())
+
+    def test_source_build_timeout_is_bounded_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS": "21600"}):
+            invoke, artifacts, _, _, _ = self.build_fixture(Path(temporary))
+            _, receipt = invoke()
+            self.assertEqual(receipt["limits"]["timeout_seconds"], 21600)
+            self.assertEqual(json.loads((artifacts / "source-image.json").read_bytes())["limits"]["timeout_seconds"], 21600)
+        for value in ["0", "86401", "01", "-1", "1h", "", "1;echo bad"]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS": value}):
+                invoke, artifacts, _, _, calls = self.build_fixture(Path(temporary))
+                with self.assertRaisesRegex(sources.CatalogError, "ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS"):
                     invoke()
                 self.assertEqual(calls, [])
                 self.assertFalse((artifacts / "source-build").exists())
