@@ -1359,6 +1359,7 @@ fn result() -> RunResult<'static> {
         replay_selection: None,
         native_replay_consumed: None,
         provider_replay_consumed: None,
+        replay_operational_success: None,
         observation: Default::default(),
         recording: None,
         execution: None,

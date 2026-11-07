@@ -1596,7 +1596,7 @@ impl ResultFacts {
         let configured_kind = workload_session.evaluation_kind();
         let evaluation_kind = configured_kind.scored(&workload_baseline);
         let resolution_eligible = evaluation_kind.resolution_eligible();
-        let mut disposition = RunDisposition::from_facts(RunFacts {
+        let facts = RunFacts {
             evaluation: &evaluation,
             ignore_evaluation: options.ignore_evaluation,
             ignore_agent: options.ignore_agent,
@@ -1611,7 +1611,11 @@ impl ResultFacts {
             provider_cleanup_error: provider_cleanup_error.as_deref(),
             workload_cleanup_confirmed,
             proxy_cleanup_confirmed: proxy_evidence.cleanup_confirmed,
-        });
+        };
+        let operational_success = facts.replay_operational_success()
+            && startup_ignored.is_empty()
+            && proxy_evidence.replay_divergences.is_empty();
+        let mut disposition = RunDisposition::from_facts(facts);
         for reason in startup_ignored {
             let mut failure = RunFailure::new(FailureKind::CollectorError, reason);
             failure.ignored = true;
@@ -1780,6 +1784,8 @@ impl ResultFacts {
             replay_selection: options.replay_selection(&config.agent),
             provider_replay_consumed: (options.mode == Some(tape::Mode::Replay))
                 .then_some(cassette_usage_verified && proxy_evidence.cleanup_confirmed),
+            replay_operational_success: (options.mode == Some(tape::Mode::Replay))
+                .then_some(operational_success),
             native_replay_consumed: options
                 .native_snapshot_replay()
                 .then(|| {
@@ -1967,6 +1973,14 @@ impl Publication<'_, '_> {
             phases::LogPublication::publish(&context.publication_config, &config.log_file, result)
                 .with_artifact_evidence(&artifact_evidence)
         });
+        result.settle_replay_publication(
+            log_publication.confirmed(),
+            matches!(
+                &measurement_completion,
+                phases::MeasurementCompletion::Confirmed
+            ),
+            recording_error.is_none(),
+        );
         // A compact attempt may release only its ASB-created task workspace.
         // Installed adapters, downloaded workloads, cassettes, logs and
         // collector captures remain project inputs or sealed evidence.
