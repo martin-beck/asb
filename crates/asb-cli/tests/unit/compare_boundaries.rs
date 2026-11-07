@@ -159,13 +159,17 @@ fn benchmark_identity_reports_parse_missing_fields_and_invalid_concurrency_preci
             .to_string()
             .contains("missing string field `workload`")
     );
-    for value in ["0", "65", "-1", "1.5", "'2'"] {
+    let above_limit = (crate::benchmark::MAX_CONCURRENCY + 1).to_string();
+    for value in ["0", above_limit.as_str(), "-1", "1.5", "'2'"] {
         fs::write(&path,format!("agent='fixture'\nworkload='fixture'\nprovider='fixture'\nmodel='fixture'\nconcurrency={value}\n")).unwrap();
         assert!(
             benchmark_identity(&path)
                 .unwrap_err()
                 .to_string()
-                .contains("concurrency must be an integer from 1 through 64")
+                .contains(&format!(
+                    "concurrency must be an integer from 1 through {}",
+                    crate::benchmark::MAX_CONCURRENCY
+                ))
         );
     }
     fs::write(
