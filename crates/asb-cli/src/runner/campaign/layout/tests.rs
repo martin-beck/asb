@@ -304,7 +304,13 @@ fn emitted_layouts_cover_all_modes_counts_and_external_measurement_roots() {
             }
         }
     }
-    for (repeat, concurrency) in [(0, 1), (1, 0), (1, 65), (u64::MAX, 64), (65_534, 1)] {
+    for (repeat, concurrency) in [
+        (0, 1),
+        (1, 0),
+        (1, crate::benchmark::MAX_CONCURRENCY + 1),
+        (u64::MAX, crate::benchmark::MAX_CONCURRENCY),
+        (65_534, 1),
+    ] {
         assert!(population(repeat, concurrency).is_err());
     }
 }

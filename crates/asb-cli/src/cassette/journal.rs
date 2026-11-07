@@ -1097,7 +1097,9 @@ fn validate_count(repeat: u64, concurrency: u64, limits: Limits) -> Result<u64, 
     repeat
         .checked_mul(concurrency)
         .filter(|count| {
-            repeat > 0 && (1..=64).contains(&concurrency) && *count <= limits.max_tracks as u64
+            repeat > 0
+                && (1..=crate::benchmark::MAX_CONCURRENCY as u64).contains(&concurrency)
+                && *count <= limits.max_tracks as u64
         })
         .ok_or_else(|| {
             Error("recording repeat/concurrency product is invalid or exceeds track limit".into())

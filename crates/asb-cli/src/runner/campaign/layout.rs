@@ -228,7 +228,9 @@ impl Plan {
                     .track
                     .filter(|id| *id > 0)
                     .ok_or_else(|| invalid("selected input has no positive track ID"))?;
-                if !identities.insert(id) || (!bundled && id > 64) {
+                if !identities.insert(id)
+                    || (!bundled && id > crate::benchmark::MAX_CONCURRENCY as u64)
+                {
                     return Err(invalid("duplicate or invalid selected track ID"));
                 }
                 PathBuf::from(format!("inputs/track-{id}.jsonl"))

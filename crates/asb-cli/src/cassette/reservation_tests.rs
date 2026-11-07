@@ -337,7 +337,13 @@ fn metadata_capacity_is_checked_before_any_files_and_has_exact_aggregate_boundar
             .unwrap(),
         capacity
     );
-    for (repeat, concurrency) in [(0, 1), (1, 0), (1, 65), (u64::MAX, 2), (65_534, 1)] {
+    for (repeat, concurrency) in [
+        (0, 1),
+        (1, 0),
+        (1, crate::benchmark::MAX_CONCURRENCY as u64 + 1),
+        (u64::MAX, 2),
+        (65_534, 1),
+    ] {
         assert!(
             RecordingReservation::for_plan(
                 shape(&identity.compatibility),

@@ -242,7 +242,7 @@ pub(crate) fn entry(args: &[std::ffi::OsString]) -> std::process::ExitCode {
         .and_then(|value| value.to_str())
         .and_then(|value| value.parse::<usize>().ok());
     let result = match count {
-        Some(count) if (1..=64).contains(&count) => {
+        Some(count) if (1..=crate::benchmark::MAX_CONCURRENCY).contains(&count) => {
             let addresses = if args.len() == 1 {
                 Ok(vec![
                     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);

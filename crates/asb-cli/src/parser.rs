@@ -1501,7 +1501,7 @@ struct SweepArgs {
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=32))]
     jobs: u16,
     /// Total simultaneous replicas across all jobs; defaults to max(jobs, largest concurrency).
-    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=64))]
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
     max_active_attempts: Option<u16>,
 }
 
