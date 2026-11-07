@@ -486,8 +486,10 @@ impl ReplayObservation {
             .get("process_success")
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(invalid)?;
-        // Exploration may serve recorded responses after changing the
-        // comparison policy. It must never qualify a strict replay cassette.
+        let operational_settled = summary
+            .get("replay_operational_success")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(invalid)?;
         let approximate = summary
             .get("approximate_replay")
             .and_then(serde_json::Value::as_bool)
@@ -497,8 +499,9 @@ impl ReplayObservation {
             true
         } else {
             match failure.as_str().ok_or_else(invalid)? {
-                "workload_check_failed" | "grader_error" | "collector_error" => true,
-                "run_error"
+                "workload_check_failed" | "grader_error" => true,
+                "collector_error"
+                | "run_error"
                 | "agent_failure"
                 | "recording_error"
                 | "output_error"
@@ -509,7 +512,10 @@ impl ReplayObservation {
         Ok(Self {
             trial,
             replica,
-            process_success: process_success && operational_success && !approximate,
+            process_success: process_success
+                && operational_success
+                && operational_settled
+                && !approximate,
             provider_consumed: summary
                 .get("provider_replay_consumed")
                 .and_then(serde_json::Value::as_bool),
@@ -957,7 +963,7 @@ mod tests {
             "process_success": true, "workload_success": false,
             "failure_kind": "workload_check_failed",
             "replay_selection": {"provider_replay": true, "tools": "not-selected"},
-            "provider_replay_consumed": true,
+            "provider_replay_consumed": true, "replay_operational_success": true,
             "approximate_replay": false,
             "benchmark_outcome": {"cleanup_confirmed": true}
         });
@@ -978,6 +984,20 @@ mod tests {
         summary["approximate_replay"] = serde_json::json!("false");
         assert!(ReplayObservation::from_summary(&summary).is_err());
         summary["approximate_replay"] = serde_json::json!(false);
+        // An evaluation failure can be the primary diagnosis while an
+        // independent collector/output failure also occurred.
+        summary["replay_operational_success"] = serde_json::json!(false);
+        assert!(
+            !ReplayObservation::from_summary(&summary)
+                .unwrap()
+                .process_success
+        );
+        summary["replay_operational_success"] = serde_json::json!(true);
+        summary["failure_kind"] = serde_json::json!("collector_error");
+        let collector_failure = ReplayObservation::from_summary(&summary).unwrap();
+        assert!(!collector_failure.process_success);
+        assert_eq!(collector_failure.cleanup_confirmed, Some(true));
+        assert_eq!(collector_failure.provider_consumed, Some(true));
         summary["failure_kind"] = serde_json::json!("run_error");
         assert!(
             !ReplayObservation::from_summary(&summary)

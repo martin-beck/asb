@@ -17,8 +17,10 @@ ordinary replay only uses previously verified recordings and stays offline.
 If the replay protocol or selected normalizer changes, create a new sweep with
 `asb setup` and prepare it again; existing recordings are preserved.
 Fixed workload entries, including a sweep with no sampled trials, are also
-recorded and checked, with their specified trial retained. Preparation currently runs sequentially and does not
-accept an explicit `--repeat` or parallel scheduling settings; set repeat in the
+recorded and checked, with their specified trial retained. Preparation requires
+collectors to complete successfully. It currently runs
+sequentially and does not accept an explicit `--repeat`, collector-failure
+ignore policy, or parallel scheduling settings; set repeat in the
 sweep configuration or pass it to the subsequent replay instead.
 
 The following notes describe the intended integrity and testing properties.

@@ -3828,6 +3828,7 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     );
     let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(json["approximate_replay"], true);
+    assert_eq!(json["replay_operational_success"], false);
     assert_eq!(json["ignored_failures"][0]["kind"], "provider_mismatch");
     assert_eq!(json["ignored_failures"][0]["ignored"], true);
     assert_eq!(json["ignored_failures"][0]["severity"], "warning");
@@ -3891,6 +3892,7 @@ fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() 
     );
     let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
     assert_eq!(partial["approximate_replay"], true);
+    assert_eq!(partial["replay_operational_success"], false);
     let failures = partial["ignored_failures"].as_array().unwrap();
     assert!(
         failures
@@ -4063,7 +4065,11 @@ fn external_smoke_cannot_report_upstream_task_success_or_invent_steps() {
             &["--json", "--measurements", "measurements"],
         );
         assert_eq!(result.status.success(), passed, "{}", stderr(&result));
-        assert!(!result.stdout.is_empty(), "{}", stderr(&result));
+        assert!(
+            !result.stdout.is_empty(),
+            "missing JSON: {}",
+            stderr(&result)
+        );
         let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(json["process_success"], true);
         assert_eq!(json["workload_evaluation"], "adapter-smoke");
@@ -4563,6 +4569,7 @@ fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
             "preflight must not execute the unavailable tool"
         );
         let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(row["replay_operational_success"], false);
         let events = row["ignored_failures"].as_array().unwrap();
         assert!(events.iter().any(|event| {
             event["kind"] == "collector_error"
@@ -4670,6 +4677,31 @@ fn replay_ignore_collector_skips_dependents_without_running_their_probes() {
     project.write("benchmark.toml", &config);
     let output = replay(&project, "success", &["--json", "--ignore-collector"]);
     expect_success(&output);
+    let full = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--ignore-collector",
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&full);
+    let full_row: serde_json::Value = serde_json::from_slice(&full.stdout).unwrap();
+    assert!(
+        full_row["ignored_failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("perf"))
+            })
+    );
     assert!(!marker.exists());
     let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let events = row["ignored_failures"].as_array().unwrap();
@@ -4765,6 +4797,7 @@ fn collector_ignore_without_a_failure_does_not_invent_a_warning() {
     );
     expect_success(&result);
     let row: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(row["replay_operational_success"], true);
     assert!(row.get("ignored_failures").is_none());
     let measurement_dir = row["measurement_directory"].as_str().unwrap();
     let measured: serde_json::Value = serde_json::from_slice(

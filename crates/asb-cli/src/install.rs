@@ -938,6 +938,7 @@ pub(crate) fn ensure_execution_requirements(
         invocation_dir,
         output,
         false,
+        mode == Some(crate::tape::Mode::Replay),
     )
 }
 
@@ -948,12 +949,13 @@ pub(crate) fn ensure_execution_requirements_with_policy(
     invocation_dir: &Path,
     output: &mut dyn std::io::Write,
     ignore_collector: bool,
+    full_replay: bool,
 ) -> Result<(), Error> {
     let (root, project_config) = project::load_for_invocation(config_path, Some(invocation_dir))?;
     let tools_root = project::resolve(&root, &project_config.tools_dir);
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
-    if mode == Some(crate::tape::Mode::Replay) {
+    if full_replay {
         return validate_offline_replay_requirements(
             config,
             &tools_root,
@@ -1063,16 +1065,14 @@ fn validate_offline_replay_requirements(
         } else {
             Vec::new()
         };
-        let selected: Vec<_> = measures
-            .collectors
-            .iter()
+        let selected: Vec<_> = expanded
+            .into_iter()
             .filter(|selection| {
                 !unavailable.iter().any(|(name, _)| {
                     crate::collectors::find(name)
                         .is_some_and(|adapter| adapter.accepts_selection(selection))
                 })
             })
-            .cloned()
             .collect();
         required.extend(
             crate::collectors::dependency_tools(&selected)
@@ -1092,7 +1092,7 @@ fn validate_offline_replay_requirements(
             }
             crate::executables::Lookup::Unusable(path) => {
                 return Err(Error::Input(format!(
-                    "replay tool `{id}` at {} is not executable; repair or reinstall it before replay",
+                    "selected tool executable {} is not a usable executable; remove or repair it, then run `asb tool install {id}`",
                     path.display()
                 )));
             }
