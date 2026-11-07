@@ -1990,7 +1990,7 @@ fn profile_recorded_at_c1_replays_four_isolated_replicas_offline() {
 }
 
 #[test]
-fn sympy_banner_profile_replays_changed_seed_and_elapsed_but_rejects_changed_results() {
+fn sympy_banner_profile_marks_changed_results_as_approximate() {
     let project = sweep_tests::registered_project(1);
     let executable = project.0.join("tools/pi/bin/pi");
     let template = fs::read_to_string(&executable).unwrap();
@@ -2054,13 +2054,19 @@ fn sympy_banner_profile_replays_changed_seed_and_elapsed_but_rejects_changed_res
         "--llm-replay",
     );
     assert!(
-        !changed.status.success(),
-        "changed test outcomes must not replay successfully"
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
     );
-    let error = String::from_utf8_lossy(&changed.stderr);
+    let rows = records(&changed.stdout);
     assert!(
-        error.contains("replay rejected") && error.contains("$.messages[1].content"),
-        "{error}"
+        rows.iter().any(|row| row["approximate_replay"] == true
+            && row["ignored_failures"]
+                .as_array()
+                .is_some_and(|failures| failures
+                    .iter()
+                    .any(|failure| failure["kind"] == "provider_mismatch"))),
+        "changed test outcomes must be disclosed as approximate: {rows:?}"
     );
 }
 
