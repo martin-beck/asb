@@ -296,7 +296,7 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             );
         }
     }
-    // Truly missing tools remain eligible for automatic installation.
+    // LLM-only replay retains normal automatic installation for missing tools.
     std::fs::remove_file(&selected).unwrap();
     let output = project.command_with_env(
         &[
@@ -3569,6 +3569,238 @@ fn replay_ignored_failures_are_warned_and_preserve_real_outcomes() {
 
 #[cfg(unix)]
 #[test]
+fn replay_discovers_iterative_normalizers_and_reuses_them_in_next_run() {
+    let project = replay_project(1);
+    let body = |step: usize| {
+        let mut input = vec![
+            serde_json::json!({"type":"function_call","call_id":"a","name":"bash","arguments":"{\"command\":\"cat one\"}"}),
+            serde_json::json!({"type":"function_call_output","call_id":"a","output":"one 1"}),
+        ];
+        if step >= 2 {
+            input.push(serde_json::json!({"type":"function_call","call_id":"b","name":"bash","arguments":"{\"command\":\"cat two\"}"}));
+            input.push(
+                serde_json::json!({"type":"function_call_output","call_id":"b","output":"two 1"}),
+            );
+        }
+        if step >= 3 {
+            input.push(serde_json::json!({"role":"user","content":"continue"}));
+        }
+        serde_json::json!({"model":"test-model","input":input}).to_string()
+    };
+    let mut tape = String::new();
+    for step in 1..=3 {
+        let line = serde_json::json!({"asb_request_policy":3,"request":{"method":"POST","url":"/v1/responses","body":body(step)},"response":{"status":200,"headers":{"content-type":"application/json"},"body":"{}"}});
+        tape.push_str(&format!("{line}\n"));
+    }
+    project.write("tape.jsonl", &tape);
+    project.write(".asb-tools/pi/bin/pi", r##"#!/usr/bin/env node
+const fs = require('fs');
+const endpoint = JSON.parse(fs.readFileSync(process.env.PI_CODING_AGENT_DIR + '/models.json')).providers.asb.baseUrl;
+const call = (id, command, output) => [{type:'function_call',call_id:id,name:'bash',arguments:JSON.stringify({command})},{type:'function_call_output',call_id:id,output}];
+async function main() {
+  for (let step=1;step<=3;step++) {
+    const input=[...call('a','cat one','one 2'),...(step>=2?call('b','cat two','two 2'):[]),...(step>=3?[{role:'user',content:'continue'}]:[])];
+    const response=await fetch(endpoint+'/responses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'test-model',input})});
+    if (!response.ok) throw new Error('replay rejected '+response.status);
+    await response.text();
+  }
+  fs.mkdirSync('src',{recursive:true});fs.writeFileSync('src/parser.py',"def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});
+"##);
+    let mut generated_sources = Vec::new();
+    for (index, measurements) in ["discovery-first", "discovery-second"].iter().enumerate() {
+        let output = project.command(&[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--json",
+            "--measurements",
+            measurements,
+        ]);
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(row["approximate_replay"], true);
+        let reason = row["ignored_failures"][0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("2/2 proposed normalizers reached a later response"),
+            "{reason}"
+        );
+        let journal = reason
+            .split("journal: ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let events: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        if index == 0 {
+            generated_sources = events
+                .iter()
+                .map(|event| std::fs::read_to_string(event["file"].as_str().unwrap()).unwrap())
+                .collect();
+        }
+        assert!(
+            events
+                .iter()
+                .all(|event| event["suggestion"]
+                    == if index == 0 { "temporary" } else { "existing" })
+        );
+        if index == 1 {
+            assert!(events.iter().all(|event| {
+                event["normalizer"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("explore-")
+            }));
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(project.0.join(".asb/replay-normalizer-exploration"))
+            .unwrap()
+            .count(),
+        2
+    );
+    // Select the rules that exploration actually generated and verify that a
+    // new replay completes without an exploratory mismatch or ignored event.
+    let configuration_path = project.0.join(".asb/project.toml");
+    let original_configuration = std::fs::read_to_string(&configuration_path).unwrap();
+    let mut selected_configuration = original_configuration.clone();
+    for (index, source) in generated_sources.iter().enumerate() {
+        let module = format!("normalizers/generated-{index}.mjs");
+        project.write(&module, source);
+        selected_configuration.push_str(&format!("\n[[replay.normalizers]]\nid='generated-{index}'\nmodule='{module}'\nworkloads=['bug-fix']\n"));
+    }
+    std::fs::write(&configuration_path, &selected_configuration).unwrap();
+    let selected = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+        "--json",
+        "--measurements",
+        "discovery-selected",
+    ]);
+    assert!(
+        selected.status.success(),
+        "stdout={} stderr={}",
+        stdout(&selected),
+        stderr(&selected)
+    );
+    let selected_rows: Vec<serde_json::Value> = stdout(&selected)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row.get("process_success").is_some())
+        .collect();
+    assert_eq!(selected_rows.len(), 1, "{}", stdout(&selected));
+    let selected_row = &selected_rows[0];
+    assert_eq!(selected_row["approximate_replay"], false);
+    assert_eq!(selected_row["provider_replay_consumed"], true);
+    assert!(selected_row.get("ignored_failures").is_none());
+    std::fs::write(&configuration_path, &original_configuration).unwrap();
+    for index in 0..generated_sources.len() {
+        std::fs::remove_file(project.0.join(format!("normalizers/generated-{index}.mjs"))).unwrap();
+    }
+    let human = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+        "--measurements",
+        "discovery-human",
+    ]);
+    assert!(human.status.success(), "{}", stderr(&human));
+    assert!(
+        stdout(&human).contains("possible replay fixes:"),
+        "{}",
+        stdout(&human)
+    );
+    assert!(
+        stdout(&human).contains("suggested-normalizer-1.mjs"),
+        "{}",
+        stdout(&human)
+    );
+    // This module is intentionally absent from project.toml. Exploration
+    // must still consider it with the actual workload context.
+    project.write("normalizers/unselected.mjs", "export function normalizeToolResult({text, tool, workload}) { return workload?.id === 'bug-fix' && tool?.arguments?.command === 'cat one' ? text.replace('one 2', 'one 1') : text; }\n");
+    project.write("sweep.toml", "configs=['benchmark.toml']\n");
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &tape,
+    );
+    project.write(
+        "sweep-results/000-benchmark/workspace-concurrency-1/src/parser.py",
+        "def parse_path(value: str) -> list[str]:\n    return value.split('/')\n",
+    );
+    let sweep = project.command(&[
+        "sweep",
+        "sweep.toml",
+        "--llm-replay",
+        "--cassette-root",
+        "tapes",
+        "--json",
+    ]);
+    assert!(
+        sweep.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&sweep.stdout),
+        String::from_utf8_lossy(&sweep.stderr)
+    );
+    let log_path = project.0.join("sweep-results/000-benchmark/run.log");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_else(|error| {
+        panic!(
+            "{}: {error}; stdout={}",
+            log_path.display(),
+            String::from_utf8_lossy(&sweep.stdout)
+        )
+    });
+    let value: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
+    assert_eq!(value["approximate_replay"], true);
+    let reason = value["ignored_failures"][0]["reason"].as_str().unwrap();
+    let journal = reason
+        .split("journal: ")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event["suggestion"] == "existing"));
+    assert!(
+        events[0]["normalizer"]
+            .as_str()
+            .unwrap()
+            .starts_with("project-")
+    );
+    assert!(
+        events[1]["normalizer"]
+            .as_str()
+            .unwrap()
+            .starts_with("explore-")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn approximate_replay_serves_a_recorded_response_and_exhaustion_remains_fatal() {
     let project = replay_project(1);
     let result = replay(
@@ -3800,6 +4032,19 @@ fn external_smoke_cannot_report_upstream_task_success_or_invent_steps() {
         std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
         project.write("workloads/agentbench.txt", "Local adapter smoke only.\n");
+        project.write(
+            "workloads/agentbench/ASB-BUNDLE",
+            "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+        );
+        project.write(
+            "workloads/agentbench/source/configs/tasks/fixture.yaml",
+            "name: fixture\n",
+        );
+        project.write("workloads/agentbench/catalog.json", r#"{"schema_version":1,"workload":"agentbench","marker":"THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5","tasks":[{"id":"fixture","description":"AgentBench official task configuration fixture"}]}"#);
+        project.write(
+            "workloads/agentbench/asb-trial/ASB-ADAPTER-FIXTURE",
+            "agentbench/asb-adapter-trial-v1\n",
+        );
         project.write("benchmark.toml", "agent='pi'\nworkload='agentbench'\nprovider='cli2key'\nmodel='test-model'\nworkspace='workspace'\nlog_file='run.log'\n");
         project.write("workspace/external-workload/asb-trial/src/task.py", if passed {
             "def normalize(value: str) -> str:\n    return value.strip().lower().replace(' ', '-')\n\ndef suite_label() -> str:\n    return \"agentbench\"\n"

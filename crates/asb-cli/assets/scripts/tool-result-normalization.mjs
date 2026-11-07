@@ -92,7 +92,7 @@ export async function normalizeToolResultsAsync(body, transform, { maxTotalMs = 
   const outputs = [];
   for (const [index, context] of contexts.entries()) {
     if (performance.now() - started >= maxTotalMs) throw new Error("normalizer request exceeded its time limit");
-    const value = await transform({ text: context.text, tool: associations[index].tool });
+    const value = await transform({ text: context.text, tool: associations[index].tool, location: context.location });
     if (performance.now() - started >= maxTotalMs) throw new Error("normalizer request exceeded its time limit");
     if (typeof value !== "string") throw new TypeError("tool-result normalizer must return a string");
     outputs.push(value);

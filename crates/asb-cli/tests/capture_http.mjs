@@ -11,6 +11,236 @@ import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
+// Exercise an actual offline replay twice: first without a normalizer, then
+// with either an unselected existing profile or a generated selected profile.
+for (const variant of ['unselected-existing', 'generated-selected']) test(`replay requires ${variant} normalizer to complete`, {timeout:20000}, async t => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'normalizer-required-'));
+  const tape=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const body=(result,step)=>({model:'fixture',input:[
+    {type:'function_call',call_id:'c1',name:'bash',arguments:JSON.stringify({command:'cat widget-report'})},
+    {type:'function_call_output',call_id:'c1',output:result},
+    ...(step===2?[{role:'user',content:'continue'}]:[]),
+  ]});
+  const expected='widget-drift=rose\nresult=ok', actual='widget-drift=lilac\nresult=ok';
+  const line=step=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body(expected,step))},response:{status:200,headers:{'content-type':'application/json'},body:JSON.stringify({step})}});
+  const original=`${line(1)}\n${line(2)}\n`;
+  async function launch(name, options={}) {
+    const dir=join(root,name);fs.mkdirSync(dir);const cassette=join(dir,'cassette.jsonl'),ready=join(dir,'ready.json'),journal=join(dir,'journal.jsonl'),evidence=join(dir,'mismatch.json');
+    fs.writeFileSync(cassette,original);
+    const env={PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_MISMATCH_EVIDENCE:evidence};
+    if (options.catalog) {
+      const catalog=join(dir,'catalog.json');fs.writeFileSync(catalog,JSON.stringify(options.catalog));
+      env.ASB_TAPE_DISCOVERY_CATALOG=catalog;env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL=journal;
+    }
+    if (options.selected) {
+      const policy=join(dir,'policy.json');fs.writeFileSync(policy,JSON.stringify({sha256:'a'.repeat(64),workload:{id:'fixture',task_id:'one'},profiles:[{id:'selected-fix',source:options.selected}]}));
+      env.ASB_TAPE_CUSTOM_NORMALIZERS=policy;
+    }
+    const child=spawn(process.execPath,[tape,'replay','--port','0','--cassette',cassette],{env,stdio:['pipe','ignore','pipe']});
+    let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+    t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
+    const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+    return {child,exited,dir,cassette,journal,evidence,port:JSON.parse(fs.readFileSync(ready)).port};
+  }
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  async function stop(session) {session.child.stdin.end();assert.deepEqual(await session.exited,{code:0,signal:null});}
+  const baseline=await launch('baseline');
+  assert.equal((await request(baseline.port,'/v1/responses',JSON.stringify(body(actual,1)))).status,409);
+  await stop(baseline);
+  const baselineProgress=JSON.parse(fs.readFileSync(`${baseline.cassette}.progress.json`));
+  assert.equal(baselineProgress.consumed,0);assert.equal(baselineProgress.rejected,1);
+
+  const source="export function normalizeToolResult({text,tool}) { return tool?.arguments?.command === 'cat widget-report' ? text.replace(/widget-drift=(?:rose|lilac)/,'widget-drift=<stable>') : text; }";
+  const exploration=await launch('exploration',{catalog:variant==='unselected-existing'?[{id:'widget-drift',source}]:[]});
+  for (const step of [1,2]) {
+    const response=await request(exploration.port,'/v1/responses',JSON.stringify(body(actual,step)));
+    assert.equal(response.status,200);assert.equal(JSON.parse(response.body).step,step);
+  }
+  await stop(exploration);
+  const observed=JSON.parse(fs.readFileSync(`${exploration.cassette}.progress.json`));
+  assert.equal(observed.consumed,2);assert.equal(observed.rejected,0);assert.equal(observed.ignored_mismatches,1);
+  const event=JSON.parse(fs.readFileSync(exploration.journal,'utf8').trim());
+  assert.equal(event.suggestion,variant==='unselected-existing'?'existing':'temporary');
+  if (variant==='unselected-existing') assert.equal(event.normalizer,'widget-drift');
+  if (variant==='generated-selected') {
+    const generated=fs.readFileSync(event.file,'utf8');
+    const selected=await launch('selected',{selected:generated});
+    for (const step of [1,2]) {
+      const response=await request(selected.port,'/v1/responses',JSON.stringify(body(actual,step)));
+      assert.equal(response.status,200);assert.equal(JSON.parse(response.body).step,step);
+    }
+    await stop(selected);
+    const verified=JSON.parse(fs.readFileSync(`${selected.cassette}.progress.json`));
+    assert.equal(verified.consumed,2);assert.equal(verified.rejected,0);assert.equal(verified.ignored_mismatches,0);
+    assert.equal(fs.existsSync(selected.evidence),false);
+    assert.equal(fs.readFileSync(selected.cassette,'utf8'),original,'selected replay preserves raw cassette');
+  }
+});
+
+for (const mode of ['existing', 'temporary']) test(`replay discovers ${mode} normalizer and stops at a non-tool divergence`, {timeout: 20000}, async (t) => {
+  const parent = join(process.cwd(), 'target/capture-http-fixtures'); fs.mkdirSync(parent, {recursive:true});
+  const root = fs.mkdtempSync(join(parent, 'discovery-'));
+  const cassette = join(root, 'cassette.jsonl'), ready = join(root, 'ready.json');
+  const journal = join(root, 'journal.jsonl'), evidence = join(root, 'mismatch.json'), catalog = join(root, 'catalog.json');
+  const store = join(root, '.asb', 'replay-normalizer-exploration');
+  fs.mkdirSync(join(root, '.asb'));
+  const source = fs.readFileSync(fileURLToPath(new URL('../assets/examples/normalizers/python-unittest-elapsed.mjs', import.meta.url)), 'utf8');
+  fs.writeFileSync(catalog, JSON.stringify(mode === 'existing' ? [{id:'python-unittest-elapsed',source}] : []));
+  const recorded = mode === 'existing' ? 'Ran 1 test in 0.01s\n\nOK\n' : 'counter 101';
+  const actual = mode === 'existing' ? 'Ran 1 test in 0.02s\n\nOK\n' : 'counter 202';
+  const body = (text, suffix = '') => ({model:'fixture', input:[
+    {type:'function_call',call_id:'call1',name:'bash',arguments:JSON.stringify({command:'python -m unittest tests'})},
+    {type:'function_call_output',call_id:'call1',output:text},
+    ...(suffix ? [{role:'user',content:suffix}] : []),
+  ]});
+  const exchange = (value, id) => JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(value)},response:{status:200,headers:{},body:JSON.stringify({id})}});
+  fs.writeFileSync(cassette, `${exchange(body(recorded),1)}\n${exchange(body(recorded,'next'),2)}\n${exchange(body(recorded,'expected'),3)}\n`);
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_DISCOVERY_STORE:store,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:evidence},stdio:['pipe','ignore','pipe']});
+  let stderr='';child.stderr.on('data', data => {stderr += data;});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const deadline=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<deadline,stderr);await delay(10);}
+  const port=JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal((await request(port,'/v1/responses',JSON.stringify(body(actual)))).status,200,stderr);
+  assert.equal(fs.existsSync(store),false, 'a single matched response must not promote a candidate');
+  const retried=await request(port,'/v1/responses',JSON.stringify(body(actual)));
+  assert.equal(retried.status,200,stderr);assert.equal(JSON.parse(retried.body).id,1);
+  assert.equal(fs.existsSync(store),false, 'a retry must not count as a later replay step');
+  assert.equal((await request(port,'/v1/responses',JSON.stringify(body(actual,'next')))).status,200,stderr);
+  if (mode === 'temporary') {
+    const until=performance.now()+2000;
+    while(!fs.existsSync(store) || !fs.readdirSync(store).some(name=>name.endsWith('.json'))) {assert.ok(performance.now()<until);await delay(10);}
+    assert.equal(fs.readdirSync(store).filter(name=>name.endsWith('.json')).length,1);
+  }
+  assert.equal((await request(port,'/v1/responses',JSON.stringify(body(actual,'different')))).status,409,stderr);
+  const events=fs.readFileSync(journal,'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.length,1);
+  assert.equal(events[0].suggestion,mode);
+  assert.ok(fs.readFileSync(events[0].file,'utf8').includes('normalizeToolResult'));
+  assert.equal(fs.statSync(events[0].file).mode & 0o077,0);
+  const progress=JSON.parse(fs.readFileSync(`${cassette}.progress.json`));
+  assert.equal(progress.consumed,2); assert.equal(progress.rejected,1); assert.equal(progress.ignored_mismatches,1);
+  child.stdin.end(); assert.deepEqual(await exited,{code:0,signal:null},stderr);
+  if (mode === 'temporary') {
+    const secondRoot=join(root,'second');fs.mkdirSync(secondRoot);
+    const secondReady=join(secondRoot,'ready.json'), secondJournal=join(secondRoot,'journal.jsonl'), secondEvidence=join(secondRoot,'mismatch.json');
+    const next=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:secondReady,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_DISCOVERY_STORE:store,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:secondJournal,ASB_TAPE_MISMATCH_EVIDENCE:secondEvidence},stdio:['pipe','ignore','pipe']});
+    let err='';next.stderr.on('data',data=>{err+=data;});
+    const nextExit=new Promise((resolve,reject)=>{next.once('error',reject);next.once('exit',(code,signal)=>resolve({code,signal}));});
+    t.after(async()=>{if(next.exitCode===null&&next.signalCode===null)next.kill('SIGKILL');await nextExit;});
+    const until=performance.now()+4000;while(!fs.existsSync(secondReady)){assert.equal(next.exitCode,null,err);assert.ok(performance.now()<until,err);await delay(10);}
+    const nextPort=JSON.parse(fs.readFileSync(secondReady)).port;
+    assert.equal((await request(nextPort,'/v1/responses',JSON.stringify(body(actual)))).status,200,err);
+    const first=JSON.parse(fs.readFileSync(secondJournal,'utf8').trim());
+    assert.equal(first.suggestion,'existing'); assert.match(first.normalizer,/^explore-/);
+    next.stdin.end();assert.deepEqual(await nextExit,{code:0,signal:null},err);
+  }
+});
+
+test('successive candidates are promoted and reused by a later replay', {timeout:20000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'iterative-discovery-'));fs.mkdirSync(join(root,'.asb'));
+  const store=join(root,'.asb','replay-normalizer-exploration'), cassette=join(root,'cassette.jsonl'), catalog=join(root,'catalog.json');
+  fs.writeFileSync(catalog,'[]');
+  const call=(id,command,output)=>[{type:'function_call',call_id:id,name:'bash',arguments:JSON.stringify({command})},{type:'function_call_output',call_id:id,output}];
+  const body=(first,second,step)=>({model:'fixture',input:[...call('a','cat one',first),...(step>=2?call('b','cat two',second):[]),...(step>=3?[{role:'user',content:'continue'}]:[])]});
+  const line=(step)=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('one 1','two 1',step))},response:{status:200,headers:{},body:'{}'}});
+  fs.writeFileSync(cassette,[1,2,3].map(line).join('\n')+'\n');
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  async function run(number) {
+    const dir=join(root,`attempt-${number}`);fs.mkdirSync(dir);
+    const ready=join(dir,'ready.json'), journal=join(dir,'journal.jsonl'), evidence=join(dir,'mismatch.json');
+    const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_DISCOVERY_STORE:store,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:evidence},stdio:['pipe','ignore','pipe']});
+    let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+    t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
+    const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+    const port=JSON.parse(fs.readFileSync(ready)).port;
+    for (const step of [1,2,3]) assert.equal((await request(port,'/v1/responses',JSON.stringify(body('one 2','two 2',step)))).status,200,stderr);
+    const events=fs.readFileSync(journal,'utf8').trim().split('\n').map(JSON.parse);
+    const wait=performance.now()+2000;while(!fs.existsSync(store)||fs.readdirSync(store).filter(n=>n.endsWith('.json')).length<2){assert.ok(performance.now()<wait,stderr);await delay(10);}
+    child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null},stderr);
+    return events;
+  }
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const first=await run(1);assert.deepEqual(first.map(e=>e.suggestion),['temporary','temporary']);
+  const second=await run(2);assert.deepEqual(second.map(e=>e.suggestion),['existing','existing']);
+  assert.ok(second.every(e=>e.normalizer.startsWith('explore-')));
+});
+
+test('a replay already running discovers a candidate promoted by a peer', {timeout:20000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'concurrent-discovery-'));fs.mkdirSync(join(root,'.asb'));
+  const store=join(root,'.asb','replay-normalizer-exploration'), cassette=join(root,'cassette.jsonl'), catalog=join(root,'catalog.json');fs.writeFileSync(catalog,'[]');
+  const body=(output,more=false)=>({model:'fixture',input:[{type:'function_call',call_id:'a',name:'bash',arguments:'{"command":"cat one"}'},{type:'function_call_output',call_id:'a',output},...(more?[{role:'user',content:'next'}]:[])]});
+  const row=(more)=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('before',more))},response:{status:200,headers:{},body:'{}'}});
+  fs.writeFileSync(cassette,`${row(false)}\n${row(true)}\n`);
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  async function launch(name) {
+    const dir=join(root,name);fs.mkdirSync(dir);const ready=join(dir,'ready.json'),journal=join(dir,'journal.jsonl');
+    const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_DISCOVERY_STORE:store,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:join(dir,'mismatch.json')},stdio:['pipe','ignore','pipe']});
+    let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+    t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
+    const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+    return {child,exited,journal,port:JSON.parse(fs.readFileSync(ready)).port};
+  }
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const first=await launch('first'), peer=await launch('peer');
+  assert.equal((await request(first.port,'/v1/responses',JSON.stringify(body('after')))).status,200);
+  assert.equal((await request(first.port,'/v1/responses',JSON.stringify(body('after',true)))).status,200);
+  const until=performance.now()+2000;while(!fs.existsSync(store)||!fs.readdirSync(store).some(n=>n.endsWith('.json'))){assert.ok(performance.now()<until);await delay(10);}
+  assert.equal((await request(peer.port,'/v1/responses',JSON.stringify(body('after')))).status,200);
+  const event=JSON.parse(fs.readFileSync(peer.journal,'utf8').trim());
+  assert.equal(event.suggestion,'existing');assert.match(event.normalizer,/^explore-/);
+  first.child.stdin.end();peer.child.stdin.end();assert.deepEqual(await first.exited,{code:0,signal:null});assert.deepEqual(await peer.exited,{code:0,signal:null});
+});
+
+test('a stateful candidate that fails whole-request verification falls back to a temporary rule', {timeout:15000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'stateful-discovery-'));
+  const cassette=join(root,'cassette.jsonl'),ready=join(root,'ready.json'),journal=join(root,'journal.jsonl'),catalog=join(root,'catalog.json');
+  const source="let n=0; export function normalizeToolResult({text}) { n+=1; return n<=2 ? 'same' : text; }";
+  fs.writeFileSync(catalog,JSON.stringify([{id:'stateful',source}]));
+  const body=value=>({model:'fixture',input:[{type:'function_call',call_id:'a',name:'bash',arguments:'{"command":"cat x"}'},{type:'function_call_output',call_id:'a',output:'same output'},{type:'function_call_output',call_id:'a',output:value}]});
+  fs.writeFileSync(cassette,JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('recorded'))},response:{status:200,headers:{},body:'{}'}})+'\n');
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:join(root,'mismatch.json')},stdio:['pipe','ignore','pipe']});
+  let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+  assert.equal((await request(JSON.parse(fs.readFileSync(ready)).port,'/v1/responses',JSON.stringify(body('actual')))).status,200,stderr);
+  const event=JSON.parse(fs.readFileSync(journal,'utf8').trim());assert.equal(event.suggestion,'temporary');
+  const progress=JSON.parse(fs.readFileSync(`${cassette}.progress.json`));assert.ok(progress.normalizer_exploration.catalog_failures>=1);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null});
+});
+
+test('discovered normalization preserves ordering for concurrent later requests', {timeout:15000}, async (t) => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'discovery-order-'));
+  const cassette=join(root,'cassette.jsonl'),ready=join(root,'ready.json'),journal=join(root,'journal.jsonl'),catalog=join(root,'catalog.json');fs.writeFileSync(catalog,'[]');
+  const body=(output,turn)=>({model:'fixture',input:[{type:'function_call',call_id:'a',name:'bash',arguments:'{"command":"cat x"}'},{type:'function_call_output',call_id:'a',output},...(turn?[{role:'user',content:turn}]:[])]});
+  const row=(turn,id)=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body('recorded',turn))},response:{status:200,headers:{},body:JSON.stringify({id})}});
+  fs.writeFileSync(cassette,[row('',1),row('second',2),row('third',3)].join('\n')+'\n');
+  const script=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const child=spawn(process.execPath,[script,'replay','--port','0','--cassette',cassette],{env:{PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_DISCOVERY_CATALOG:catalog,ASB_TAPE_IGNORED_MISMATCH_JOURNAL:journal,ASB_TAPE_MISMATCH_EVIDENCE:join(root,'mismatch.json')},stdio:['pipe','ignore','pipe']});
+  let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+  const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;fs.rmSync(root,{recursive:true,force:true});});
+  const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+  const port=JSON.parse(fs.readFileSync(ready)).port;
+  assert.equal(JSON.parse((await request(port,'/v1/responses',JSON.stringify(body('actual','')))).body).id,1);
+  const third=request(port,'/v1/responses',JSON.stringify(body('actual','third')));await delay(50);
+  const second=request(port,'/v1/responses',JSON.stringify(body('actual','second')));
+  assert.equal(JSON.parse((await second).body).id,2);assert.equal(JSON.parse((await third).body).id,3);
+  assert.equal(fs.readFileSync(journal,'utf8').trim().split('\n').length,1);
+  child.stdin.end();assert.deepEqual(await exited,{code:0,signal:null},stderr);
+});
+
 test("ignored mismatch journal write failure makes replay shutdown fail", { timeout: 10000 }, async (t) => {
   const parent = join(process.cwd(), "target/capture-http-fixtures");
   fs.mkdirSync(parent, {recursive:true});

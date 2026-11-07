@@ -3,10 +3,10 @@
 // Small project-local HTTP recorder/replayer embedded in ASB. It supplies the
 // bounded loopback protocol that ASB's tape module invokes.
 
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { performance } from "node:perf_hooks";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { quiesceNetworkRequests, networkFetch } from "./network-fetch.mjs";
 import { CaptureSession, completedSseResponse, responseDelivery } from "./capture-session.mjs";
@@ -15,6 +15,8 @@ import { RequestTracing } from "./request-tracing.mjs";
 import { normalizeToolResultsAsync } from "./tool-result-normalization.mjs";
 import { NormalizerSupervisor } from "./normalizer-supervisor.mjs";
 import { normalizeLegacyRaw, normalizeLegacyValue, normalizeLegacyStable } from "./legacy-workload-normalizers.mjs";
+import { findNormalizer } from "./replay-normalizer-discovery.mjs";
+import { loadCandidates, prepareStore, saveCandidate } from "./replay-discovery-store.mjs";
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_DELAY_MS = 60 * 60 * 1000;
@@ -142,11 +144,44 @@ if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
+const discoveryPath = process.env.ASB_TAPE_DISCOVERY_CATALOG;
+delete process.env.ASB_TAPE_DISCOVERY_CATALOG;
+const discoveryStore = process.env.ASB_TAPE_DISCOVERY_STORE;
+delete process.env.ASB_TAPE_DISCOVERY_STORE;
+const discoverySuggestions = process.env.ASB_TAPE_DISCOVERY_SUGGESTIONS;
+delete process.env.ASB_TAPE_DISCOVERY_SUGGESTIONS;
+const discoveryContext = process.env.ASB_TAPE_DISCOVERY_CONTEXT ? JSON.parse(process.env.ASB_TAPE_DISCOVERY_CONTEXT) : customPolicy?.workload;
+delete process.env.ASB_TAPE_DISCOVERY_CONTEXT;
+let discoveryCatalogFailures = Number(process.env.ASB_TAPE_DISCOVERY_CATALOG_FAILURES || 0);
+delete process.env.ASB_TAPE_DISCOVERY_CATALOG_FAILURES;
+const discoveryCatalog = discoveryPath ? JSON.parse(readFileSync(discoveryPath, "utf8")) : [];
+if (!Number.isSafeInteger(discoveryCatalogFailures) || discoveryCatalogFailures < 0 || !Array.isArray(discoveryCatalog) || discoveryCatalog.length > 266 || discoveryCatalog.some(p => !/^[a-z0-9-]{1,64}$/.test(p.id) || typeof p.source !== 'string' || Buffer.byteLength(p.source) > 65536)) {
+  usage("invalid normalizer discovery catalog");
+}
 const ignoreProviderMismatch = process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH === "1";
 const ignoredMismatchJournal = process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
 delete process.env.ASB_TAPE_IGNORE_PROVIDER_MISMATCH;
 delete process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
-if (ignoreProviderMismatch && (mode !== "replay" || !ignoredMismatchJournal || !isAbsolute(ignoredMismatchJournal))) usage("invalid ignored mismatch journal destination");
+if ((ignoreProviderMismatch || discoveryPath) && (mode !== "replay" || !ignoredMismatchJournal || !isAbsolute(ignoredMismatchJournal))) usage("invalid ignored mismatch journal destination");
+if (discoveryPath && (!isAbsolute(discoveryPath) || !mismatchEvidence || !isAbsolute(mismatchEvidence))) usage("invalid normalizer discovery destination");
+if (discoveryStore && (!discoveryPath || !isAbsolute(discoveryStore))) usage("invalid normalizer exploration store");
+if (discoverySuggestions && (!discoveryPath || !isAbsolute(discoverySuggestions))) usage("invalid normalizer suggestion directory");
+let discoveryStoreFailures = 0;
+let discoveryStorePromoted = 0;
+const discoveryKnown = new Set(discoveryCatalog.map(profile => profile.id));
+function refreshDiscoveryStore() {
+  if (!discoveryStore) return;
+  try { lstatSync(discoveryStore); }
+  catch (error) { if (error.code !== 'ENOENT') discoveryStoreFailures += 1; return; }
+  try {
+    const loaded = loadCandidates(prepareStore(discoveryStore));
+    discoveryStoreFailures += loaded.failures;
+    for (const profile of loaded.candidates) {
+      if (!discoveryKnown.has(profile.id)) { discoveryKnown.add(profile.id); discoveryCatalog.push(profile); }
+    }
+  } catch { discoveryStoreFailures += 1; }
+}
+refreshDiscoveryStore();
 const respectRecordTimings = args.includes("--respect-record-timings");
 const captureReceipt = process.env.ASB_TAPE_CAPTURE_RECEIPT;
 const captureNonce = process.env.ASB_TAPE_CAPTURE_NONCE;
@@ -590,6 +625,98 @@ let rejected = 0;
 let firstMismatch = null;
 let ignoredMismatchCount = 0;
 let replayEvidenceFailure = false;
+const discoveredNormalizers = [];
+let discoveryLimitReached = false;
+let suggestionDirectoryCreated = false;
+
+async function applyDiscovered(request) {
+  const body = JSON.parse(request.body);
+  const transformed = await normalizeToolResultsAsync(body, async ({text, tool}) => {
+    for (const {supervisor} of discoveredNormalizers) text = await supervisor.normalize({text, tool, workload: discoveryContext});
+    return text;
+  });
+  return {method: request.method, url: request.url, body: transformed};
+}
+
+async function discoverRequestMatch(expected, actual) {
+  if (!discoveryPath || expected.method !== actual.method || expected.url !== actual.url) return null;
+  let left, right;
+  try { left = await applyDiscovered(expected); right = await applyDiscovered(actual); }
+  catch { discoveryCatalogFailures += 1; return null; }
+  if (JSON.stringify(left) === JSON.stringify(right)) return {kind: 'previous'};
+  if (discoveredNormalizers.length >= 32) { discoveryLimitReached = true; return null; }
+  refreshDiscoveryStore();
+  const excluded = new Set();
+  while (true) {
+    const candidates = [];
+    const supervisors = [];
+    for (const profile of discoveryCatalog) {
+      if (excluded.has(profile.id)) continue;
+      let supervisor;
+      candidates.push({...profile, normalizeToolResult: context => {
+        if (!supervisor) {
+          supervisor = new NormalizerSupervisor([profile], {callTimeoutMs: 100, startupTimeoutMs: 2000});
+          void supervisor.ready.catch(() => {});
+          supervisors.push(supervisor);
+        }
+        return supervisor.normalize({...context, workload: discoveryContext}).catch(error => { discoveryCatalogFailures += 1; throw error; });
+      }, close: () => supervisor?.close()});
+    }
+    let found;
+    try { found = await findNormalizer(left, right, candidates); }
+    catch { discoveryCatalogFailures += 1; return null; }
+    finally { await Promise.all(supervisors.map(supervisor => supervisor.close().catch(() => {}))); }
+    if (!found) return null;
+    if (found.kind === 'limited') { discoveryLimitReached = true; return null; }
+    const id = found.id || `temporary-${discoveredNormalizers.length + 1}`;
+    const supervisor = new NormalizerSupervisor([{id, source: found.source}], {callTimeoutMs: 100, startupTimeoutMs: 2000});
+    let verified = false;
+    try {
+      await supervisor.ready;
+      const verify = body => normalizeToolResultsAsync(body, ({text, tool}) => supervisor.normalize({text, tool, workload: discoveryContext}));
+      const verifiedLeft = await verify(left.body);
+      const verifiedRight = await verify(right.body);
+      verified = JSON.stringify(verifiedLeft) === JSON.stringify(verifiedRight);
+    } catch { /* Keep the original mismatch if a candidate cannot run. */ }
+    if (!verified) {
+      await supervisor.close();
+      discoveryCatalogFailures += 1;
+      if (found.kind === 'temporary') return null;
+      excluded.add(found.id);
+      continue;
+    }
+    // A private, project-local file makes the proposed rule reviewable. Do
+    // not consume a cassette response if the suggestion cannot be retained.
+    const directory = discoverySuggestions || dirname(mismatchEvidence);
+    const path = join(directory, `suggested-normalizer-${discoveredNormalizers.length + 1}.mjs`);
+    try {
+      if (discoverySuggestions && !suggestionDirectoryCreated) {
+        mkdirSync(directory, {mode:0o700});
+        suggestionDirectoryCreated = true;
+      }
+      writeFileSync(path, found.source, {encoding:'utf8', mode:0o600, flag:'wx'});
+    }
+    catch { discoveryStoreFailures += 1; await supervisor.close(); return null; }
+    discoveredNormalizers.push({supervisor, kind:found.kind, entries:found.entries, sequence:cursor + 1, progressed:false, promoted:false});
+    return {...found, id, path};
+  }
+}
+
+function promoteProgressedCandidates(sequence) {
+  let changed = false;
+  for (const candidate of discoveredNormalizers) {
+    if (candidate.sequence >= sequence) continue;
+    if (!candidate.progressed) { candidate.progressed = true; changed = true; }
+    if (!discoveryStore || candidate.kind !== 'temporary' || candidate.promoted) continue;
+    try {
+      saveCandidate(prepareStore(discoveryStore), candidate.entries);
+      candidate.promoted = true;
+      discoveryStorePromoted += 1;
+      changed = true;
+    } catch { discoveryStoreFailures += 1; changed = true; }
+  }
+  if (changed) writeProgress();
+}
 // Only hold this while committing a selected exchange. Waiting for a later
 // recorded request happens outside the lock, so out-of-order peers can still
 // advance the cursor. Delivery itself is also outside the lock.
@@ -604,6 +731,7 @@ function writeProgress() {
       total: interactions.length,
       rejected,
       ignored_mismatches: ignoredMismatchCount,
+      ...(discoveryPath ? {normalizer_exploration: {progressed:discoveredNormalizers.filter(candidate => candidate.progressed).length, progressed_sequences:discoveredNormalizers.filter(candidate => candidate.progressed).map(candidate => candidate.sequence), promoted:discoveryStorePromoted, failures:discoveryStoreFailures, catalog_failures:discoveryCatalogFailures, limit_reached:discoveryLimitReached}} : {}),
       unrequested_optional_probes: deferredProbes.length,
       ...(customSupervisor ? { normalization: normalizationEvidence() } : {}),
       ...(firstMismatch ? { first_mismatch: firstMismatch } : {}),
@@ -794,6 +922,20 @@ async function awaitReplayTurn(request, response, deadline) {
       target = index;
       break;
     }
+  }
+  // Preserve recorded order when a concurrent request matches a later turn
+  // only after applying this session's exploratory rules.
+  if (target < 0 && discoveredNormalizers.length) {
+    try {
+      const actual = JSON.stringify(await applyDiscovered(request));
+      if (actual === JSON.stringify(await applyDiscovered(interactions[cursor].request))) return true;
+      for (let index = cursor + 1; index < interactions.length && performance.now() < deadline; index += 1) {
+        if (interactions[index]?.request && actual === JSON.stringify(await applyDiscovered(interactions[index].request))) {
+          target = index;
+          break;
+        }
+      }
+    } catch { discoveryCatalogFailures += 1; }
   }
   if (target < 0 || replayOrderWaiters >= MAX_REPLAY_ORDER_WAITERS) return true;
   replayOrderWaiters += 1;
@@ -1001,20 +1143,36 @@ async function handle(request, response, recording) {
           break;
         }
       }
+      if (!retry && discoveredNormalizers.length) {
+        try {
+          const actual = await applyDiscovered(recordedRequest);
+          for (let index = cursor - 1; index >= 0; index -= 1) {
+            if (!skippedProbeIndices.has(index) && interactions[index]?.request
+                && JSON.stringify(actual) === JSON.stringify(await applyDiscovered(interactions[index].request))) {
+              retry = interactions[index];
+              break;
+            }
+          }
+        } catch { discoveryCatalogFailures += 1; }
+      }
       if (retry) {
         releaseCommit();
         await deliverRecordedResponse(response, retry);
         return;
       }
       const mismatch = requestMismatch(interaction.request, recordedRequest, cursor + 1);
-      retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
-      if (!ignoreProviderMismatch) {
+      const discovered = await discoverRequestMatch(interaction.request, recordedRequest);
+      if (!discovered && !ignoreProviderMismatch) {
+        retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
         reject(mismatch);
         response.writeHead(409, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: "request does not match cassette" }));
         return;
       }
-      const event = { ...mismatch, ignored: true, severity: "warning", kind: "provider_mismatch" };
+      if (discovered?.kind !== 'previous') {
+      retainMismatchEvidence(interaction.request, recordedRequest, mismatch);
+      const event = { ...mismatch, ignored: true, severity: "warning", kind: "provider_mismatch",
+        ...(discovered ? { normalizer: discovered.id, suggestion: discovered.kind, file: discovered.path } : {}) };
       // A very deep diagnostic path is kept out of the public journal; the
       // private first-mismatch evidence retains its detailed comparison.
       if (event.path.length > 256) event.path = "$";
@@ -1029,6 +1187,7 @@ async function handle(request, response, recording) {
       // Deliberately consume the next recorded response. This does not assert
       // semantic equivalence: the owning run marks the replay approximate.
       writeProgress();
+      }
     }
     if (agentWireExtension?.observeReplayExchange) {
       let parsed;
@@ -1036,10 +1195,13 @@ async function handle(request, response, recording) {
       if (parsed !== undefined) await agentWireExtension.observeReplayExchange({url:requestPath(request.url),body:parsed,interaction});
     }
     cursor += 1;
+    const deliveredSequence = cursor;
     advanceNativeTools();
     writeProgress();
     releaseCommit();
+    const delivered = responseDelivery(response);
     await deliverRecordedResponse(response, interaction);
+    if ((await delivered).delivered) promoteProgressedCandidates(deliveredSequence);
     return;
     } finally { releaseCommit(); }
   }
@@ -1202,6 +1364,7 @@ async function shutdown() {
         { encoding: "utf8", mode: 0o600, flag: "wx" });
     }
     await customSupervisor?.close();
+    await Promise.all(discoveredNormalizers.map(({supervisor}) => supervisor.close()));
     if (replayEvidenceFailure) throw new Error("replay evidence publication failed");
     process.exit(0);
   } catch {

@@ -14,6 +14,8 @@ fn recorder_accounting_and_publication_fault_matrix() {
         .arg(root.join("tests/normalizer_supervisor.mjs"))
         .arg(root.join("tests/sympy_normalizer.mjs"))
         .arg(root.join("tests/workload_normalizer_examples.mjs"))
+        .arg(root.join("tests/replay_normalizer_discovery.mjs"))
+        .arg(root.join("tests/replay_discovery_store.mjs"))
         .arg(root.join("tests/agent_profile_normalizers.mjs"))
         .arg(root.join("tests/tape_stream_paths.mjs"))
         .current_dir(root)
