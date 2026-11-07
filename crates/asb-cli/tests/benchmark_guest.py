@@ -336,6 +336,17 @@ class GuestBootstrapTests(unittest.TestCase):
             propagate_guest_timeout(result, observation)
             self.assertEqual(result["timed_out"], expected)
             self.assertEqual(observation["timed_out"], expected)
+            if expected:
+                self.assertEqual(result["metadata"]["execution_failure"], "agent execution exceeded its time budget")
+        result = {"metadata": {"exit_code": 127, "execution_failure": None}, "timed_out": True}
+        observation = {"timed_out": True}
+        propagate_guest_timeout(result, observation)
+        self.assertTrue(result["metadata"]["timed_out"])
+        self.assertEqual(result["metadata"]["exit_code"], 127)
+        self.assertEqual(result["metadata"]["execution_failure"], "agent execution exceeded its time budget")
+        result = {"metadata": {"execution_failure": "specific failure"}, "timed_out": True}
+        propagate_guest_timeout(result, {})
+        self.assertEqual(result["metadata"]["execution_failure"], "specific failure")
 
     def setUp(self):
         # These fixtures exercise bootstrap selection, not the separately
@@ -978,6 +989,8 @@ class GuestBootstrapTests(unittest.TestCase):
                     self.assertEqual(attached[0]["process_identity"]["start_time_ticks"], 123)
                 self.assertIsNone(result["metadata"]["token_usage"].get("total_tokens"))
                 self.assertEqual(result["metadata"]["exit_code"], 124 if timed_out else 0)
+                self.assertEqual(result["metadata"].get("execution_failure"),
+                                 "agent execution exceeded its time budget" if timed_out else None)
 
 
 if __name__ == "__main__":
