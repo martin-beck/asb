@@ -303,6 +303,8 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
     let workspace = fixture.root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let context = PreparationContext {
+        expected_material_sha256: None,
+        retain_recorded_material: false,
         native_snapshot_record: false,
         native_snapshot_replay: false,
         tool_mode: None,

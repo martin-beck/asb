@@ -10,7 +10,7 @@ from asb_execution import ExecutionError, ManagedDockerWorkspace
 from asb_swebench import (CatalogError, MAX_PATCH_BYTES, agent_instruction,
                           atomic_write, encoded, evaluate_submission, read_task,
                           remove_evaluation_container, run_harness, sdk_identity)
-from asb_swebench_sources import build_image, resolve_image
+from asb_swebench_sources import build_image, resolve_image, material_cache_tag
 from asb_resources import ResourceJournal
 
 SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
@@ -71,6 +71,29 @@ def source_image_material(image, image_id, source, owner_labels):
             "os_features":attrs.get("OsFeatures"), "rootfs":rootfs, "config":config}
 
 
+def retain_source_image(client, source_image, image_id, image, material_sha256):
+    import docker.errors
+    tag = material_cache_tag(material_sha256)
+    try:
+        existing = client.images.get(tag)
+    except docker.errors.ImageNotFound:
+        existing = None
+    if existing is not None and existing.id != image_id:
+        existing_labels = (existing.attrs.get("Config", {}).get("Labels", {}) or {})
+        existing_owner = {key: existing_labels.get(key) for key in ("asb.owner", "asb.attempt", "asb.recovery")}
+        if (existing_owner["asb.owner"] != "asb"
+                or not re.fullmatch(r"asb-[0-9a-f]{32}", existing_owner["asb.attempt"] or "")
+                or not re.fullmatch(r"[0-9a-f]{32}", existing_owner["asb.recovery"] or "")
+                or source_image_material(existing, existing.id,
+                    {"status":"built", "image_id":existing.id}, existing_owner) != image):
+            raise ExecutionError("source image material cache tag already identifies another image")
+    if existing is None:
+        repository, version = tag.rsplit(":", 1)
+        if not source_image.tag(repository, tag=version):
+            raise ExecutionError("cannot retain source image for offline replay")
+        if client.images.get(tag).id != image_id:
+            raise ExecutionError("retained source image identity changed")
+
 class SweBenchTask:
     def __init__(self, client, catalog_path, task_id, artifacts, tool_mode="none", snapshot=False):
         if tool_mode not in ("none", "record", "replay"):
@@ -105,7 +128,8 @@ class SweBenchTask:
             self.journal = ResourceJournal(self.client, self.artifacts, self.attempt)
             image, source = resolve_image(self.client, spec.image, lambda: build_image(
                 self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,
-                cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay")
+                cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay",
+                material_sha256=os.environ.get("ASB_EXPECTED_MATERIAL_SHA256"))
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
@@ -299,7 +323,8 @@ class SweBenchTask:
         # their original immutable ID. Actual image IDs remain in task evidence.
         source = self.invocation.get("environment_source")
         if isinstance(source, dict) and source.get("status") == "built":
-            image = source_image_material(self.workspace.image, image_id, source, self.journal.labels)
+            image = source_image_material(self.workspace.image, image_id, source,
+                                          source.get("source_owner_labels", self.journal.labels))
             scope = "swe-bench-clean-git-worktree-and-source-image-v2"
             image_key = "image_material"
         else:
@@ -316,6 +341,8 @@ class SweBenchTask:
             material["legacy_sha256"] = canonical_digest({
                 "scope":"swe-bench-clean-git-worktree-and-image-v1", **common, "image_id":image_id},
                 "asb-prepared-workload-material-v1")
+            if os.environ.get("ASB_RETAIN_RECORDED_MATERIAL") == "1":
+                retain_source_image(self.client, self.workspace.image, image_id, image, material["sha256"])
         return material
 
     def __exit__(self, *_exception):

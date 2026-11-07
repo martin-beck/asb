@@ -48,6 +48,62 @@ def archive(root, files, extra=()):
 
 
 class SourceContracts(unittest.TestCase):
+    def test_source_image_retention_uses_material_identity_without_replacing_conflicts(self):
+        from asb_swebench_task import retain_source_image
+        from asb_execution import ExecutionError
+        class ImageNotFound(Exception): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        docker.errors = errors
+        errors.ImageNotFound = ImageNotFound
+        images = {}
+        identity = 'sha256:' + 'b' * 64
+        image = SimpleNamespace(id=identity)
+        def get(tag):
+            if tag not in images: raise ImageNotFound()
+            return images[tag]
+        def tag(repository, tag):
+            images[repository + ':' + tag] = image
+            return True
+        image.tag = tag
+        client = SimpleNamespace(images=SimpleNamespace(get=get))
+        with patch.dict(sys.modules, {'docker':docker,'docker.errors':errors}):
+            retain_source_image(client, image, identity, {}, 'a' * 64)
+            self.assertIs(images[sources.material_cache_tag('a' * 64)], image)
+            retain_source_image(client, image, identity, {}, 'a' * 64)
+            images[sources.material_cache_tag('a' * 64)] = SimpleNamespace(id='sha256:'+'c'*64, attrs={'Config':{'Labels':{}}})
+            with self.assertRaises(ExecutionError):
+                retain_source_image(client, image, identity, {}, 'a' * 64)
+    def test_offline_material_cache_requires_owned_native_image(self):
+        class ImageNotFound(Exception): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        requests, exceptions = ModuleType('requests'), ModuleType('requests.exceptions')
+        docker.errors, requests.exceptions = errors, exceptions
+        errors.DockerException, errors.ImageNotFound = Exception, ImageNotFound
+        exceptions.RequestException = Exception
+        digest = 'a' * 64
+        labels = {'asb.owner':'asb', 'asb.attempt':'asb-'+'b'*32, 'asb.recovery':'c'*32}
+        image = SimpleNamespace(id='sha256:'+'d'*64, attrs={'Architecture':'arm64','Os':'linux','Config':{'Labels':labels}})
+        def get(name):
+            if name == sources.material_cache_tag(digest): return image
+            raise ImageNotFound()
+        def forbidden(*_args): raise AssertionError('offline replay must not access network or build')
+        client = SimpleNamespace(images=SimpleNamespace(get=get, pull=forbidden))
+        with patch.dict(sys.modules, {'docker':docker,'docker.errors':errors,'requests':requests,'requests.exceptions':exceptions}):
+            found, receipt = sources.resolve_image(client, 'swebench/sweb.eval.x86_64.fixture', forbidden, host_arch='aarch64', offline=True, material_sha256=digest)
+            self.assertIs(found, image)
+            self.assertEqual(receipt['source_owner_labels'], labels)
+            labels['asb.owner'] = 'other'
+            with self.assertRaisesRegex(sources.CatalogError, 'identity, ownership or architecture'):
+                sources.resolve_image(client, 'swebench/sweb.eval.x86_64.fixture', forbidden, host_arch='aarch64', offline=True, material_sha256=digest)
+            labels['asb.owner'] = 'asb'
+            image.attrs['Architecture'] = 'amd64'
+            with self.assertRaisesRegex(sources.CatalogError, 'identity, ownership or architecture'):
+                sources.resolve_image(client, 'swebench/sweb.eval.x86_64.fixture', forbidden, host_arch='aarch64', offline=True, material_sha256=digest)
+    def test_source_cache_tag_requires_a_canonical_material_digest(self):
+        self.assertEqual(sources.material_cache_tag("a" * 64), "asb-swebench-material:" + "a" * 64)
+        for value in (None, "", "a" * 63, "A" * 64, "g" * 64, "a" * 64 + "/other"):
+            with self.subTest(value=value), self.assertRaises(sources.CatalogError):
+                sources.material_cache_tag(value)
     def test_replay_never_pulls_or_builds_missing_task_image(self):
         class DockerFailure(Exception): pass
         class ImageNotFound(DockerFailure): pass
