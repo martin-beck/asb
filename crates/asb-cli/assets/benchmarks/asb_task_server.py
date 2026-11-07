@@ -8,8 +8,10 @@ running until the normal benchmark deadline.
 import base64
 import json
 import queue
+import sys
 import threading
 import time
+import traceback
 from enum import Enum
 
 from asb_execution import ExecutionError
@@ -165,6 +167,17 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
                         break
     except Exception as error:
         status = 1
+        # Do not serialize exception text, locals, or paths: SDK failures can
+        # contain credentials. The private controller log still needs enough
+        # information to identify where an unexpected failure originated.
+        frames = traceback.extract_tb(error.__traceback__, limit=16)
+        try:
+            print(json.dumps({"error_class": type(error).__name__, "frames": [
+                {"file": frame.filename.rsplit("/", 1)[-1], "line": frame.lineno,
+                 "function": frame.name} for frame in frames
+            ]}), file=sys.stderr, flush=True)
+        except OSError:
+            pass  # Logging failure must not hide the protocol error or cleanup.
         try:
             # SDK exceptions may contain HTTP bodies or environment values.
             # Known local errors are deliberately bounded and input-free.
