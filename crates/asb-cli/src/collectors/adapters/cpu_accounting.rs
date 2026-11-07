@@ -27,6 +27,16 @@ struct ExternalCounter {
     final_delta: Option<(u64, u64)>,
 }
 
+/// A pressure-accounting scope whose ownership was established by the workload
+/// adapter.  Docker execution containers are narrower than the host but can
+/// include the workload relay, so callers must publish that distinction.
+pub(super) enum PressureScope {
+    /// ASB created a leaf containing only the stopped agent gate and descendants.
+    ExclusiveAgent(PathBuf),
+    /// The verified, ASB-owned Docker execution container.
+    OwnedContainer(PathBuf),
+}
+
 impl ExternalCounter {
     fn finish(&mut self) -> Result<(), String> {
         self.final_delta = None;
@@ -49,14 +59,22 @@ struct Leaf {
     path: PathBuf,
 }
 
-/// Only an ASB-created leaf containing the stopped agent gate is eligible for
-/// agent-only pressure accounting. Never expose the broader container cgroup.
-pub(super) fn exclusive_leaf(session: &mut Session) -> Option<PathBuf> {
+/// Return the narrowest verified cgroup available for pressure collection.
+///
+/// This intentionally never returns a host or arbitrary parent cgroup.  A
+/// Docker container is reported distinctly because it can include container
+/// runtime helpers in addition to the agent process tree.
+pub(super) fn pressure_scope(session: &mut Session) -> Option<PressureScope> {
     let state = session.state::<State>();
     let state = state.borrow();
-    (!state.isolated)
-        .then(|| state.leaf.as_ref().map(|leaf| leaf.path.clone()))
+    if let Some(leaf) = state.leaf.as_ref() {
+        return Some(PressureScope::ExclusiveAgent(leaf.path.clone()));
+    }
+    state
+        .isolated
+        .then(|| state.external.as_ref().map(|counter| counter.path.clone()))
         .flatten()
+        .map(PressureScope::OwnedContainer)
 }
 
 impl Drop for Leaf {

@@ -20,6 +20,30 @@ struct State {
     execution_ended: bool,
     execution_begun: bool,
     target: Option<measurements::ProcessIdentity>,
+    scope: PressureScope,
+}
+
+#[derive(Clone, Copy, Default)]
+enum PressureScope {
+    #[default]
+    AgentProcessTree,
+    OwnedContainerExecution,
+}
+
+impl PressureScope {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::AgentProcessTree => "agent-process-tree",
+            Self::OwnedContainerExecution => "owned-container-execution",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::AgentProcessTree => "exclusive-owned-cgroup",
+            Self::OwnedContainerExecution => "verified-owned-container-cgroup",
+        }
+    }
 }
 
 fn start_capture(session: &mut Session) {
@@ -29,11 +53,19 @@ fn start_capture(session: &mut Session) {
     {
         return;
     }
-    state.reason = Some("No exclusive agent cgroup is available; host and whole-container pressure are excluded. Use a delegated native cgroup-v2 scope for agent pressure measurements.".into());
+    state.reason = Some("No verified agent or owned-container cgroup is available; host pressure is excluded. Use a delegated native cgroup-v2 scope for agent pressure measurements.".into());
     state.target = session.measurement_target().filter(|root| root.matches());
     if state.target.is_some()
-        && let Some(path) = super::cpu_accounting::exclusive_leaf(session)
+        && let Some(scope) = super::cpu_accounting::pressure_scope(session)
     {
+        let (path, scope) = match scope {
+            super::cpu_accounting::PressureScope::ExclusiveAgent(path) => {
+                (path, PressureScope::AgentProcessTree)
+            }
+            super::cpu_accounting::PressureScope::OwnedContainer(path) => {
+                (path, PressureScope::OwnedContainerExecution)
+            }
+        };
         match Sampler::start(
             path,
             measurements::measurement_interval_ms().clamp(100, 1000),
@@ -41,6 +73,7 @@ fn start_capture(session: &mut Session) {
             Ok(sampler) => {
                 state.sampler = Some(sampler);
                 state.reason = None;
+                state.scope = scope;
             }
             Err(reason) => state.reason = Some(reason),
         }
@@ -125,7 +158,7 @@ impl CollectorAdapter for KernelPressure {
                 Some("Agent execution end was not observed; pressure capture is incomplete".into());
         }
         let (mut report, mut summary) =
-            capture::report(state.capture.as_ref(), state.reason.as_deref());
+            capture::report(state.capture.as_ref(), state.reason.as_deref(), state.scope);
         let target = state.target.map(
             |root| serde_json::json!({"pid":root.pid,"start_time_ticks":root.start_time_ticks}),
         );
