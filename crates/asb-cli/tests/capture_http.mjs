@@ -11,6 +11,74 @@ import net from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeWorkspacePaths } from "../assets/scripts/tape-normalization.mjs";
 
+// Exercise an actual offline replay twice: first without a normalizer, then
+// with either an unselected existing profile or a generated selected profile.
+for (const variant of ['unselected-existing', 'generated-selected']) test(`replay requires ${variant} normalizer to complete`, {timeout:20000}, async t => {
+  const parent=join(process.cwd(),'target/capture-http-fixtures');fs.mkdirSync(parent,{recursive:true});
+  const root=fs.mkdtempSync(join(parent,'normalizer-required-'));
+  const tape=fileURLToPath(new URL('../assets/scripts/llmtape.mjs',import.meta.url));
+  const body=(result,step)=>({model:'fixture',input:[
+    {type:'function_call',call_id:'c1',name:'bash',arguments:JSON.stringify({command:'cat widget-report'})},
+    {type:'function_call_output',call_id:'c1',output:result},
+    ...(step===2?[{role:'user',content:'continue'}]:[]),
+  ]});
+  const expected='widget-drift=rose\nresult=ok', actual='widget-drift=lilac\nresult=ok';
+  const line=step=>JSON.stringify({asb_request_policy:3,request:{method:'POST',url:'/v1/responses',body:JSON.stringify(body(expected,step))},response:{status:200,headers:{'content-type':'application/json'},body:JSON.stringify({step})}});
+  const original=`${line(1)}\n${line(2)}\n`;
+  async function launch(name, options={}) {
+    const dir=join(root,name);fs.mkdirSync(dir);const cassette=join(dir,'cassette.jsonl'),ready=join(dir,'ready.json'),journal=join(dir,'journal.jsonl'),evidence=join(dir,'mismatch.json');
+    fs.writeFileSync(cassette,original);
+    const env={PATH:process.env.PATH,ASB_TAPE_OWNER_PIPE:'1',ASB_TAPE_READY_FILE:ready,ASB_TAPE_MISMATCH_EVIDENCE:evidence};
+    if (options.catalog) {
+      const catalog=join(dir,'catalog.json');fs.writeFileSync(catalog,JSON.stringify(options.catalog));
+      env.ASB_TAPE_DISCOVERY_CATALOG=catalog;env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL=journal;
+    }
+    if (options.selected) {
+      const policy=join(dir,'policy.json');fs.writeFileSync(policy,JSON.stringify({sha256:'a'.repeat(64),workload:{id:'fixture',task_id:'one'},profiles:[{id:'selected-fix',source:options.selected}]}));
+      env.ASB_TAPE_CUSTOM_NORMALIZERS=policy;
+    }
+    const child=spawn(process.execPath,[tape,'replay','--port','0','--cassette',cassette],{env,stdio:['pipe','ignore','pipe']});
+    let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    const exited=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+    t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
+    const until=performance.now()+4000;while(!fs.existsSync(ready)){assert.equal(child.exitCode,null,stderr);assert.ok(performance.now()<until,stderr);await delay(10);}
+    return {child,exited,dir,cassette,journal,evidence,port:JSON.parse(fs.readFileSync(ready)).port};
+  }
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  async function stop(session) {session.child.stdin.end();assert.deepEqual(await session.exited,{code:0,signal:null});}
+  const baseline=await launch('baseline');
+  assert.equal((await request(baseline.port,'/v1/responses',JSON.stringify(body(actual,1)))).status,409);
+  await stop(baseline);
+  const baselineProgress=JSON.parse(fs.readFileSync(`${baseline.cassette}.progress.json`));
+  assert.equal(baselineProgress.consumed,0);assert.equal(baselineProgress.rejected,1);
+
+  const source="export function normalizeToolResult({text,tool}) { return tool?.arguments?.command === 'cat widget-report' ? text.replace(/widget-drift=(?:rose|lilac)/,'widget-drift=<stable>') : text; }";
+  const exploration=await launch('exploration',{catalog:variant==='unselected-existing'?[{id:'widget-drift',source}]:[]});
+  for (const step of [1,2]) {
+    const response=await request(exploration.port,'/v1/responses',JSON.stringify(body(actual,step)));
+    assert.equal(response.status,200);assert.equal(JSON.parse(response.body).step,step);
+  }
+  await stop(exploration);
+  const observed=JSON.parse(fs.readFileSync(`${exploration.cassette}.progress.json`));
+  assert.equal(observed.consumed,2);assert.equal(observed.rejected,0);assert.equal(observed.ignored_mismatches,1);
+  const event=JSON.parse(fs.readFileSync(exploration.journal,'utf8').trim());
+  assert.equal(event.suggestion,variant==='unselected-existing'?'existing':'temporary');
+  if (variant==='unselected-existing') assert.equal(event.normalizer,'widget-drift');
+  if (variant==='generated-selected') {
+    const generated=fs.readFileSync(event.file,'utf8');
+    const selected=await launch('selected',{selected:generated});
+    for (const step of [1,2]) {
+      const response=await request(selected.port,'/v1/responses',JSON.stringify(body(actual,step)));
+      assert.equal(response.status,200);assert.equal(JSON.parse(response.body).step,step);
+    }
+    await stop(selected);
+    const verified=JSON.parse(fs.readFileSync(`${selected.cassette}.progress.json`));
+    assert.equal(verified.consumed,2);assert.equal(verified.rejected,0);assert.equal(verified.ignored_mismatches,0);
+    assert.equal(fs.existsSync(selected.evidence),false);
+    assert.equal(fs.readFileSync(selected.cassette,'utf8'),original,'selected replay preserves raw cassette');
+  }
+});
+
 for (const mode of ['existing', 'temporary']) test(`replay discovers ${mode} normalizer and stops at a non-tool divergence`, {timeout: 20000}, async (t) => {
   const parent = join(process.cwd(), 'target/capture-http-fixtures'); fs.mkdirSync(parent, {recursive:true});
   const root = fs.mkdtempSync(join(parent, 'discovery-'));

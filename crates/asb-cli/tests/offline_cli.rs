@@ -3616,6 +3616,7 @@ async function main() {
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
 "##);
+    let mut generated_sources = Vec::new();
     for (index, measurements) in ["discovery-first", "discovery-second"].iter().enumerate() {
         let output = project.command(&[
             "run",
@@ -3653,6 +3654,12 @@ main().catch(error=>{console.error(error);process.exitCode=1;});
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(events.len(), 2);
+        if index == 0 {
+            generated_sources = events
+                .iter()
+                .map(|event| std::fs::read_to_string(event["file"].as_str().unwrap()).unwrap())
+                .collect();
+        }
         assert!(
             events
                 .iter()
@@ -3674,6 +3681,47 @@ main().catch(error=>{console.error(error);process.exitCode=1;});
             .count(),
         2
     );
+    // Select the rules that exploration actually generated and verify that a
+    // new replay completes without an exploratory mismatch or ignored event.
+    let configuration_path = project.0.join(".asb/project.toml");
+    let original_configuration = std::fs::read_to_string(&configuration_path).unwrap();
+    let mut selected_configuration = original_configuration.clone();
+    for (index, source) in generated_sources.iter().enumerate() {
+        let module = format!("normalizers/generated-{index}.mjs");
+        project.write(&module, source);
+        selected_configuration.push_str(&format!("\n[[replay.normalizers]]\nid='generated-{index}'\nmodule='{module}'\nworkloads=['bug-fix']\n"));
+    }
+    std::fs::write(&configuration_path, &selected_configuration).unwrap();
+    let selected = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+        "--json",
+        "--measurements",
+        "discovery-selected",
+    ]);
+    assert!(
+        selected.status.success(),
+        "stdout={} stderr={}",
+        stdout(&selected),
+        stderr(&selected)
+    );
+    let selected_rows: Vec<serde_json::Value> = stdout(&selected)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row.get("process_success").is_some())
+        .collect();
+    assert_eq!(selected_rows.len(), 1, "{}", stdout(&selected));
+    let selected_row = &selected_rows[0];
+    assert_eq!(selected_row["approximate_replay"], false);
+    assert_eq!(selected_row["provider_replay_consumed"], true);
+    assert!(selected_row.get("ignored_failures").is_none());
+    std::fs::write(&configuration_path, &original_configuration).unwrap();
+    for index in 0..generated_sources.len() {
+        std::fs::remove_file(project.0.join(format!("normalizers/generated-{index}.mjs"))).unwrap();
+    }
     let human = project.command(&[
         "run",
         "benchmark.toml",
