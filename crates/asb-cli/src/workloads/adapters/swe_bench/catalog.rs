@@ -13,6 +13,10 @@ use std::path::{Component, Path};
 const MATERIALIZER: &str = include_str!("../../../../assets/benchmarks/asb_swebench.py");
 const TASK_SESSION: &str = include_str!("../../../../assets/benchmarks/asb_swebench_task.py");
 const TASK_SOURCES: &str = include_str!("../../../../assets/benchmarks/asb_swebench_sources.py");
+const ARM_SCIKIT_LEGACY_LOCK: &str =
+    include_str!("../../../../assets/benchmarks/asb_swe_arm_scikit_legacy.lock");
+const ARM_SCIKIT_MODERN_LOCK: &str =
+    include_str!("../../../../assets/benchmarks/asb_swe_arm_scikit_modern.lock");
 const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 // Streaming rows are normalized into project-local metadata while the source
 // cache is populated, so this is a bounded package materialization rather
@@ -295,6 +299,8 @@ pub(super) fn ensure_helpers(root: &Path) -> Result<(), Error> {
         ("asb_swebench.py", MATERIALIZER),
         ("asb_swebench_task.py", TASK_SESSION),
         ("asb_swebench_sources.py", TASK_SOURCES),
+        ("asb_swe_arm_scikit_legacy.lock", ARM_SCIKIT_LEGACY_LOCK),
+        ("asb_swe_arm_scikit_modern.lock", ARM_SCIKIT_MODERN_LOCK),
     ] {
         publish_helper(&root.join(name), source)?;
     }

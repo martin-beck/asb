@@ -23,6 +23,34 @@ MAX_EXPANDED_BYTES = 256 * 1024**2
 SOURCE_BUILD_TIMEOUT_SECONDS = 7200
 REQUIRED = {"task.yaml", "Dockerfile", "eval.sh", "gold.patch", "test.patch",
             "tests.json", "problem_statement.md"}
+ARM_LEGACY_TASK = "scikit-learn__scikit-learn-12827"
+ARM_LEGACY_DOCKERFILE_SHA256 = "93702f7ac38fe7aac29eac73032d9163391ce5336c3ab6f1ef250d26c5cde7c1"
+ARM_LEGACY_LOCK_SHA256 = "ca9b4c87155d44f14ca8d5f59e5eac7f3ac49ec90f0c891689eb80edd35a606f"
+ARM_LEGACY_LOCK = "asb_swe_arm_scikit_legacy.lock"
+ARM_MODERN_TASK = "scikit-learn__scikit-learn-25232"
+ARM_MODERN_DOCKERFILE_SHA256 = "d8536f86d39351dfaed7485307ad33f7d80c11ab3184a2c3e9269a63a3d29789"
+ARM_MODERN_LOCK_SHA256 = "e3b0f7b307141e91cc5a54242d95b0f76c7f090f901b6611b50b0407ed4941d5"
+ARM_MODERN_LOCK = "asb_swe_arm_scikit_modern.lock"
+
+
+def locked_arm_dockerfile(task_id, adapted, lock):
+    """Use a reviewed transitive lock only for the exact known task definition."""
+    if task_id == ARM_LEGACY_TASK:
+        name, docker_hash, lock_hash, marker = ARM_LEGACY_LOCK, ARM_LEGACY_DOCKERFILE_SHA256, ARM_LEGACY_LOCK_SHA256, b"RUN <<EOF_7724f09cce4e"
+    elif task_id == ARM_MODERN_TASK:
+        name, docker_hash, lock_hash, marker = ARM_MODERN_LOCK, ARM_MODERN_DOCKERFILE_SHA256, ARM_MODERN_LOCK_SHA256, b"RUN <<EOF_b4c03f5616a4"
+    else:
+        return adapted, None
+    if hashlib.sha256(adapted).hexdigest() != docker_hash:
+        raise CatalogError("known ARM64 scikit task definition changed; refusing its dependency lock")
+    if hashlib.sha256(lock).hexdigest() != lock_hash:
+        raise CatalogError("ARM64 scikit dependency lock is missing or changed; reinstall the workload")
+    command = b"conda env create -f /root/environment.yml"
+    if adapted.count(marker) != 1 or adapted.count(command) != 1:
+        raise CatalogError("known ARM64 scikit task definition has an unexpected layout")
+    adapted = adapted.replace(marker, b"COPY " + name.encode() + b" /root/asb-arm64-explicit.lock\n" + marker, 1)
+    adapted = adapted.replace(command, b"conda create -y -n testbed --file /root/asb-arm64-explicit.lock", 1)
+    return adapted, lock_hash
 
 
 def material_cache_tag(material_sha256):
@@ -196,10 +224,21 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         if require_native_docker_host(client) != "arm64":
             raise CatalogError("ARM64 source image build requires a native ARM64 Docker host")
     dockerfile = arm64_dockerfile(original_dockerfile) if native_arm else original_dockerfile
+    lock_digest = None
+    lock = None
+    lock_name = {ARM_LEGACY_TASK: ARM_LEGACY_LOCK, ARM_MODERN_TASK: ARM_MODERN_LOCK}.get(row["instance_id"]) if native_arm else None
+    if lock_name:
+        try:
+            lock = (Path(__file__).parent / lock_name).read_bytes()
+        except OSError as error:
+            raise CatalogError("ARM64 scikit dependency lock is missing; reinstall the workload") from error
+        dockerfile, lock_digest = locked_arm_dockerfile(row["instance_id"], dockerfile, lock)
     artifacts = Path(artifacts)
     context = artifacts / "source-build"
     context.mkdir(mode=0o700, parents=False, exist_ok=False)
     atomic_write(context / "Dockerfile", dockerfile)
+    if lock is not None:
+        atomic_write(context / lock_name, lock)
     if command is None:
         from asb_docker import docker_command
         command = docker_command()
@@ -210,7 +249,9 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                "dockerfile_sha256": hashlib.sha256(original_dockerfile).hexdigest(),
                "build_dockerfile_sha256": hashlib.sha256(dockerfile).hexdigest(),
                "architecture": "arm64" if native_arm else arch,
-               "adaptation": "native-arm64-version-pinned-v1" if native_arm else None,
+               "adaptation": ("native-arm64-scikit-transitive-lock-v1" if lock_digest else
+                              "native-arm64-version-pinned-v1") if native_arm else None,
+               "adaptation_lock_sha256": lock_digest,
                "task_id": row["instance_id"], "tag": tag, "status": "building",
                "limits": {"timeout_seconds": build_timeout, "memory_bytes": memory_gib * 1024**3, "cpus": 2}}
     path = artifacts / "source-image.json"
