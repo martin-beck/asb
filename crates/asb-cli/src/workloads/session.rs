@@ -100,6 +100,10 @@ impl TaskIdentity {
 }
 
 pub(crate) struct PreparationContext<'a> {
+    /// Cassette material expected for an offline replay, if available.
+    pub expected_material_sha256: Option<&'a str>,
+    /// Retain prepared source material for a provider recording.
+    pub retain_recorded_material: bool,
     /// Local tool record/replay intent, available before the workload is created.
     pub tool_mode: Option<crate::tape::Mode>,
     /// The selected verified native tool track includes workspace snapshots.
@@ -675,6 +679,8 @@ mod tests {
         let project = crate::project::ProjectConfig::default();
         let context = super::PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: Some(crate::tape::Mode::Replay),
             native_snapshot_replay: true,
             verify_initial_material: false,
@@ -784,6 +790,8 @@ mod tests {
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -823,6 +831,8 @@ mod tests {
         };
         let context = super::PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -944,6 +954,8 @@ mod tests {
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -975,6 +987,8 @@ mod tests {
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: true,
@@ -1007,6 +1021,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -1049,6 +1065,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,
@@ -1088,6 +1106,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
             native_snapshot_record: false,
+            expected_material_sha256: None,
+            retain_recorded_material: false,
             tool_mode: None,
             native_snapshot_replay: false,
             verify_initial_material: false,

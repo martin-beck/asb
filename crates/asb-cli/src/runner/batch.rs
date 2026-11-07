@@ -373,6 +373,13 @@ pub(crate) struct Arrival<'a> {
 }
 
 impl Gate {
+    pub(crate) fn expected_material(&self) -> Result<Option<String>, Error> {
+        let state = self.state.lock().map_err(|_| unavailable())?;
+        Ok(state
+            .identity
+            .as_ref()
+            .map(|value| value.material_sha256.clone()))
+    }
     pub(crate) fn expected_normalization(&self) -> Result<Option<Option<String>>, Error> {
         let state = self.state.lock().map_err(|_| unavailable())?;
         Ok(state
@@ -983,6 +990,18 @@ mod tests {
             protocol_sha256: None,
             normalization_sha256: None,
         }
+    }
+
+    #[test]
+    fn expected_material_is_available_before_any_arrival() {
+        let expected = material();
+        let gate = Gate::new(1, Some(expected.clone()), Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            gate.expected_material().unwrap(),
+            Some(expected.material_sha256)
+        );
+        let empty = Gate::new(1, None, Duration::from_secs(1)).unwrap();
+        assert_eq!(empty.expected_material().unwrap(), None);
     }
 
     #[test]

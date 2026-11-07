@@ -522,6 +522,17 @@ impl<'a> ReadyAttempt<'a> {
         };
 
         let mut workload_session = None;
+        let expected_material = if options.mode == Some(tape::Mode::Replay) {
+            if let Some(expected) = options.replay_expected_compatibility {
+                Some(expected.material_sha256.clone())
+            } else if let Some(gate) = options.preparation_gate {
+                gate.expected_material()?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let preparation = instrument_phase(
             measurement_session.as_mut(),
             LifecyclePhase::WorkloadPreparation,
@@ -542,6 +553,8 @@ impl<'a> ReadyAttempt<'a> {
                     ))
                 })?;
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
+                    expected_material_sha256: expected_material.as_deref(),
+                    retain_recorded_material: options.mode == Some(tape::Mode::Record),
                     tool_mode: options.effective_tool_mode(),
                     native_snapshot_replay: options.native_snapshot_replay(),
                     native_snapshot_record: config.native_snapshot_record

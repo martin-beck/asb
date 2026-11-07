@@ -875,6 +875,19 @@ pub(crate) fn launch(
         .map_err(|error| error.to_string())?;
     let mut command = controller_command(tool.join("venv/bin/python"))?;
     command.stderr(error_log);
+    if let Some(expected) = context.expected_material_sha256 {
+        command.env("ASB_EXPECTED_MATERIAL_SHA256", expected);
+    } else {
+        command.env_remove("ASB_EXPECTED_MATERIAL_SHA256");
+    }
+    command.env(
+        "ASB_RETAIN_RECORDED_MATERIAL",
+        if context.retain_recorded_material {
+            "1"
+        } else {
+            "0"
+        },
+    );
     command.env(
         "ASB_WORKLOAD_TOOL_MODE",
         workload_tool_mode(context.tool_mode),

@@ -25,6 +25,13 @@ REQUIRED = {"task.yaml", "Dockerfile", "eval.sh", "gold.patch", "test.patch",
             "tests.json", "problem_statement.md"}
 
 
+def material_cache_tag(material_sha256):
+    """Address a retained source image by the cassette's prepared material."""
+    if not isinstance(material_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", material_sha256):
+        raise CatalogError("source image cache requires a valid material SHA-256")
+    return "asb-swebench-material:" + material_sha256
+
+
 def source_build_memory_gib():
     """Return the explicit, bounded source-build memory limit in GiB."""
     value = os.environ.get("ASB_SWEBENCH_BUILD_MEMORY_GIB", "8")
@@ -246,7 +253,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         raise
 
 
-def resolve_image(client, name, build, host_arch=None, offline=False):
+def resolve_image(client, name, build, host_arch=None, offline=False, material_sha256=None):
     import docker.errors
     import requests.exceptions
     arch = host_arch or platform.machine()
@@ -256,6 +263,25 @@ def resolve_image(client, name, build, host_arch=None, offline=False):
             if not name.startswith(prefix):
                 raise CatalogError("official SWE-bench image name does not support native ARM64 selection")
             name = "swebench/sweb.eval.arm64." + name[len(prefix):]
+        image = None
+        if material_sha256 is not None:
+            tag = material_cache_tag(material_sha256)
+            try:
+                image = client.images.get(tag)
+            except docker.errors.ImageNotFound:
+                pass
+        if image is not None:
+            labels = image.attrs.get("Config", {}).get("Labels", {}) or {}
+            owner = {key: labels.get(key) for key in ("asb.owner", "asb.attempt", "asb.recovery")}
+            if (owner["asb.owner"] != "asb"
+                    or not re.fullmatch(r"asb-[0-9a-f]{32}", owner["asb.attempt"] or "")
+                    or not re.fullmatch(r"[0-9a-f]{32}", owner["asb.recovery"] or "")
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(image, "id", ""))
+                    or image.attrs.get("Os") != "linux"
+                    or image.attrs.get("Architecture") != ("arm64" if arch in ("arm64", "aarch64") else "amd64")):
+                raise CatalogError("cached SWE-bench source image has invalid identity, ownership or architecture")
+            return image, {"status":"built", "image_id":image.id, "cache_material_sha256":material_sha256,
+                           "source_owner_labels":owner, "source":"verified-local-material-cache"}
         try:
             image = client.images.get(name)
         except docker.errors.ImageNotFound as error:

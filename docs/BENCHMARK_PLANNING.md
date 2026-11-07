@@ -143,6 +143,12 @@ Set `planning.budgets.environment_preparation_seconds` high enough to cover
 that build and its setup and cleanup. Cohort material admission has its own
 deadline, so this setting does not extend concurrent admission waits.
 
+When a recording uses a source-built SWE-bench image, ASB retains a local
+Docker image tag keyed by the prepared material digest for offline replay.
+Replay checks its ownership, architecture and prepared material against the
+cassette before agent execution. These retained images consume disk space;
+removing a retained tag can make recordings that depend on it unreplayable.
+
 Collector descriptors distinguish agent-process, whole-container, host-context
 and run-observation targets and execution versus run scope. Declarations do not
 prove host permission or successful collection: existing capability probes and
