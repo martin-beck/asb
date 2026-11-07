@@ -10,13 +10,10 @@ pub(super) struct Pressure {
 }
 impl Rule for Pressure {
     fn evaluate(&self, docs: &Documents) -> Diagnostic {
-        let value = docs
+        let (scope, value) = docs
             .get("kernel-pressure-summary")
             .filter(|d| {
                 d.get("schema_version").and_then(Value::as_u64) == Some(1)
-                    && d.get("scope").and_then(Value::as_str) == Some("agent-process-tree")
-                    && d.get("scope_source").and_then(Value::as_str)
-                        == Some("exclusive-owned-cgroup")
                     && d.get("duration_us")
                         .and_then(Value::as_u64)
                         .is_some_and(|v| v > 0)
@@ -28,15 +25,34 @@ impl Rule for Pressure {
                         .and_then(Value::as_object)
                         .is_some_and(|u| !u.contains_key(self.counter))
             })
-            .and_then(|d| d.get("observations"))
-            .and_then(|m| m.get(self.metric))
-            .and_then(Value::as_f64)
-            .filter(|v| v.is_finite() && *v >= 0.0 && (self.unit != "%" || *v <= 100.0));
+            .and_then(|d| {
+                let scope = match (
+                    d.get("scope").and_then(Value::as_str),
+                    d.get("scope_source").and_then(Value::as_str),
+                ) {
+                    (Some("agent-process-tree"), Some("exclusive-owned-cgroup")) => {
+                        Some("agent-process-tree")
+                    }
+                    (
+                        Some("owned-container-execution"),
+                        Some("verified-owned-container-cgroup"),
+                    ) => Some("owned-container-execution"),
+                    _ => None,
+                }?;
+                let value = d
+                    .get("observations")?
+                    .get(self.metric)?
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v >= 0.0 && (self.unit != "%" || *v <= 100.0))?;
+                Some((scope, value))
+            })
+            .map_or((None, None), |(scope, value)| (Some(scope), Some(value)));
         Diagnostic {
             rule: self.rule, rule_version:1,
             assessment: match value { Some(v) if v > 0.0 => "observed", Some(_) => "not_observed", None => "insufficient_evidence" },
             value, unit: self.unit,
-            unavailable_reason: value.is_none().then_some("requires a valid exclusive agent-cgroup execution interval and the specific observed pressure counter"),
+            unavailable_reason: value.is_none().then_some("requires a valid exclusive agent cgroup or verified benchmark-owned container execution interval and the specific observed pressure counter"),
+            scope,
             evidence: vec!["kernel-pressure-summary.json", self.metric],
             limitations: self.limitations,
         }
@@ -47,42 +63,42 @@ pub(super) static CPU: Pressure = Pressure {
     metric: "cpu.some_stall_pct",
     counter: "cpu.some_total_us",
     unit: "%",
-    limitations: "Cgroup wall-time share with at least one CPU-stalled task. It is not runnable-thread time, proof of a kernel bottleneck, or the identity of a competing process. Resource stalls overlap.",
+    limitations: "Cgroup wall-time share with at least one CPU-stalled task. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. It is not runnable-thread time, proof of a kernel bottleneck, or the identity of a competing process. Resource stalls overlap.",
 };
 pub(super) static MEMORY: Pressure = Pressure {
     rule: "pressure.memory_some_pct",
     metric: "memory.some_stall_pct",
     counter: "memory.some_total_us",
     unit: "%",
-    limitations: "Cgroup wall-time share with at least one task stalled on memory. Reclaim, limits and shared host contention need further evidence; not DRAM latency or additive wall-time loss.",
+    limitations: "Cgroup wall-time share with at least one task stalled on memory. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. Reclaim, limits and shared host contention need further evidence; not DRAM latency or additive wall-time loss.",
 };
 pub(super) static IO: Pressure = Pressure {
     rule: "pressure.io_some_pct",
     metric: "io.some_stall_pct",
     counter: "io.some_total_us",
     unit: "%",
-    limitations: "Cgroup wall-time share with at least one task stalled on I/O. It does not distinguish device service from queueing, filesystem contention or other I/O causes; not network wait.",
+    limitations: "Cgroup wall-time share with at least one task stalled on I/O. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. It does not distinguish device service from queueing, filesystem contention or other I/O causes; not network wait.",
 };
 pub(super) static THROTTLE: Pressure = Pressure {
     rule: "pressure.cpu_throttled_ms",
     metric: "cpu.throttled_ms",
     counter: "cpu.throttled_total_us",
     unit: "ms",
-    limitations: "Observed CPU-bandwidth throttling duration can accumulate across CPUs and exceed elapsed wall time. It is separate from scheduler contention and cannot be subtracted from wall time.",
+    limitations: "Observed CPU-bandwidth throttling duration can accumulate across CPUs and exceed elapsed wall time. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. It is separate from scheduler contention and cannot be subtracted from wall time.",
 };
 pub(super) static OOM: Pressure = Pressure {
     rule: "pressure.oom_kill_count",
     metric: "memory.oom_kill_count",
     counter: "memory.oom_kill_count",
     unit: "count",
-    limitations: "Observed cgroup OOM kills during execution. This does not identify a particular killed task or prove that its benchmark failure was caused by OOM.",
+    limitations: "Observed cgroup OOM kills during execution. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. This does not identify a particular killed task or prove that its benchmark failure was caused by OOM.",
 };
 pub(super) static MEMORY_HIGH: Pressure = Pressure {
     rule: "pressure.memory_high_count",
     metric: "memory.high_count",
     counter: "memory.high_count",
     unit: "count",
-    limitations: "Observed memory.high events in the exclusive cgroup. These are limit-pressure events, not elapsed reclaim time, memory allocation counts or proof of hardware bandwidth saturation.",
+    limitations: "Observed memory.high events in the verified ASB-owned cgroup. Scope is emitted with the diagnostic: an owned-container execution can include workload runtime helpers and is not agent-only. These are limit-pressure events, not elapsed reclaim time, memory allocation counts or proof of hardware bandwidth saturation.",
 };
 
 #[cfg(test)]
@@ -111,6 +127,18 @@ mod tests {
                 .limitations
                 .contains("exceed elapsed")
         );
+        assert_eq!(CPU.evaluate(&docs()).scope, Some("agent-process-tree"));
+    }
+    #[test]
+    fn verified_owned_container_scope_is_admitted_and_labelled_without_becoming_agent_scope() {
+        let mut docs = docs();
+        let summary = docs.get_mut("kernel-pressure-summary").unwrap();
+        summary["scope"] = Value::from("owned-container-execution");
+        summary["scope_source"] = Value::from("verified-owned-container-cgroup");
+        let diagnostic = CPU.evaluate(&docs);
+        assert_eq!(diagnostic.value, Some(5.0));
+        assert_eq!(diagnostic.scope, Some("owned-container-execution"));
+        assert!(diagnostic.limitations.contains("not agent-only"));
     }
     #[test]
     fn host_container_incomplete_or_invalid_counters_cannot_produce_findings() {
@@ -134,5 +162,9 @@ mod tests {
         invalid.get_mut("kernel-pressure-summary").unwrap()["observations"]["cpu.some_stall_pct"] =
             Value::from(101);
         assert!(CPU.evaluate(&invalid).value.is_none());
+        let mut mismatched = docs();
+        mismatched.get_mut("kernel-pressure-summary").unwrap()["scope"] =
+            Value::from("owned-container-execution");
+        assert!(CPU.evaluate(&mismatched).value.is_none());
     }
 }
