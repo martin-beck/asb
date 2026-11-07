@@ -280,22 +280,12 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
         ] {
             let output = project.command_with_env(&args, &[("PATH", path.to_str().unwrap())]);
             assert!(!output.status.success());
-            if args.contains(&"--llm-replay") {
-                assert!(
-                    stderr(&output).contains("replay tool `codex`")
-                        || stderr(&output)
-                            .contains("replay requires the locally installed tool `codex`"),
-                    "{}",
-                    stderr(&output)
-                );
-            } else {
-                assert!(
-                    stderr(&output).contains("not a usable executable"),
-                    "{}",
-                    stderr(&output)
-                );
-                assert!(stderr(&output).contains("asb tool install codex"));
-            }
+            assert!(
+                stderr(&output).contains("not a usable executable"),
+                "{}",
+                stderr(&output)
+            );
+            assert!(stderr(&output).contains("asb tool install codex"));
             assert!(
                 !marker.exists(),
                 "an unusable selection must never start the host agent"
@@ -306,7 +296,7 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             );
         }
     }
-    // Replay must never run an automatic installer for a missing tool.
+    // LLM-only replay retains normal automatic installation for missing tools.
     std::fs::remove_file(&selected).unwrap();
     let output = project.command_with_env(
         &[
@@ -319,8 +309,10 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
         &[("PATH", path.to_str().unwrap())],
     );
     assert!(!output.status.success());
-    assert!(!project.0.join("npm-invoked").exists());
-    assert!(stderr(&output).contains("asb tool install codex"));
+    assert!(
+        project.0.join("npm-invoked").exists(),
+        "missing agent did not attempt automatic installation"
+    );
 }
 
 #[cfg(unix)]
