@@ -49,10 +49,10 @@ fail with their build evidence retained. Older images and adapted builds require
 per-task qualification. ASB reconstructs the repository's base-only Git
 history before agent execution.
 
-For `scikit-learn__scikit-learn-12827`, the original ARM-adapted Conda
+For `scikit-learn__scikit-learn-12827` and `scikit-learn__scikit-learn-25232`, the original ARM-adapted Conda
 environment cannot be solved because several pinned transitive packages do not
 exist together on ARM64. ASB uses a checked-in explicit ARM64 package lock for
-that exact task definition. It retains the principal Python, NumPy, SciPy,
+each exact task definition. It retains the principal Python, NumPy, SciPy,
 pandas, Cython, Matplotlib and pytest versions, but changes or omits transitive
 packages; it is an adaptation and is not the upstream x86 environment. The
 source-build receipt records the lock hash and adapted Dockerfile hash. An

@@ -68,6 +68,22 @@ class SourceContracts(unittest.TestCase):
                 sources.locked_arm_dockerfile(sources.ARM_LEGACY_TASK, adapted + b'changed', lock)
             with self.assertRaisesRegex(sources.CatalogError, 'lock is missing or changed'):
                 sources.locked_arm_dockerfile(sources.ARM_LEGACY_TASK, adapted, b'changed')
+    def test_modern_arm_scikit_lock_and_exact_input_guards(self):
+        lock = (Path(sources.__file__).parent / sources.ARM_MODERN_LOCK).read_bytes()
+        self.assertTrue(lock.startswith(b"@EXPLICIT\n"))
+        self.assertEqual(hashlib.sha256(lock).hexdigest(), sources.ARM_MODERN_LOCK_SHA256)
+        adapted = (b"RUN <<EOF_b4c03f5616a4\n"
+                   b"conda env create -f /root/environment.yml\nEOF_b4c03f5616a4\n")
+        with patch.object(sources, "ARM_MODERN_DOCKERFILE_SHA256", hashlib.sha256(adapted).hexdigest()):
+            result, digest = sources.locked_arm_dockerfile(sources.ARM_MODERN_TASK, adapted, lock)
+            self.assertEqual(digest, sources.ARM_MODERN_LOCK_SHA256)
+            self.assertIn(b"COPY asb_swe_arm_scikit_modern.lock", result)
+            self.assertIn(b"conda create -y -n testbed --file", result)
+            with self.assertRaisesRegex(sources.CatalogError, "definition changed"):
+                sources.locked_arm_dockerfile(sources.ARM_MODERN_TASK, adapted + b"changed", lock)
+            with self.assertRaisesRegex(sources.CatalogError, "lock is missing or changed"):
+                sources.locked_arm_dockerfile(sources.ARM_MODERN_TASK, adapted, lock + b"changed")
+
     def test_source_image_retention_uses_material_identity_without_replacing_conflicts(self):
         from asb_swebench_task import retain_source_image
         from asb_execution import ExecutionError
