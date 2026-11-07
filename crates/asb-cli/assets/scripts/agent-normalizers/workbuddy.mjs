@@ -14,6 +14,16 @@ export function normalizeRequest(request) {
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, visit(item)]));
     return value;
   };
+  // CodeBuddy stores oversized MCP results under an ephemeral session and
+  // generated filename. Preserve the tool name and all surrounding output.
+  const normalizeResultPath = (value) => {
+    if (typeof value === "string") return value.replace(
+      /(\/opt\/asb-private\/agent-state\/workbuddy\/config\/projects\/testbed\/)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(\/tool-results\/mcp-asb-local-tools-[a-z_]+)-\d+-[0-9a-f]+\.txt/g,
+      "$1<session>$2-<generated>.txt");
+    if (Array.isArray(value)) return value.map(normalizeResultPath);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeResultPath(item)]));
+    return value;
+  };
   const messages = body.messages.map((message) => {
     if (!message || typeof message !== "object" || Array.isArray(message)) return message;
     const next = { ...message };
@@ -21,6 +31,7 @@ export function normalizeRequest(request) {
       if (typeof next[key] === "string") next[key] = `<asb-workbuddy-${key}>`;
     }
     if (!request.profileActive) next.content = visit(next.content);
+    if (next.role === "tool") next.content = normalizeResultPath(next.content);
     return next;
   });
   const normalized = { ...body, messages };
