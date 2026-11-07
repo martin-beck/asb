@@ -49,6 +49,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(any(frame["function"] == "__enter__" for frame in diagnostic["frames"]))
         self.assertLessEqual(len(diagnostic["frames"]), 16)
         self.assertNotIn("private-credential-and-response", log.getvalue() + output.getvalue())
+        class BrokenLog:
+            def write(self, _text):
+                raise OSError("disk full")
+        output = io.StringIO()
+        with patch.object(subject.sys, "stderr", BrokenLog()):
+            self.assertEqual(serve(BrokenTask(), io.StringIO(""), output), 1)
+        self.assertIn('"error_class": "RuntimeError"', output.getvalue())
 
     def test_protocol_deadline_counts_actual_monotonic_delay_not_requested_poll_intervals(self):
         clock = SimpleNamespace(now=0.0, monotonic=lambda: clock.now)

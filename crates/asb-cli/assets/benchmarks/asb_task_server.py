@@ -171,10 +171,13 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
         # contain credentials. The private controller log still needs enough
         # information to identify where an unexpected failure originated.
         frames = traceback.extract_tb(error.__traceback__, limit=16)
-        print(json.dumps({"error_class": type(error).__name__, "frames": [
-            {"file": frame.filename.rsplit("/", 1)[-1], "line": frame.lineno,
-             "function": frame.name} for frame in frames
-        ]}), file=sys.stderr, flush=True)
+        try:
+            print(json.dumps({"error_class": type(error).__name__, "frames": [
+                {"file": frame.filename.rsplit("/", 1)[-1], "line": frame.lineno,
+                 "function": frame.name} for frame in frames
+            ]}), file=sys.stderr, flush=True)
+        except OSError:
+            pass  # Logging failure must not hide the protocol error or cleanup.
         try:
             # SDK exceptions may contain HTTP bodies or environment values.
             # Known local errors are deliberately bounded and input-free.
