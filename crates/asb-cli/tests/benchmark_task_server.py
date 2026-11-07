@@ -37,6 +37,26 @@ class Task:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_unexpected_start_failure_logs_bounded_frames_without_exception_text(self):
+        class BrokenTask(Task):
+            def __enter__(self):
+                raise RuntimeError("private-credential-and-response")
+        log, output = io.StringIO(), io.StringIO()
+        with patch.object(subject.sys, "stderr", log):
+            self.assertEqual(serve(BrokenTask(), io.StringIO(""), output), 1)
+        diagnostic = json.loads(log.getvalue())
+        self.assertEqual(diagnostic["error_class"], "RuntimeError")
+        self.assertTrue(any(frame["function"] == "__enter__" for frame in diagnostic["frames"]))
+        self.assertLessEqual(len(diagnostic["frames"]), 16)
+        self.assertNotIn("private-credential-and-response", log.getvalue() + output.getvalue())
+        class BrokenLog:
+            def write(self, _text):
+                raise OSError("disk full")
+        output = io.StringIO()
+        with patch.object(subject.sys, "stderr", BrokenLog()):
+            self.assertEqual(serve(BrokenTask(), io.StringIO(""), output), 1)
+        self.assertIn('"error_class": "RuntimeError"', output.getvalue())
+
     def test_protocol_deadline_counts_actual_monotonic_delay_not_requested_poll_intervals(self):
         clock = SimpleNamespace(now=0.0, monotonic=lambda: clock.now)
         class DelayedQueue:
