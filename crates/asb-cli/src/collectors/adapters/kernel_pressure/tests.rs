@@ -2,7 +2,7 @@ use super::*;
 use std::fs;
 
 #[test]
-fn missing_exclusive_scope_never_reads_host_or_container_pressure() {
+fn missing_verified_scope_never_reads_host_pressure() {
     let dir =
         crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-pressure-scope-").unwrap();
     let mut session =
@@ -18,7 +18,7 @@ fn missing_exclusive_scope_never_reads_host_or_container_pressure() {
         report["reason"]
             .as_str()
             .unwrap()
-            .contains("whole-container")
+            .contains("host pressure is excluded")
     );
     assert_eq!(
         ADAPTER.target_scope("local-docker"),

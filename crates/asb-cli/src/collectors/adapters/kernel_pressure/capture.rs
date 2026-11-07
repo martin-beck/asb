@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const MAX_POINTS: usize = 4096;
 const MAX_FILE_BYTES: u64 = 64 * 1024;
-const LIMITATIONS: &str = "PSI is cgroup stall occupancy, not accumulated thread time or additive wall-time loss. Some/full and different resource stalls overlap. Throttled time can overlap across CPUs. Charged memory excludes pages charged to other cgroups. I/O counters are cgroup block accounting, not filesystem latency or network traffic. Capture starts once both agent attachment and execution-begin have been observed and stops at the execution-end hook; boundary hook overhead remains possible. No host or whole-container fallback.";
+const LIMITATIONS: &str = "PSI is cgroup stall occupancy, not accumulated thread time or additive wall-time loss. Some/full and different resource stalls overlap. Throttled time can overlap across CPUs. Charged memory excludes pages charged to other cgroups. I/O counters are cgroup block accounting, not filesystem latency or network traffic. Capture starts once both agent attachment and execution-begin have been observed and stops at the execution-end hook; boundary hook overhead remains possible. Host pressure is never a fallback. A verified owned-container scope can include workload runtime helpers and is labelled separately from an exclusive agent-process-tree scope.";
 
 #[derive(Clone, Default, Serialize)]
 pub(super) struct Snapshot {
@@ -338,6 +338,7 @@ fn converted(key: &str, delta: u64, wall_us: u64) -> (String, f64) {
 pub(super) fn report(
     capture: Option<&Capture>,
     reason: Option<&str>,
+    scope: super::PressureScope,
 ) -> (serde_json::Value, serde_json::Value) {
     let mut metrics = BTreeMap::<String, f64>::new();
     let mut series = BTreeMap::<String, Vec<f64>>::new();
@@ -424,8 +425,8 @@ pub(super) fn report(
         }
     }
     let summary = serde_json::json!({
-        "schema_version":1, "collector":"kernel-pressure", "scope":"agent-process-tree",
-        "scope_source":"exclusive-owned-cgroup", "status":if metrics.is_empty() {"unavailable"} else if unavailable.is_empty() {"completed"} else {"partial"},
+        "schema_version":1, "collector":"kernel-pressure", "scope":scope.scope(),
+        "scope_source":scope.source(), "status":if metrics.is_empty() {"unavailable"} else if unavailable.is_empty() {"completed"} else {"partial"},
         "reason":reason.or(if metrics.is_empty() {Some("No complete agent-only execution interval was observed")} else {None}),
         "duration_us":duration_us, "observations":metrics, "unavailable":unavailable,
         "limitations":LIMITATIONS,
@@ -520,7 +521,11 @@ mod tests {
                 ("io.read_bytes", 101),
             ]),
         );
-        let (report, summary) = report(Some(&capture), None);
+        let (report, summary) = report(
+            Some(&capture),
+            None,
+            super::super::PressureScope::AgentProcessTree,
+        );
         assert_eq!(summary["status"], "completed");
         assert_eq!(summary["observations"]["cpu.some_stall_pct"], 10.0);
         assert_eq!(summary["observations"]["cpu.throttled_ms"], 3000.0);
@@ -546,6 +551,25 @@ mod tests {
         assert_eq!(report["raw_initial"]["values"]["cpu.some_total_us"], 100);
         assert!(summary.get("series").is_none());
     }
+
+    #[test]
+    fn owned_container_scope_is_explicit_not_agent_process_tree() {
+        let mut capture = Capture::new(point(&[("memory.current_bytes", 10)]));
+        capture.push(1_000, point(&[("memory.current_bytes", 11)]));
+        let (report, summary) = report(
+            Some(&capture),
+            None,
+            super::super::PressureScope::OwnedContainerExecution,
+        );
+        assert_eq!(report["scope"], "owned-container-execution");
+        assert_eq!(summary["scope_source"], "verified-owned-container-cgroup");
+        assert!(
+            summary["limitations"]
+                .as_str()
+                .unwrap()
+                .contains("runtime helpers")
+        );
+    }
     #[test]
     fn reset_and_mid_capture_loss_invalidate_entire_metric_not_other_fields() {
         let mut capture = Capture::new(point(&[("cpu.some_total_us", 20), ("io.read_bytes", 10)]));
@@ -562,7 +586,11 @@ mod tests {
             300,
             point(&[("cpu.some_total_us", 50), ("io.read_bytes", 15)]),
         );
-        let (report, summary) = report(Some(&capture), None);
+        let (report, summary) = report(
+            Some(&capture),
+            None,
+            super::super::PressureScope::AgentProcessTree,
+        );
         assert_eq!(summary["status"], "unavailable");
         assert!(report["metrics"].as_object().unwrap().is_empty());
         assert!(report["series"].as_object().unwrap().is_empty());
@@ -584,7 +612,11 @@ mod tests {
         }
         assert!(capture.downsampled);
         assert!(capture.points.len() <= MAX_POINTS);
-        let (report, _) = report(Some(&capture), None);
+        let (report, _) = report(
+            Some(&capture),
+            None,
+            super::super::PressureScope::AgentProcessTree,
+        );
         let times = report["series_timestamps"]["kernel-pressure.cpu.some_stall_pct"]
             .as_array()
             .unwrap();
