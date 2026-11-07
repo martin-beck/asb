@@ -365,7 +365,7 @@ fn structural_mutations_reject_without_observing_any_artifacts() {
         ("repeat", json!(0)),
         ("repeat", json!(u64::MAX)),
         ("concurrency", json!(1)),
-        ("concurrency", json!(65)),
+        ("concurrency", json!(crate::benchmark::MAX_CONCURRENCY + 1)),
         ("configuration_sha256", json!("f".repeat(64))),
         ("source", json!("")),
         ("recording", json!("/foreign.zip")),
