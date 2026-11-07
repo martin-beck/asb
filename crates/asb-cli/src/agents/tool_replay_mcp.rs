@@ -108,37 +108,33 @@ struct Options {
 /// A restarted client may briefly overlap its old and new stdio MCP children.
 /// The transcript and cursor are one coupled, run-private state machine, so a
 /// second process must not read either halfway through the first process's
-/// publication.  This create-new lease is deliberately fail-closed instead of
-/// trying to merge two independently executed tool calls.
+/// publication. An operating-system file lock releases ownership when a
+/// killed service exits, while the transcript's pending marker still prevents
+/// a subsequent service from accepting an interrupted publication.
 #[derive(Debug)]
 struct PersistentStateLease {
-    path: PathBuf,
+    _file: fs::File,
 }
 
 impl PersistentStateLease {
     fn acquire(state: &Path) -> Result<Self, Error> {
         let path = state.with_extension("lock");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|_| Error::Run("local-tool persistent transcript is already in use".into()))?;
-        if let Err(error) = file
-            .write_all(b"asb-local-tool-state\n")
-            .and_then(|_| file.sync_all())
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
         {
-            let _ = fs::remove_file(&path);
-            return Err(crate::io_error(error));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        Ok(Self { path })
-    }
-}
-
-impl Drop for PersistentStateLease {
-    fn drop(&mut self) {
-        // This is a private, create-new lease.  If removal fails, retain it so
-        // a later process fails closed rather than overwriting uncertain state.
-        let _ = fs::remove_file(&self.path);
+        let file = options.open(&path).map_err(crate::io_error)?;
+        if !file.metadata().map_err(crate::io_error)?.is_file() {
+            return Err(Error::Run(
+                "local-tool persistent lock is not a regular file".into(),
+            ));
+        }
+        file.try_lock()
+            .map_err(|_| Error::Run("local-tool persistent transcript is already in use".into()))?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -2660,7 +2656,7 @@ mod tests {
             2
         );
         assert_eq!(read_per_call_state(&state).unwrap().events, 2);
-        assert!(!state.with_extension("lock").exists());
+        drop(PersistentStateLease::acquire(&state).unwrap());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2817,6 +2813,37 @@ mod tests {
         assert!(error.contains("already in use"), "{error}");
         drop(lease);
         PersistentStateLease::acquire(&state).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn killed_service_releases_lock_without_trusting_a_stale_file() {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+        let root = std::env::temp_dir().join(format!(
+            "asb-mcp-lock-death-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("progress.json");
+        let lock = state.with_extension("lock");
+        let mut child = Command::new("python3")
+            .args(["-u", "-c", "import fcntl,sys; f=open(sys.argv[1], 'w'); fcntl.flock(f, fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"])
+            .arg(&lock).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
+        assert!(PersistentStateLease::acquire(&state).is_err());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(lock.exists());
+        drop(PersistentStateLease::acquire(&state).unwrap());
+        std::fs::remove_file(&lock).unwrap();
+        std::os::unix::fs::symlink(root.join("other"), &lock).unwrap();
+        assert!(PersistentStateLease::acquire(&state).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

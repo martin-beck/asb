@@ -672,7 +672,10 @@ function call(name, args) {
     input: request,
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
-    timeout: 45000,
+    // Large recorded tool transcripts can take longer than a short startup
+    // probe to load in an isolated guest. The overall agent deadline remains
+    // authoritative, and a failed call never advances the replay cursor.
+    timeout: 300000,
   });
   const stderr = String(child.stderr ?? "").trim();
   if (child.error) throw new Error(`ASB local tool service failed to start: ${child.error.message}`);
