@@ -3,7 +3,7 @@
 // Small project-local HTTP recorder/replayer embedded in ASB. It supplies the
 // bounded loopback protocol that ASB's tape module invokes.
 
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { performance } from "node:perf_hooks";
 import { dirname, isAbsolute, join } from "node:path";
@@ -148,6 +148,8 @@ const discoveryPath = process.env.ASB_TAPE_DISCOVERY_CATALOG;
 delete process.env.ASB_TAPE_DISCOVERY_CATALOG;
 const discoveryStore = process.env.ASB_TAPE_DISCOVERY_STORE;
 delete process.env.ASB_TAPE_DISCOVERY_STORE;
+const discoverySuggestions = process.env.ASB_TAPE_DISCOVERY_SUGGESTIONS;
+delete process.env.ASB_TAPE_DISCOVERY_SUGGESTIONS;
 const discoveryContext = process.env.ASB_TAPE_DISCOVERY_CONTEXT ? JSON.parse(process.env.ASB_TAPE_DISCOVERY_CONTEXT) : customPolicy?.workload;
 delete process.env.ASB_TAPE_DISCOVERY_CONTEXT;
 let discoveryCatalogFailures = Number(process.env.ASB_TAPE_DISCOVERY_CATALOG_FAILURES || 0);
@@ -163,11 +165,14 @@ delete process.env.ASB_TAPE_IGNORED_MISMATCH_JOURNAL;
 if ((ignoreProviderMismatch || discoveryPath) && (mode !== "replay" || !ignoredMismatchJournal || !isAbsolute(ignoredMismatchJournal))) usage("invalid ignored mismatch journal destination");
 if (discoveryPath && (!isAbsolute(discoveryPath) || !mismatchEvidence || !isAbsolute(mismatchEvidence))) usage("invalid normalizer discovery destination");
 if (discoveryStore && (!discoveryPath || !isAbsolute(discoveryStore))) usage("invalid normalizer exploration store");
+if (discoverySuggestions && (!discoveryPath || !isAbsolute(discoverySuggestions))) usage("invalid normalizer suggestion directory");
 let discoveryStoreFailures = 0;
 let discoveryStorePromoted = 0;
 const discoveryKnown = new Set(discoveryCatalog.map(profile => profile.id));
 function refreshDiscoveryStore() {
-  if (!discoveryStore || !existsSync(discoveryStore)) return;
+  if (!discoveryStore) return;
+  try { lstatSync(discoveryStore); }
+  catch (error) { if (error.code !== 'ENOENT') discoveryStoreFailures += 1; return; }
   try {
     const loaded = loadCandidates(prepareStore(discoveryStore));
     discoveryStoreFailures += loaded.failures;
@@ -622,6 +627,7 @@ let ignoredMismatchCount = 0;
 let replayEvidenceFailure = false;
 const discoveredNormalizers = [];
 let discoveryLimitReached = false;
+let suggestionDirectoryCreated = false;
 
 async function applyDiscovered(request) {
   const body = JSON.parse(request.body);
@@ -661,6 +667,7 @@ async function discoverRequestMatch(expected, actual) {
     catch { discoveryCatalogFailures += 1; return null; }
     finally { await Promise.all(supervisors.map(supervisor => supervisor.close().catch(() => {}))); }
     if (!found) return null;
+    if (found.kind === 'limited') { discoveryLimitReached = true; return null; }
     const id = found.id || `temporary-${discoveredNormalizers.length + 1}`;
     const supervisor = new NormalizerSupervisor([{id, source: found.source}], {callTimeoutMs: 100, startupTimeoutMs: 2000});
     let verified = false;
@@ -680,9 +687,16 @@ async function discoverRequestMatch(expected, actual) {
     }
     // A private, project-local file makes the proposed rule reviewable. Do
     // not consume a cassette response if the suggestion cannot be retained.
-    const path = join(dirname(mismatchEvidence), `suggested-normalizer-${discoveredNormalizers.length + 1}.mjs`);
-    try { writeFileSync(path, found.source, {encoding:'utf8', mode:0o600, flag:'wx'}); }
-    catch { await supervisor.close(); return null; }
+    const directory = discoverySuggestions || dirname(mismatchEvidence);
+    const path = join(directory, `suggested-normalizer-${discoveredNormalizers.length + 1}.mjs`);
+    try {
+      if (discoverySuggestions && !suggestionDirectoryCreated) {
+        mkdirSync(directory, {mode:0o700});
+        suggestionDirectoryCreated = true;
+      }
+      writeFileSync(path, found.source, {encoding:'utf8', mode:0o600, flag:'wx'});
+    }
+    catch { discoveryStoreFailures += 1; await supervisor.close(); return null; }
     discoveredNormalizers.push({supervisor, kind:found.kind, entries:found.entries, sequence:cursor + 1, progressed:false, promoted:false});
     return {...found, id, path};
   }

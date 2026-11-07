@@ -280,12 +280,22 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
         ] {
             let output = project.command_with_env(&args, &[("PATH", path.to_str().unwrap())]);
             assert!(!output.status.success());
-            assert!(
-                stderr(&output).contains("not a usable executable"),
-                "{}",
-                stderr(&output)
-            );
-            assert!(stderr(&output).contains("asb tool install codex"));
+            if args.contains(&"--llm-replay") {
+                assert!(
+                    stderr(&output).contains("replay tool `codex`")
+                        || stderr(&output)
+                            .contains("replay requires the locally installed tool `codex`"),
+                    "{}",
+                    stderr(&output)
+                );
+            } else {
+                assert!(
+                    stderr(&output).contains("not a usable executable"),
+                    "{}",
+                    stderr(&output)
+                );
+                assert!(stderr(&output).contains("asb tool install codex"));
+            }
             assert!(
                 !marker.exists(),
                 "an unusable selection must never start the host agent"
@@ -296,7 +306,7 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
             );
         }
     }
-    // Truly missing tools remain eligible for automatic installation.
+    // Replay must never run an automatic installer for a missing tool.
     std::fs::remove_file(&selected).unwrap();
     let output = project.command_with_env(
         &[
@@ -309,10 +319,8 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
         &[("PATH", path.to_str().unwrap())],
     );
     assert!(!output.status.success());
-    assert!(
-        project.0.join("npm-invoked").exists(),
-        "missing agent did not attempt automatic installation"
-    );
+    assert!(!project.0.join("npm-invoked").exists());
+    assert!(stderr(&output).contains("asb tool install codex"));
 }
 
 #[cfg(unix)]
@@ -3666,6 +3674,26 @@ main().catch(error=>{console.error(error);process.exitCode=1;});
             .count(),
         2
     );
+    let human = project.command(&[
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+        "--measurements",
+        "discovery-human",
+    ]);
+    assert!(human.status.success(), "{}", stderr(&human));
+    assert!(
+        stdout(&human).contains("possible replay fixes:"),
+        "{}",
+        stdout(&human)
+    );
+    assert!(
+        stdout(&human).contains("suggested-normalizer-1.mjs"),
+        "{}",
+        stdout(&human)
+    );
     // This module is intentionally absent from project.toml. Exploration
     // must still consider it with the actual workload context.
     project.write("normalizers/unselected.mjs", "export function normalizeToolResult({text, tool, workload}) { return workload?.id === 'bug-fix' && tool?.arguments?.command === 'cat one' ? text.replace('one 2', 'one 1') : text; }\n");
@@ -3962,6 +3990,19 @@ fn external_smoke_cannot_report_upstream_task_success_or_invent_steps() {
         std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o755)).unwrap();
         project.write("workloads/agentbench.txt", "Local adapter smoke only.\n");
+        project.write(
+            "workloads/agentbench/ASB-BUNDLE",
+            "THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5\n",
+        );
+        project.write(
+            "workloads/agentbench/source/configs/tasks/fixture.yaml",
+            "name: fixture\n",
+        );
+        project.write("workloads/agentbench/catalog.json", r#"{"schema_version":1,"workload":"agentbench","marker":"THUDM/AgentBench@d1e4a10db08c87075c78972e48ecc182be03e2d5","tasks":[{"id":"fixture","description":"AgentBench official task configuration fixture"}]}"#);
+        project.write(
+            "workloads/agentbench/asb-trial/ASB-ADAPTER-FIXTURE",
+            "agentbench/asb-adapter-trial-v1\n",
+        );
         project.write("benchmark.toml", "agent='pi'\nworkload='agentbench'\nprovider='cli2key'\nmodel='test-model'\nworkspace='workspace'\nlog_file='run.log'\n");
         project.write("workspace/external-workload/asb-trial/src/task.py", if passed {
             "def normalize(value: str) -> str:\n    return value.strip().lower().replace(' ', '-')\n\ndef suite_label() -> str:\n    return \"agentbench\"\n"
@@ -3974,6 +4015,7 @@ fn external_smoke_cannot_report_upstream_task_success_or_invent_steps() {
             &["--json", "--measurements", "measurements"],
         );
         assert_eq!(result.status.success(), passed, "{}", stderr(&result));
+        assert!(!result.stdout.is_empty(), "{}", stderr(&result));
         let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(json["process_success"], true);
         assert_eq!(json["workload_evaluation"], "adapter-smoke");
@@ -4948,7 +4990,7 @@ fn perf_rejects_forged_checksum_output_before_building_unverified_source() {
 
 #[cfg(unix)]
 #[test]
-fn flamegraph_only_configuration_installs_and_starts_perf_for_concurrent_replay() {
+fn flamegraph_only_configuration_uses_prepared_perf_for_concurrent_replay() {
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(2);
     let calls = project.0.join("perf-calls");
@@ -4978,6 +5020,8 @@ fn flamegraph_only_configuration_installs_and_starts_perf_for_concurrent_replay(
         project.0.join("host-bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    let installed = project.command_with_env(&["tool", "install", "perf"], &[("PATH", &path)]);
+    expect_success(&installed);
     let result = project.command_with_env(
         &[
             "run",

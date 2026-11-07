@@ -463,6 +463,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         command.env_remove("ASB_TAPE_MISMATCH_EVIDENCE");
         command.env_remove("ASB_TAPE_DISCOVERY_CATALOG");
         command.env_remove("ASB_TAPE_DISCOVERY_STORE");
+        command.env_remove("ASB_TAPE_DISCOVERY_SUGGESTIONS");
         command.env_remove("ASB_TAPE_DISCOVERY_CONTEXT");
         command.env_remove("ASB_TAPE_DISCOVERY_CATALOG_FAILURES");
         command.env_remove("ASB_TAPE_IGNORE_PROVIDER_MISMATCH");
@@ -588,6 +589,10 @@ impl ProxyAdapter for LlmtapeAdapter {
                     )
                     .map_err(|e| Error::Run(format!("cannot stage normalizer catalog: {e}")))?;
                     command.env("ASB_TAPE_DISCOVERY_CATALOG", path);
+                    command.env(
+                        "ASB_TAPE_DISCOVERY_SUGGESTIONS",
+                        scratch.suggestion_directory()?,
+                    );
                     if let Some(workload) = &request.discovery_workload {
                         let family = crate::workloads::descriptor(workload)
                             .map(|descriptor| descriptor.family);
@@ -1002,7 +1007,7 @@ impl ProxySession for RunningLlmtape {
                             .and_then(|name| name.to_str())
                             .unwrap_or("");
                         let metadata = std::fs::symlink_metadata(path).map_err(crate::io_error)?;
-                        if path.parent() != Some(self._scratch.path.as_path())
+                        if path.parent() != Some(self._scratch.suggestion_directory()?.as_path())
                             || !name.starts_with("suggested-normalizer-")
                             || !name.ends_with(".mjs")
                             || !metadata.is_file()
@@ -1098,11 +1103,11 @@ impl ProxySession for RunningLlmtape {
                     .join(", ");
                 self.replay_divergences.push(crate::proxy::ReplayDivergence {
                     kind: crate::runner::disposition::FailureKind::ProviderMismatch,
-                    reason: format!("approximate replay served {ignored} recorded response(s) despite provider request mismatch; journal: {}; first mismatch evidence: {}{}", retained_journal.display(), retained.display(), if automatic { format!("; {progressed}/{} proposed normalizers reached a later response; possible replay fixes: {}; {promoted} saved for future exploration; {failures} store errors; {catalog_failures} candidate checks unavailable; proposed normalizers: {}", automatic_suggestions.len(), if possible_fixes.is_empty() { "none yet" } else { &possible_fixes }, self._scratch.path.display()) } else { String::new() }),
+                    reason: format!("approximate replay served {ignored} recorded response(s) despite provider request mismatch; journal: {}; first mismatch evidence: {}{}", retained_journal.display(), retained.display(), if automatic { format!("; {progressed}/{} proposed normalizers reached a later response; possible replay fixes: {}; {promoted} saved for future exploration; {failures} store errors; {catalog_failures} candidate checks unavailable; proposed normalizers: {}", automatic_suggestions.len(), if possible_fixes.is_empty() { "none yet" } else { &possible_fixes }, self._scratch.suggestion_directory()?.display()) } else { String::new() }),
                 });
                 self.retained_mismatch_evidence = Some(retained);
                 self.retained_mismatch_journal = Some(retained_journal);
-                self._scratch.retain = automatic;
+                self._scratch.retain = false;
             }
             if rejected != 0 {
                 let mismatch = replay_mismatch_context(&value)
@@ -1132,7 +1137,7 @@ impl ProxySession for RunningLlmtape {
                 } else {
                     format!(
                         "; proposed normalizers: {}; journal: {}",
-                        self._scratch.path.display(),
+                        self._scratch.suggestion_directory()?.display(),
                         self.retained_mismatch_journal
                             .as_ref()
                             .map(|p| p.display().to_string())
@@ -1141,8 +1146,9 @@ impl ProxySession for RunningLlmtape {
                 };
                 let discovery = value.get("normalizer_exploration").map(|stats| {
                     let failures = stats.get("catalog_failures").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let store_failures = stats.get("failures").and_then(|v| v.as_u64()).unwrap_or(0);
                     let limit = stats.get("limit_reached").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if failures > 0 || limit { format!("; normalizer exploration: {failures} candidate checks unavailable{}", if limit { ", session candidate limit reached" } else { "" }) } else { String::new() }
+                    if failures > 0 || store_failures > 0 || limit { format!("; normalizer exploration: {failures} candidate checks unavailable, {store_failures} storage errors{}", if limit { ", exploration limit reached" } else { "" }) } else { String::new() }
                 }).unwrap_or_default();
                 return Err(Error::Run(format!(
                     "replay rejected {rejected} request(s) for {}{mismatch}{evidence}{suggestions}{discovery}; the normalized request or sequence differs from the recording",
@@ -1421,6 +1427,16 @@ struct Scratch {
 }
 
 impl Scratch {
+    fn suggestion_directory(&self) -> Result<PathBuf, Error> {
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| Error::Run("cannot derive normalizer suggestion directory".into()))?;
+        Ok(self
+            .path
+            .with_file_name(format!("{}.normalizers", name.to_string_lossy())))
+    }
+
     fn normalization_destination(&self) -> Result<PathBuf, Error> {
         let name = self
             .path

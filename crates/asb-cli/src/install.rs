@@ -954,7 +954,12 @@ pub(crate) fn ensure_execution_requirements_with_policy(
     let workloads_root = project::environment_path("ASB_WORKLOAD_DIR", invocation_dir)
         .unwrap_or_else(|| project::resolve(&root, &project_config.workloads_dir));
     if mode == Some(crate::tape::Mode::Replay) {
-        return validate_offline_replay_requirements(config, &tools_root, &workloads_root);
+        return validate_offline_replay_requirements(
+            config,
+            &tools_root,
+            &workloads_root,
+            ignore_collector,
+        );
     }
     let context = OperationContext::new_at(&root, &project_config, invocation_dir)
         .map_err(InstallFailure::into_public)?;
@@ -1044,11 +1049,33 @@ fn validate_offline_replay_requirements(
     config: &BenchmarkConfig,
     tools_root: &Path,
     workloads_root: &Path,
+    ignore_collector: bool,
 ) -> Result<(), Error> {
     let mut required = execution_tool_ids(config, Some(crate::tape::Mode::Replay));
     if let Some(measures) = config.measurements.as_ref().filter(|value| value.enabled) {
+        let expanded = crate::collectors::expand_dependencies(&measures.collectors);
+        let unavailable = if ignore_collector {
+            crate::collectors::unavailable_preflight(
+                crate::collectors::all(),
+                &expanded,
+                Some(tools_root),
+            )
+        } else {
+            Vec::new()
+        };
+        let selected: Vec<_> = measures
+            .collectors
+            .iter()
+            .filter(|selection| {
+                !unavailable.iter().any(|(name, _)| {
+                    crate::collectors::find(name)
+                        .is_some_and(|adapter| adapter.accepts_selection(selection))
+                })
+            })
+            .cloned()
+            .collect();
         required.extend(
-            crate::collectors::dependency_tools(&measures.collectors)
+            crate::collectors::dependency_tools(&selected)
                 .into_iter()
                 .map(str::to_owned),
         );

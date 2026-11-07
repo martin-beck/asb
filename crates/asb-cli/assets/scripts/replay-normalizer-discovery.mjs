@@ -5,6 +5,7 @@ import { normalizeToolResults, normalizeToolResultsAsync } from "./tool-result-n
 function results(body) {
   const found = [];
   normalizeToolResults(body, ({ text, tool, location }) => {
+    if (found.length >= 4096) throw new RangeError('discovery result limit');
     found.push({ text, tool, location });
     return text;
   });
@@ -40,9 +41,10 @@ export function temporaryNormalizerSource(entries) {
 export async function findNormalizer(expected, actual, candidates) {
   if (expected.method !== actual.method || expected.url !== actual.url) return null;
   if (!expected.body || !actual.body || typeof expected.body !== "object" || typeof actual.body !== "object") return null;
-  const left = results(expected.body);
-  const right = results(actual.body);
-  if (left.length !== right.length || left.length > 4096) return null;
+  let left, right;
+  try { left = results(expected.body); right = results(actual.body); }
+  catch (error) { if (error instanceof RangeError) return {kind:'limited'}; throw error; }
+  if (left.length !== right.length) return null;
   if (left.some((entry, index) => entry.location !== right[index].location
       || JSON.stringify(entry.tool) !== JSON.stringify(right[index].tool))) return null;
   const differing = left.map((entry, index) => ({expected: entry, actual: right[index]}))
@@ -76,11 +78,11 @@ export async function findNormalizer(expected, actual, candidates) {
 
   // Exact observed pairs are deliberately narrow. They remain hypotheses:
   // changed results can still be semantically significant.
-  if (differing.length > 64) return null;
+  if (differing.length > 64) return {kind:'limited'};
   const rules = new Map();
   for (const {expected: a, actual: b} of differing) {
     if (Buffer.byteLength(a.text) > 16384 || Buffer.byteLength(b.text) > 16384
-        || Buffer.byteLength(JSON.stringify(b.tool)) > 16384) return null;
+        || Buffer.byteLength(JSON.stringify(b.tool)) > 16384) return {kind:'limited'};
     const key = JSON.stringify([b.tool, b.text]);
     if (rules.has(key) && rules.get(key) !== a.text) return null;
     rules.set(key, a.text);
@@ -92,5 +94,5 @@ export async function findNormalizer(expected, actual, candidates) {
   // cannot be mistaken for an executable import by the worker's ABI check.
   const entries = [...rules];
   const source = temporaryNormalizerSource(entries);
-  return source ? { kind: "temporary", source, entries } : null;
+  return source ? { kind: "temporary", source, entries } : {kind:'limited'};
 }

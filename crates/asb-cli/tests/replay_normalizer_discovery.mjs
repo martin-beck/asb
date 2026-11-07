@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findNormalizer } from '../assets/scripts/replay-normalizer-discovery.mjs';
 import { normalizeToolResult } from '../assets/examples/normalizers/python-unittest-elapsed.mjs';
+import { NormalizerSupervisor } from '../assets/scripts/normalizer-supervisor.mjs';
+import { normalizeToolResultsAsync } from '../assets/scripts/tool-result-normalization.mjs';
 
 function request(text) {
   return {method: 'POST', url: '/v1/responses', body: {model: 'model', input: [
@@ -35,10 +37,21 @@ test('handles multiple distinct results but rejects conflicting or ambiguous ass
   const right = request('second');
   left.body.input.push({type:'function_call_output',call_id:'c1',output:'left'});
   right.body.input.push({type:'function_call_output',call_id:'c1',output:'right'});
-  assert.equal((await findNormalizer(left, right, [])).kind, 'temporary');
+  const candidate = await findNormalizer(left, right, []);
+  assert.equal(candidate.kind, 'temporary');
+  const supervisor = new NormalizerSupervisor([{id:'candidate',source:candidate.source}]);
+  try {
+    const apply = value => normalizeToolResultsAsync(value.body, context => supervisor.normalize(context));
+    assert.deepEqual(await apply(left), await apply(right));
+  } finally { await supervisor.close(); }
   right.body.input[2].output = 'second';
   assert.equal(await findNormalizer(left, right, []), null);
   left.body.input.splice(0, 1);
   right.body.input.splice(0, 1);
   assert.equal(await findNormalizer(left, right, []), null);
+});
+
+test('oversized temporary suggestions report a limit rather than a negative match', async () => {
+  const left=request('a'.repeat(17000)), right=request('b'.repeat(17000));
+  assert.deepEqual(await findNormalizer(left,right,[]),{kind:'limited'});
 });
