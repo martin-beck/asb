@@ -1752,7 +1752,8 @@ mod tests {
         let fixture = Fixture::new("swe-bench-lite", 1);
         fs::remove_file(fixture.root.join("sweep-results/plan.json")).unwrap();
         let text = fs::read_to_string(fixture.root.join("one.toml")).unwrap();
-        for value in ["0", "65", "-1", "'unbounded'"] {
+        let above_limit = (crate::benchmark::MAX_CONCURRENCY + 1).to_string();
+        for value in ["0", above_limit.as_str(), "-1", "'unbounded'"] {
             fs::write(
                 fixture.root.join("one.toml"),
                 text.replace("concurrency=1", &format!("concurrency={value}")),
