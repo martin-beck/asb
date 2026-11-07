@@ -336,6 +336,21 @@ class SourceContracts(unittest.TestCase):
             self.assertEqual(sources.remove_owned_image(client, receipt["tag"], ATTEMPT), "removed")
             self.assertEqual(removed, [(receipt["tag"], {"noprune": True})])
 
+    def test_configured_build_memory_is_bounded_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"ASB_SWEBENCH_BUILD_MEMORY_GIB": "16"}):
+            invoke, artifacts, _, _, calls = self.build_fixture(Path(temporary))
+            _, receipt = invoke()
+            self.assertIn("memory=16g", calls[0])
+            self.assertEqual(receipt["limits"]["memory_bytes"], 16 * 1024**3)
+            self.assertEqual(json.loads((artifacts / "source-image.json").read_bytes())["limits"], receipt["limits"])
+        for value in ["0", "257", "01", "-1", "8g", "", "1;echo bad"]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"ASB_SWEBENCH_BUILD_MEMORY_GIB": value}):
+                invoke, artifacts, _, _, calls = self.build_fixture(Path(temporary))
+                with self.assertRaisesRegex(sources.CatalogError, "ASB_SWEBENCH_BUILD_MEMORY_GIB"):
+                    invoke()
+                self.assertEqual(calls, [])
+                self.assertFalse((artifacts / "source-build").exists())
+
     def test_failed_timed_out_and_cancelled_builds_remove_only_their_owned_tag(self):
         for code, error in [(7, None), (0, InterruptedError("cancelled")),
                             (0, subprocess.TimeoutExpired("fixture", 1))]:

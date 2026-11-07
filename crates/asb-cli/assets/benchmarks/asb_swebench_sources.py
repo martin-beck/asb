@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import platform
 from pathlib import Path, PurePosixPath
 import re
@@ -22,6 +23,14 @@ MAX_EXPANDED_BYTES = 256 * 1024**2
 SOURCE_BUILD_TIMEOUT_SECONDS = 7200
 REQUIRED = {"task.yaml", "Dockerfile", "eval.sh", "gold.patch", "test.patch",
             "tests.json", "problem_statement.md"}
+
+
+def source_build_memory_gib():
+    """Return the explicit, bounded source-build memory limit in GiB."""
+    value = os.environ.get("ASB_SWEBENCH_BUILD_MEMORY_GIB", "8")
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", value) or not 1 <= int(value) <= 256:
+        raise CatalogError("ASB_SWEBENCH_BUILD_MEMORY_GIB must be an integer from 1 to 256")
+    return int(value)
 
 
 def read_sources(path, tasks=None, expected_sha256=SOURCE_SHA256):
@@ -158,6 +167,7 @@ def arm64_dockerfile(original):
 def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                 archive=None, command=None, executor=run_harness, yaml_loader=None,
                 expected_sha256=SOURCE_SHA256, journal=None, host_arch=None):
+    memory_gib = source_build_memory_gib()
     if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
         raise CatalogError("source builds require a fresh ASB attempt identity")
     archive = archive or Path(__file__).parent / SOURCE_ARCHIVE
@@ -186,11 +196,11 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                "architecture": "arm64" if native_arm else arch,
                "adaptation": "native-arm64-version-pinned-v1" if native_arm else None,
                "task_id": row["instance_id"], "tag": tag, "status": "building",
-               "limits": {"timeout_seconds": SOURCE_BUILD_TIMEOUT_SECONDS, "memory_bytes": 8 * 1024**3, "cpus": 2}}
+               "limits": {"timeout_seconds": SOURCE_BUILD_TIMEOUT_SECONDS, "memory_bytes": memory_gib * 1024**3, "cpus": 2}}
     path = artifacts / "source-image.json"
     atomic_write(path, encoded(receipt))
     arguments = command + ["buildx", "build", "--builder", "default", "--load",
-        "--resource", "memory=8g", "--resource", "cpu-quota=200000", "--resource", "cpu-period=100000",
+        "--resource", f"memory={memory_gib}g", "--resource", "cpu-quota=200000", "--resource", "cpu-period=100000",
         "--tag", tag]
     if native_arm:
         arguments += ["--platform", "linux/arm64"]
