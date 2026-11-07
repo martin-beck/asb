@@ -589,10 +589,13 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
 
 
 def propagate_guest_timeout(result, observation):
-    """Carry the owner-authored principal timeout through transport settlement."""
-    if result["metadata"].get("timed_out") is True:
+    """Carry a verified principal or transport deadline into both records."""
+    if result.get("timed_out") is True or result["metadata"].get("timed_out") is True:
         result["timed_out"] = True
         observation["timed_out"] = True
+        result["metadata"]["timed_out"] = True
+        if not result["metadata"].get("execution_failure"):
+            result["metadata"]["execution_failure"] = "agent execution exceeded its time budget"
 
 
 def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=None, preparation_budget=None, on_preparation_failure=None):
