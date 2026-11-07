@@ -33,6 +33,14 @@ def source_build_memory_gib():
     return int(value)
 
 
+def source_build_timeout_seconds():
+    """Return the bounded source-build deadline; independent of agent runtime."""
+    value = os.environ.get("ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS", str(SOURCE_BUILD_TIMEOUT_SECONDS))
+    if not re.fullmatch(r"[1-9][0-9]{0,5}", value) or not 1 <= int(value) <= 86400:
+        raise CatalogError("ASB_SWEBENCH_BUILD_TIMEOUT_SECONDS must be an integer from 1 to 86400")
+    return int(value)
+
+
 def read_sources(path, tasks=None, expected_sha256=SOURCE_SHA256):
     """Authenticate first, then stream bounded members without tar extraction."""
     path = Path(path)
@@ -168,6 +176,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                 archive=None, command=None, executor=run_harness, yaml_loader=None,
                 expected_sha256=SOURCE_SHA256, journal=None, host_arch=None):
     memory_gib = source_build_memory_gib()
+    build_timeout = source_build_timeout_seconds()
     if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
         raise CatalogError("source builds require a fresh ASB attempt identity")
     archive = archive or Path(__file__).parent / SOURCE_ARCHIVE
@@ -196,7 +205,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
                "architecture": "arm64" if native_arm else arch,
                "adaptation": "native-arm64-version-pinned-v1" if native_arm else None,
                "task_id": row["instance_id"], "tag": tag, "status": "building",
-               "limits": {"timeout_seconds": SOURCE_BUILD_TIMEOUT_SECONDS, "memory_bytes": memory_gib * 1024**3, "cpus": 2}}
+               "limits": {"timeout_seconds": build_timeout, "memory_bytes": memory_gib * 1024**3, "cpus": 2}}
     path = artifacts / "source-image.json"
     atomic_write(path, encoded(receipt))
     arguments = command + ["buildx", "build", "--builder", "default", "--load",
@@ -210,7 +219,7 @@ def build_image(client, row, dataset, artifacts, attempt, cancelled=None,
         "--file", str(context / "Dockerfile"), "--progress=plain", str(context)]
     try:
         with (artifacts / "source-build.log").open("xb") as log:
-            code = executor(arguments, artifacts, log, SOURCE_BUILD_TIMEOUT_SECONDS, cancelled=cancelled)
+            code = executor(arguments, artifacts, log, build_timeout, cancelled=cancelled)
         if code:
             if buildx_unavailable(command):
                 raise CatalogError("Docker Buildx is unavailable or could not be verified for the Docker command used by ASB; install the Docker Buildx CLI plugin for that user, verify `docker buildx version`, and retry the benchmark. Inspect source-build.log for details.")
