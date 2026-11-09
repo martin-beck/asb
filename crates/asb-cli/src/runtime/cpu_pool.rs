@@ -113,6 +113,65 @@ impl CpuPool {
         }
         Ok(())
     }
+
+    /// Check the current Linux execution thread against present, online and
+    /// effective-allowed CPU sets. This is an admission snapshot, not proof
+    /// that affinity was applied or that the target sets cannot later change.
+    pub fn validate_current_target(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            let present = read_small("/sys/devices/system/cpu/present")?;
+            let online = read_small("/sys/devices/system/cpu/online")?;
+            let status = read_small("/proc/thread-self/status")?;
+            let target = parse_target_sets(&present, &online, &status)?;
+            self.validate_target(&target.present, &target.online, &target.allowed)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("CPU pools require a Linux execution target".into())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_small(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot inspect target CPU information {path}: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read target CPU information {path}: {error}"))?;
+    if bytes.len() > 65_536 {
+        return Err(format!("target CPU information {path} exceeds 64 KiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("target CPU information {path} is not UTF-8"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct TargetSets {
+    present: BTreeSet<u32>,
+    online: BTreeSet<u32>,
+    allowed: BTreeSet<u32>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_target_sets(present: &str, online: &str, status: &str) -> Result<TargetSets, String> {
+    let mut allowed = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("Cpus_allowed_list:"));
+    let allowed_line = allowed
+        .next()
+        .ok_or("target thread status does not contain Cpus_allowed_list")?;
+    if allowed.next().is_some() {
+        return Err("target thread status has multiple Cpus_allowed_list values".into());
+    }
+    let parse = |s: &str| CpuPool::parse(s.trim(), 1).map(|pool| pool.cpus.into_iter().collect());
+    Ok(TargetSets {
+        present: parse(present)?,
+        online: parse(online)?,
+        allowed: parse(allowed_line)?,
+    })
 }
 
 #[cfg(test)]
@@ -178,5 +237,39 @@ mod tests {
                 .unwrap_err()
                 .contains("effective CPU set")
         );
+    }
+    #[test]
+    fn target_snapshot_uses_explicit_thread_allowlist_without_guessing() {
+        let target =
+            parse_target_sets("0-5\n", "0-4\n", "Name:\ttest\nCpus_allowed_list:\t1,3-4\n")
+                .unwrap();
+        assert_eq!(target.present, BTreeSet::from([0, 1, 2, 3, 4, 5]));
+        assert_eq!(target.online, BTreeSet::from([0, 1, 2, 3, 4]));
+        assert_eq!(target.allowed, BTreeSet::from([1, 3, 4]));
+        assert!(parse_target_sets("0-5", "0-5", "Name:\ttest\n").is_err());
+        assert!(
+            parse_target_sets("0-5", "0-5", "Cpus_allowed_list: 0\nCpus_allowed_list: 1\n")
+                .is_err()
+        );
+        assert!(parse_target_sets("0-5", "0-5", "Cpus_allowed_list: invalid\n").is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_target_snapshot_accepts_an_actual_online_allowed_cpu() {
+        let target = parse_target_sets(
+            &read_small("/sys/devices/system/cpu/present").unwrap(),
+            &read_small("/sys/devices/system/cpu/online").unwrap(),
+            &read_small("/proc/thread-self/status").unwrap(),
+        )
+        .unwrap();
+        let cpu = target
+            .allowed
+            .intersection(&target.online)
+            .find(|cpu| target.present.contains(cpu))
+            .expect("execution thread has an online allowed CPU");
+        CpuPool::parse(&cpu.to_string(), 1)
+            .unwrap()
+            .validate_current_target()
+            .unwrap();
     }
 }
