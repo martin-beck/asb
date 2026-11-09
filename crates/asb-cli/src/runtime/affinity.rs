@@ -15,6 +15,20 @@ pub struct AffinityMask {
 }
 
 impl AffinityMask {
+    /// Return the logical CPU IDs represented by this mask in ascending order.
+    pub fn cpus(&self) -> Vec<u32> {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(index, word)| {
+                (0..usize::BITS as usize).filter_map(move |bit| {
+                    (word & (1usize << bit) != 0)
+                        .then_some((index * usize::BITS as usize + bit) as u32)
+                })
+            })
+            .collect()
+    }
+
     /// Build a mask for a nonempty set of distinct logical CPU identifiers.
     pub fn new(cpus: &[u32]) -> Result<Self, String> {
         if cpus.is_empty() {

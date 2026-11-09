@@ -151,6 +151,10 @@ impl Session {
         self.0.url()
     }
 
+    pub(crate) fn launch_cpu_affinities(&self) -> Vec<Option<Vec<u32>>> {
+        self.0.launch_cpu_affinities()
+    }
+
     #[cfg(test)]
     pub fn stop(self) -> Result<(), Error> {
         self.0.stop()

@@ -7238,6 +7238,14 @@ fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
         if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"][0],
+                value["runtime"]["effective_boundary_cpus"]
+            );
             recorded.insert(
                 value["runtime"]["effective_boundary_cpus"][0]
                     .as_u64()
@@ -7357,6 +7365,14 @@ while (Date.now() < until) { Math.sqrt(Math.random()); }
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
         if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"][0],
+                value["runtime"]["effective_boundary_cpus"]
+            );
             recorded.insert(
                 value["runtime"]["effective_boundary_cpus"][0]
                     .as_u64()

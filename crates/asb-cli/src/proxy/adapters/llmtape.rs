@@ -221,6 +221,7 @@ struct Settings {
 
 struct RunningLlmtape {
     child: Option<Child>,
+    launch_cpu_affinity: Option<Vec<u32>>,
     builtin: bool,
     url: String,
     progress: Option<PathBuf>,
@@ -655,6 +656,10 @@ impl ProxyAdapter for LlmtapeAdapter {
         });
         Ok(Box::new(RunningLlmtape {
             child: child.0.take(),
+            launch_cpu_affinity: request
+                .cpu_affinity
+                .as_ref()
+                .map(crate::runtime::affinity::AffinityMask::cpus),
             builtin,
             url: format!("http://127.0.0.1:{port}/v1"),
             progress: (request.mode == Mode::Replay)
@@ -830,6 +835,9 @@ fn read_ready_port(path: &Path, child_id: u32) -> Result<Option<u16>, Error> {
 }
 
 impl ProxySession for RunningLlmtape {
+    fn launch_cpu_affinity(&self) -> Option<&[u32]> {
+        self.launch_cpu_affinity.as_deref()
+    }
     fn output_files(&self) -> Vec<PathBuf> {
         let mut outputs = self
             .normalization_evidence
@@ -1731,6 +1739,7 @@ mod tests {
                 .unwrap();
             child.wait().unwrap();
             let mut session = super::RunningLlmtape {
+                launch_cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
@@ -1795,6 +1804,7 @@ mod tests {
                 std::fs::write(&evidence, "{}").unwrap();
             }
             let mut session = super::RunningLlmtape {
+                launch_cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 replay_divergences: Vec::new(),
@@ -1926,6 +1936,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(session.launch_cpu_affinities(), vec![Some(vec![cpu])]);
         let ready = std::fs::read_dir(&root)
             .unwrap()
             .filter_map(Result::ok)

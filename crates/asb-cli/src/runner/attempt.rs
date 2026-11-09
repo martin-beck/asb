@@ -1228,9 +1228,16 @@ impl<'a> ReadyAttempt<'a> {
             }
         };
         if let Some(cpus) = options.cpu_allocation {
-            let Some(runtime_evidence) =
-                crate::runtime::evidence::launched(&config.runtime, cpus, evidence.guest.is_some())
-            else {
+            let proxy_affinities = prepared
+                .tape
+                .as_ref()
+                .map(tape::Session::launch_cpu_affinities);
+            let Some(runtime_evidence) = crate::runtime::evidence::launched(
+                &config.runtime,
+                cpus,
+                evidence.guest.is_some(),
+                proxy_affinities.as_deref(),
+            ) else {
                 let error = Error::Run("CPU allocation lost its runtime configuration".into());
                 if let Some(arrival) = arrival.as_mut() {
                     arrival.abort(&error.to_string());

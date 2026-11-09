@@ -160,6 +160,7 @@ fn capture_evidence_and_retained_diagnostics_survive_independent_cleanup_failure
         )
         .unwrap();
         let mut session = RunningLlmtape {
+            launch_cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),
@@ -227,6 +228,7 @@ fn sealed_incomplete_capture_retains_only_its_private_receipt_scratch() {
     let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
     child.wait().unwrap();
     let mut session = RunningLlmtape {
+        launch_cpu_affinity: None,
         ignore_provider_mismatch: false,
         ignore_provider_unconsumed: false,
         replay_divergences: Vec::new(),
@@ -466,6 +468,7 @@ fn replay_finish_reports_absent_and_malformed_progress_then_is_idempotent() {
             fs::write(path, contents).unwrap();
         }
         let mut session = RunningLlmtape {
+            launch_cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),
@@ -510,6 +513,7 @@ fn replay_finish_reports_only_validated_structural_mismatch_context() {
         let progress = root.0.join(crate::tools::runtime::unique_id());
         fs::write(&progress, contents).unwrap();
         let mut session = RunningLlmtape {
+            launch_cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             replay_divergences: Vec::new(),

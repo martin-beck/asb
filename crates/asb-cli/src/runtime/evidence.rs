@@ -36,6 +36,7 @@ pub fn launched(
     settings: &RuntimeSettings,
     cpus: &[u32],
     managed_container: bool,
+    proxy_affinities: Option<&[Option<Vec<u32>>]>,
 ) -> Option<serde_json::Value> {
     let mut value = planned(settings, Some(cpus))?;
     value["placement_status"] = serde_json::json!(if managed_container {
@@ -44,7 +45,22 @@ pub fn launched(
         "native_launcher_verified_before_exec"
     });
     value["effective_boundary_cpus"] = serde_json::json!(cpus);
-    value["proxy_placement_status"] = serde_json::json!("not_recorded");
+    let mut expected = cpus.to_vec();
+    expected.sort_unstable();
+    let proxy_status = match proxy_affinities {
+        None => "not_applicable",
+        Some(hops)
+            if !hops.is_empty()
+                && hops
+                    .iter()
+                    .all(|hop| hop.as_deref() == Some(expected.as_slice())) =>
+        {
+            "verified_before_exec"
+        }
+        Some(_) => "incomplete_or_mismatched",
+    };
+    value["proxy_placement_status"] = serde_json::json!(proxy_status);
+    value["proxy_launch_cpu_affinities"] = serde_json::json!(proxy_affinities);
     Some(value)
 }
 
@@ -77,7 +93,7 @@ mod tests {
             std::env::consts::ARCH
         );
         assert!(evidence.get("effective_replica_cpus").is_none());
-        let launched = launched(&settings, &[1, 3], false).unwrap();
+        let launched = launched(&settings, &[1, 3], false, None).unwrap();
         assert_eq!(
             launched["placement_status"],
             "native_launcher_verified_before_exec"
@@ -86,10 +102,18 @@ mod tests {
             launched["effective_boundary_cpus"],
             serde_json::json!([1, 3])
         );
-        assert_eq!(launched["proxy_placement_status"], "not_recorded");
+        assert_eq!(launched["proxy_placement_status"], "not_applicable");
         assert_eq!(
-            super::launched(&settings, &[1, 3], true).unwrap()["placement_status"],
+            super::launched(&settings, &[1, 3], true, Some(&[Some(vec![1, 3])])).unwrap()["placement_status"],
             "managed_container_verified_before_execution"
+        );
+        assert_eq!(
+            super::launched(&settings, &[3, 1], false, Some(&[Some(vec![1, 3])])).unwrap()["proxy_placement_status"],
+            "verified_before_exec"
+        );
+        assert_eq!(
+            super::launched(&settings, &[1, 3], false, Some(&[None])).unwrap()["proxy_placement_status"],
+            "incomplete_or_mismatched"
         );
     }
 }

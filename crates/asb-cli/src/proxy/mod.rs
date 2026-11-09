@@ -328,6 +328,11 @@ pub(crate) fn runtime_inputs(
 /// An owned hop. Both shutdown methods must be safe to call more than once.
 pub(crate) trait ProxySession {
     fn url(&self) -> &str;
+    /// CPU set verified immediately before this hop's executable was started.
+    /// None means no verified placement is available for this hop.
+    fn launch_cpu_affinity(&self) -> Option<&[u32]> {
+        None
+    }
     /// Persistent outputs owned by this hop, not replay inputs or scratch.
     fn output_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
@@ -441,6 +446,13 @@ impl Chain {
 
     pub(crate) fn url(&self) -> &str {
         &self.url
+    }
+
+    pub(crate) fn launch_cpu_affinities(&self) -> Vec<Option<Vec<u32>>> {
+        self.hops
+            .iter()
+            .map(|hop| hop.launch_cpu_affinity().map(<[u32]>::to_vec))
+            .collect()
     }
 
     #[cfg(test)]
