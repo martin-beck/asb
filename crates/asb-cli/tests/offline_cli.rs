@@ -7686,3 +7686,52 @@ fn cross_host_cpu_pool_configuration_qualification() {
             .collect()
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools and at least two allowed CPUs"]
+fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(1);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        cpus[0], cpus[1]
+    )
+    .unwrap();
+    drop(config);
+    let mut command = project.invocation(
+        &project.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[],
+    );
+    asb_cli::runtime::affinity::AffinityMask::new(&[cpus[0]])
+        .unwrap()
+        .prepare_command(&mut command)
+        .unwrap();
+    let output = command.output().unwrap();
+    expect_failure(&output, "outside the execution target's effective CPU set");
+    assert!(!project.0.join("run.log").exists());
+    assert!(!project.0.join(".asb/execution-plans").exists());
+}
