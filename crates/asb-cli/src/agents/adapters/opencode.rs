@@ -23,16 +23,17 @@ const NPM_MANIFEST: &str = r#"{
 const LOCAL_TOOL_TIMEOUT_MS: u64 = 86_400_000;
 // OpenCode regenerates these private output and delegated-task identifiers on
 // replay; the actual tool output and task state remain comparison-significant.
-// Its first system message also carries the generated `Today's date:` line.
-// That startup metadata is not part of the workload prompt, so normalize only
-// that one line and retain every other date as comparison-significant.
+// Its first system message also carries the generated `Today's date:` line in
+// its `<env>` block. That startup metadata is not part of the workload prompt,
+// so normalize only that exact line and retain every other date as
+// comparison-significant.
 const TAPE_WIRE_EXTENSION: &str = r#"
 export function normalizeRequest(request) {
   const body = request?.body;
   if (request?.url?.endsWith('/chat/completions') && Array.isArray(body?.messages)
       && body.messages[0]?.role === 'system' && typeof body.messages[0]?.content === 'string') {
     body.messages[0].content = body.messages[0].content.replace(
-      /((?:^|\n)Today's date:[ \t]+)(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/,
+      /(\n  Today's date:[ \t]+)(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b(?=[ \t]+\d{4}\n<\/env>)/,
       '$1<asb-opencode-system-date>',
     );
   }
@@ -841,7 +842,7 @@ mod tests {
 const request = (date, policy = 'keep policy text', user = 'keep user text', later = 'keep later system text', url = '/v1/chat/completions') => ({
   url,
   body: { messages: [
-    { role: 'system', content: `OpenCode startup.\nToday's date: ${date}\n${policy}` },
+    { role: 'system', content: `OpenCode startup.\n<env>\n  Today's date: ${date} 2026\n</env>\n${policy}` },
     { role: 'user', content: user },
     { role: 'system', content: later },
   ] },
@@ -850,7 +851,7 @@ const one = normalizeRequest(request('Mon Jan 01'));
 const two = normalizeRequest(request('Tue Feb 27'));
 if (JSON.stringify(one) !== JSON.stringify(two)) throw new Error('generated date was not normalized');
 if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'Policy date: Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'Policy date: Wed Mar 06')))) throw new Error('first-system policy date was normalized');
-const multiline = date => normalizeRequest({ url: '/v1/chat/completions', body: { messages: [{ role: 'system', content: `Startup.\nToday's date:\nPolicy date: ${date}` }] } });
+const multiline = date => normalizeRequest({ url: '/v1/chat/completions', body: { messages: [{ role: 'system', content: `Startup.\n<env>\n  Today's date:\nPolicy date: ${date}\n</env>` }] } });
 if (JSON.stringify(multiline('Tue Feb 27')) === JSON.stringify(multiline('Wed Mar 06'))) throw new Error('newline-separated policy date was normalized');
 if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'date Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'date Wed Mar 06')))) throw new Error('user date was normalized');
 if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'keep user text', 'date Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'keep user text', 'date Wed Mar 06')))) throw new Error('later system date was normalized');
