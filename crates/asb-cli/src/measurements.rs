@@ -1200,7 +1200,7 @@ impl Session {
     /// fatal: an ignored measurement cannot imply safe ownership or a record.
     pub(crate) fn finish_ignoring_collector_failures<'a>(
         mut self,
-        measurement: RunMeasurement<'a>,
+        mut measurement: RunMeasurement<'a>,
     ) -> Result<Vec<String>, String> {
         let mut errors = Vec::new();
         if let Err(error) = self.stop_collector_processes(false) {
@@ -1239,10 +1239,19 @@ impl Session {
         }
         self.run_finishing = true;
         if cleanup_unconfirmed {
-            return Err(format!(
-                "collector cleanup is unconfirmed; {}",
-                errors.join("; ")
-            ));
+            // Cleanup uncertainty remains a fatal custody failure, but it must
+            // still publish a terminal record. Without one, comparison cannot
+            // distinguish this failed attempt from an absent measurement and
+            // a cohort can silently lose a selected replica.
+            measurement.status = crate::runner::disposition::RunStatus::Failed;
+            measurement.success = false;
+            measurement.failure_kind =
+                Some(crate::runner::disposition::FailureKind::CollectorError);
+            measurement.failure_reason = Some("collector cleanup is unconfirmed");
+            measurement.success_rate = None;
+            let custody_error = format!("collector cleanup is unconfirmed; {}", errors.join("; "));
+            write_json(&self.dir.join("run.json"), &measurement)?;
+            return Err(custody_error);
         }
         write_json(
             &self.dir.join("tool-calls.json"),
@@ -2355,7 +2364,7 @@ mod tests {
         // exporting components must not replace total time with the 2ms run
         // metric or include any later collector/report finalization delay.
         session.lifecycle.last_mut().unwrap().elapsed_us = 7_500_000;
-        session.finish(run).expect("finish");
+        session.finish(run.clone()).expect("finish");
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("summary.json")).unwrap()).unwrap();
         assert_eq!(parsed["success_rate"], 1.0);
@@ -2381,6 +2390,26 @@ mod tests {
         assert!(dir.join("normalized-consumer.json").is_file());
         assert_eq!(analysis["observations"][0]["unit"], "ms");
         assert_eq!(analysis["findings"].as_array().unwrap().len(), 3);
+
+        // Custody uncertainty is fatal, but comparison still needs a terminal
+        // record instead of treating the attempt as absent.
+        let failed_dir = std::env::temp_dir().join(format!("asb-measure-failed-{}", unix_ms()));
+        let mut failed_session =
+            Session::start_with_collectors(&failed_dir, &[], None).expect("failed session");
+        failed_session.test_collector_cleanup_unconfirmed = true;
+        let error = failed_session
+            .finish_ignoring_collector_failures(run)
+            .expect_err("unconfirmed cleanup is fatal");
+        assert!(error.contains("collector cleanup is unconfirmed"));
+        let failed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(failed_dir.join("run.json")).unwrap())
+                .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["failure_kind"], "collector_error");
+        assert_eq!(failed["failure_reason"], "collector cleanup is unconfirmed");
+        assert_eq!(failed["success"], false);
+        assert_eq!(failed["process_success"], true);
+        let _ = fs::remove_dir_all(failed_dir);
         let _ = fs::remove_dir_all(dir);
     }
 
