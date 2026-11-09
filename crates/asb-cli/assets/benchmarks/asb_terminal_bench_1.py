@@ -339,7 +339,9 @@ class TerminalBenchTask:
                 sessions_logs_path=paths.sessions_path, agent_logs_path=paths.agent_logging_dir,
                 commands_path=paths.commands_path, disable_recording=self.handler.task.disable_asciinema)
             self.terminal.start()
-            verify_compose_cpu_set(self.client, self.attempt, self.cpu_set)
+            if self.cpu_set is not None:
+                config = json.loads(self.terminal._compose_manager.asb_config.read_text())
+                verify_compose_cpu_set(self.client, self.attempt, self.cpu_set, config["services"])
             container = self.terminal.container
             self.original_networks = original_networks(container)
             self.workspace = ManagedDockerWorkspace.attach(self.client, container, self.attempt,

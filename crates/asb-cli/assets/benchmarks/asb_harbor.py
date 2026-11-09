@@ -502,7 +502,9 @@ class HarborTask:
                 mounts=mounts, logger=logging.getLogger("asb.original-harbor"))
             self.environment_source = start_environment(self.environment,public,self.wait,
                 self.task.config.environment.build_timeout_sec + 120)
-            verify_compose_cpu_set(self.client, self.attempt, self.cpu_set)
+            if self.cpu_set is not None:
+                config = json.loads((self.artifacts / "harbor-compose.json").read_text())
+                verify_compose_cpu_set(self.client, self.attempt, self.cpu_set, config["services"])
             containers = self.client.containers.list(filters={"label":["asb.attempt=" + self.attempt,
                 "com.docker.compose.service=main"]})
             if len(containers) != 1:

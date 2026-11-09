@@ -56,7 +56,7 @@ def apply_compose_cpu_set(service, cpus):
     service["cpuset"] = requested
 
 
-def verify_compose_cpu_set(client, attempt, cpus):
+def verify_compose_cpu_set(client, attempt, cpus, services=None):
     """Verify every running owned service; an empty result is not evidence."""
     if cpus is None:
         return
@@ -64,11 +64,19 @@ def verify_compose_cpu_set(client, attempt, cpus):
     if not containers:
         raise ExecutionError("no running owned Compose containers available for CPU verification")
     expected = ",".join(map(str, cpus))
+    observed_services = set()
     for container in containers:
         labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
         if labels.get("asb.owner") != "asb" or labels.get("asb.attempt") != attempt:
             raise ExecutionError("Compose CPU verification found a container outside this attempt")
+        service = labels.get("com.docker.compose.service")
+        if services is not None:
+            if service not in services:
+                raise ExecutionError("Compose CPU verification found an undeclared service")
+            observed_services.add(service)
         verify_container_cpu_set(container, expected)
+    if services is not None and observed_services != set(services):
+        raise ExecutionError("not every declared Compose service has a running verified container")
 
 
 def require_native_compose_service(service):

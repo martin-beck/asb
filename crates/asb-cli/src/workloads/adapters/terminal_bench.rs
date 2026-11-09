@@ -165,7 +165,12 @@ impl super::WorkloadAdapter for TerminalBenchAdapter {
                 self.engine.tool()
             ));
         }
-        crate::workloads::remote::launch(
+        let launch = if context.cpu_allocation.is_some() {
+            crate::workloads::remote::launch_with_cpu_allocation
+        } else {
+            crate::workloads::remote::launch
+        };
+        launch(
             self.engine.tool(),
             &self.engine.script(),
             None,

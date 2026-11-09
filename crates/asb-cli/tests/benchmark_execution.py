@@ -136,6 +136,20 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNTIME.ExecutionError, "outside this attempt"):
             RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
 
+    def test_compose_verification_requires_each_declared_service(self):
+        def service(name):
+            item = Mock()
+            item.attrs = {"Config": {"Labels": {"asb.owner": "asb", "asb.attempt": "asb-test", "com.docker.compose.service": name}}}
+            item.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"Cpus_allowed_list:\t1,3\n")
+            return item
+        client = Mock()
+        client.containers.list.return_value = [service("main"), service("database")]
+        RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}, "database": {}})
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "not every"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}, "database": {}, "worker": {}})
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "undeclared"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}})
+
     def test_cpu_list_validation_rejects_duplicates_and_unbounded_ranges(self):
         self.assertEqual(RUNTIME._parse_cpu_list("1,3-4,5"), {1, 3, 4, 5})
         for value in ["", "1,,2", "1-0", "1,1", "0-65536", "1048576", "1-2-3"]:
