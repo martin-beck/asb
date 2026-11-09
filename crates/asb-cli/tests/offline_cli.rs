@@ -7141,3 +7141,110 @@ fn sidecar_follows_same_origin_redirects_but_refuses_cross_origin_credentials() 
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "runtime CPU pool remains gated pending complete qualification"]
+fn isolated_cpu_pool_two_replica_replay_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(2);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        cpus[0], cpus[1]
+    )
+    .unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"const fs = require('fs');
+const {spawnSync} = require('child_process');
+const status = () => fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+const child = spawnSync('/bin/sh', ['-c', "sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status"], {encoding:'utf8'});
+if (child.status !== 0) process.exit(19);
+fs.appendFileSync(process.env.ASB_FIXTURE_CPU_LOG, status() + ':' + child.stdout.trim() + '\n');
+"#;
+    assert!(script.contains("const fs = require('fs');"));
+    let proxy_hook = r#"const endpoint = config.providers.asb.baseUrl;
+const port = new URL(endpoint).port;
+const sockets = spawnSync('ss', ['-ltnp'], {encoding:'utf8'});
+const row = sockets.stdout.split('\n').find(line => line.includes(':' + port + ' ') && line.includes('pid='));
+if (!row) { console.error('proxy socket not found', port, sockets.stdout); process.exit(20); }
+const match = row.match(/pid=(\d+)/);
+const proxyStatus = fs.readFileSync('/proc/' + match[1] + '/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
+"#;
+    let script = script.replacen("const fs = require('fs');", hook, 1);
+    assert!(script.contains("const endpoint = config.providers.asb.baseUrl;"));
+    std::fs::write(
+        &script_path,
+        script.replacen(
+            "const endpoint = config.providers.asb.baseUrl;",
+            proxy_hook,
+            1,
+        ),
+    )
+    .unwrap();
+    let proxy_log = project.0.join("proxy-log");
+    let cpu_log = project.0.join("cpu-log");
+    let barrier = project.0.join("replica-barrier");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[
+            ("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap()),
+            ("ASB_FIXTURE_PROXY_LOG", proxy_log.to_str().unwrap()),
+            ("ASB_FIXTURE_BEHAVIOR", "replica-barrier"),
+            ("ASB_FIXTURE_BARRIER", barrier.to_str().unwrap()),
+        ],
+    );
+    expect_success(&result);
+    let observed = std::fs::read_to_string(cpu_log).unwrap();
+    let rows: std::collections::BTreeSet<_> = observed.lines().map(str::to_owned).collect();
+    assert_eq!(
+        rows,
+        cpus.into_iter().map(|cpu| format!("{cpu}:{cpu}")).collect()
+    );
+    let proxies = std::fs::read_to_string(proxy_log).unwrap();
+    let observed_proxies: std::collections::BTreeSet<_> =
+        proxies.lines().map(str::to_owned).collect();
+    assert_eq!(
+        observed_proxies,
+        cpus.into_iter().map(|cpu| cpu.to_string()).collect()
+    );
+    let plans = std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap();
+    let mut recorded = std::collections::BTreeSet::new();
+    for entry in plans {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            recorded.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap() as u32,
+            );
+        }
+    }
+    assert_eq!(recorded, cpus.into_iter().collect());
+    assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
+}
