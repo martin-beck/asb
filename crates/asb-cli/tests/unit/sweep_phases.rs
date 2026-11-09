@@ -120,6 +120,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-reservation-last",
             "campaign-admission",
             "campaign-settlement",
+            "campaign-settlement-partial",
             "pricing-preflight",
             "pricing-replay-offline",
         ] {
@@ -147,7 +148,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             if case == "pricing-replay-offline" {
                 command.env("OPENROUTER_API_KEY", "fixture-key");
             }
-            if case.starts_with("campaign-settlement") {
+            if case == "campaign-settlement" {
                 command.env("ASB_SWEEP_SETTLEMENT_FIXTURE", "1");
             }
             let child = command.output().unwrap();
@@ -195,7 +196,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     let inputs = root.join("input");
     let replicas = if case == "replicas" { 2 } else { 1 };
     for (index, name) in ["a", "b"].into_iter().enumerate() {
-        let model = if index == 1 && case.starts_with("campaign-settlement") {
+        let model = if index == 1 && case == "campaign-settlement" {
             "b"
         } else if case.starts_with("benchmark") && index == 0 {
             "bad"
@@ -215,6 +216,53 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     }
     let manifest = root.join("sweep.toml");
     std::fs::write(&manifest, "configs=['a.toml','b.toml']\n").unwrap();
+    if case == "campaign-settlement-partial" {
+        #[derive(Default)]
+        struct Probe {
+            before_barrier: usize,
+            before_grading: usize,
+        }
+        let state = Arc::new(Mutex::new(Probe::default()));
+        let callback = {
+            let state = Arc::clone(&state);
+            Arc::new(move |phase| {
+                let mut probe = state.lock().unwrap();
+                match phase {
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeSweepBarrier => {
+                        probe.before_barrier += 1
+                    }
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeGrading => {
+                        probe.before_grading += 1
+                    }
+                }
+            })
+        };
+        let _probe = crate::runner::test_support::CampaignSettlementProbeScope::new(root, callback);
+        run_with_options(
+            manifest.to_str().unwrap(),
+            Options {
+                json: true,
+                mode: Some(crate::tape::Mode::Replay),
+                cassette_root: Some(&inputs),
+                repeat: Some(1),
+                jobs: 1,
+                max_active_attempts: Some(1),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let probe = state.lock().unwrap();
+        assert_eq!(
+            probe.before_barrier, 0,
+            "partial scheduler admission must not create a sweep-wide barrier"
+        );
+        assert_eq!(
+            probe.before_grading, 2,
+            "partial scheduler admission must retain one grade per configuration"
+        );
+        return;
+    }
     if case == "campaign-settlement" {
         #[derive(Default)]
         struct Probe {
