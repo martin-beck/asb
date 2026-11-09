@@ -23,8 +23,19 @@ const NPM_MANIFEST: &str = r#"{
 const LOCAL_TOOL_TIMEOUT_MS: u64 = 86_400_000;
 // OpenCode regenerates these private output and delegated-task identifiers on
 // replay; the actual tool output and task state remain comparison-significant.
+// Its first system message also carries the generated `Today's date:` line.
+// That startup metadata is not part of the workload prompt, so normalize only
+// that one line and retain every other date as comparison-significant.
 const TAPE_WIRE_EXTENSION: &str = r#"
 export function normalizeRequest(request) {
+  const body = request?.body;
+  if (request?.url?.endsWith('/chat/completions') && Array.isArray(body?.messages)
+      && body.messages[0]?.role === 'system' && typeof body.messages[0]?.content === 'string') {
+    body.messages[0].content = body.messages[0].content.replace(
+      /((?:^|\n)Today's date:[ \t]+)(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\b/,
+      '$1<asb-opencode-system-date>',
+    );
+  }
   const visit = (value) => {
     if (typeof value === 'string') return value
       .replace(/(<task id=")ses_[A-Za-z0-9_-]+(" state="completed">)/g, '$1<asb-opencode-task-session>$2')
@@ -814,6 +825,45 @@ mod tests {
             name == "RIPGREP_CONFIG_PATH" && value.is_some_and(|value| value == config)
         }));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tape_wire_extension_normalizes_only_the_generated_first_system_date() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-opencode-wire-extension-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(
+            root.join("test.mjs"),
+            r#"import { normalizeRequest } from './extension.mjs';
+const request = (date, policy = 'keep policy text', user = 'keep user text', later = 'keep later system text', url = '/v1/chat/completions') => ({
+  url,
+  body: { messages: [
+    { role: 'system', content: `OpenCode startup.\nToday's date: ${date}\n${policy}` },
+    { role: 'user', content: user },
+    { role: 'system', content: later },
+  ] },
+});
+const one = normalizeRequest(request('Mon Jan 01'));
+const two = normalizeRequest(request('Tue Feb 27'));
+if (JSON.stringify(one) !== JSON.stringify(two)) throw new Error('generated date was not normalized');
+if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'Policy date: Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'Policy date: Wed Mar 06')))) throw new Error('first-system policy date was normalized');
+const multiline = date => normalizeRequest({ url: '/v1/chat/completions', body: { messages: [{ role: 'system', content: `Startup.\nToday's date:\nPolicy date: ${date}` }] } });
+if (JSON.stringify(multiline('Tue Feb 27')) === JSON.stringify(multiline('Wed Mar 06'))) throw new Error('newline-separated policy date was normalized');
+if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'date Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'date Wed Mar 06')))) throw new Error('user date was normalized');
+if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'keep user text', 'date Tue Feb 27'))) === JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'keep user text', 'date Wed Mar 06')))) throw new Error('later system date was normalized');
+if (JSON.stringify(normalizeRequest(request('Mon Jan 01', 'keep policy text', 'keep user text', 'keep later system text', '/v1/responses'))) === JSON.stringify(normalizeRequest(request('Tue Feb 27', 'keep policy text', 'keep user text', 'keep later system text', '/v1/responses')))) throw new Error('wrong endpoint was normalized');
+"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(status.success());
     }
 
     #[test]
