@@ -7,6 +7,7 @@ claimed to be local-host PIDs: the caller must establish that separately.
 """
 import json
 import math
+import os
 import platform
 from pathlib import Path
 import re
@@ -35,6 +36,39 @@ def _parse_cpu_list(value):
                 raise ExecutionError("container CPU allocation contains a duplicate")
             seen.add(cpu)
     return seen
+
+
+def requested_cpu_set():
+    """Read a validated allocation passed by the ASB workload controller."""
+    value = os.environ.get("ASB_CPU_ALLOCATION")
+    return None if value is None else sorted(_parse_cpu_list(value))
+
+
+def apply_compose_cpu_set(service, cpus):
+    """Place an ASB-controlled Compose service without discarding its constraints."""
+    if cpus is None:
+        return
+    requested = ",".join(map(str, cpus))
+    expected = _parse_cpu_list(requested)
+    previous = service.get("cpuset")
+    if previous is not None and _parse_cpu_list(previous) != expected:
+        raise ExecutionError("task Compose CPU set conflicts with the selected allocation")
+    service["cpuset"] = requested
+
+
+def verify_compose_cpu_set(client, attempt, cpus):
+    """Verify every running owned service; an empty result is not evidence."""
+    if cpus is None:
+        return
+    containers = client.containers.list(filters={"label": ["asb.attempt=" + attempt]})
+    if not containers:
+        raise ExecutionError("no running owned Compose containers available for CPU verification")
+    expected = ",".join(map(str, cpus))
+    for container in containers:
+        labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
+        if labels.get("asb.owner") != "asb" or labels.get("asb.attempt") != attempt:
+            raise ExecutionError("Compose CPU verification found a container outside this attempt")
+        verify_container_cpu_set(container, expected)
 
 
 def require_native_compose_service(service):

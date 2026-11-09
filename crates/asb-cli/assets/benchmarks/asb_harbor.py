@@ -20,7 +20,9 @@ import time
 import uuid
 
 from asb_docker import DockerSession, docker_command
-from asb_execution import ExecutionError, ManagedDockerWorkspace, require_native_compose_service, require_native_docker_host
+from asb_execution import (ExecutionError, ManagedDockerWorkspace, require_native_compose_service,
+                           require_native_docker_host, requested_cpu_set, apply_compose_cpu_set,
+                           verify_compose_cpu_set)
 from asb_resources import ResourceJournal, build_image_tag
 from asb_terminal_catalog import verify, tree_manifest, read_json, SPECS
 from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
@@ -68,13 +70,14 @@ def start_environment(environment, public, wait, budget):
         return "original-source-build-fallback"
 
 
-def scoped_configuration(config, attempt, artifacts, environment):
+def scoped_configuration(config, attempt, artifacts, environment, cpu_set=None):
     """Keep official service semantics without exposing host directories/ports."""
     services = config.get("services", {})
     if "main" not in services or len(services) > 16:
         raise ExecutionError("official Harbor task has an invalid service population")
     for name, service in services.items():
         require_native_compose_service(service)
+        apply_compose_cpu_set(service, cpu_set)
         if (service.get("privileged") or service.get("network_mode") == "host"
                 or service.get("pid") == "host" or service.get("ipc") == "host" or service.get("devices")):
             raise ExecutionError("task requires a separately isolated host for privileged/device/host-namespace access")
@@ -102,7 +105,7 @@ def scoped_configuration(config, attempt, artifacts, environment):
     return config
 
 
-def environment_class(command, attempt, artifacts, journal=None):
+def environment_class(command, attempt, artifacts, journal=None, cpu_set=None):
     from harbor.environments.base import ExecResult
     from harbor.environments.docker.docker import DockerEnvironment
     from harbor.environments.docker.runtime import ContainerRuntime
@@ -140,7 +143,7 @@ def environment_class(command, attempt, artifacts, journal=None):
                     return expanded
                 if len(expanded.stdout) > 4 * 1024**2:
                     raise ExecutionError("expanded Harbor Compose definition exceeds 4 MiB")
-                config = scoped_configuration(json.loads(expanded.stdout), attempt, artifacts, self.environment_dir)
+                config = scoped_configuration(json.loads(expanded.stdout), attempt, artifacts, self.environment_dir, cpu_set)
                 if journal is not None:
                     journal.compose(config)
                 private = artifacts / "harbor-compose.json"
@@ -434,6 +437,7 @@ class HarborTask:
             raise ExecutionError("prepared material transport failed: " + type(error).__name__) from None
 
     def __init__(self, client, catalog, task, artifacts, workload=None):
+        self.cpu_set = requested_cpu_set()
         self.workload = harbor_profile(workload) if workload is not None else None
         self.client, self.catalog_path, self.task_id = client, Path(catalog), task
         self.artifacts = Path(artifacts).absolute()
@@ -485,7 +489,7 @@ class HarborTask:
         mounts = [{"type":"bind", "source":str(path), "target":"/logs/" + name}
                   for name, path in [("agent",self.paths.agent_dir), ("verifier",self.paths.verifier_dir),
                                      ("artifacts",self.paths.artifacts_dir)]]
-        owned = environment_class(docker_command(), self.attempt, self.artifacts, self.journal)
+        owned = environment_class(docker_command(), self.attempt, self.artifacts, self.journal, self.cpu_set)
         self.previous_tempdir = tempfile.tempdir
         sdk_temp = self.artifacts / "sdk-tmp"
         sdk_temp.mkdir(mode=0o700)
@@ -498,6 +502,7 @@ class HarborTask:
                 mounts=mounts, logger=logging.getLogger("asb.original-harbor"))
             self.environment_source = start_environment(self.environment,public,self.wait,
                 self.task.config.environment.build_timeout_sec + 120)
+            verify_compose_cpu_set(self.client, self.attempt, self.cpu_set)
             containers = self.client.containers.list(filters={"label":["asb.attempt=" + self.attempt,
                 "com.docker.compose.service=main"]})
             if len(containers) != 1:
@@ -505,7 +510,7 @@ class HarborTask:
             container = containers[0]
             self.original_networks = original_networks(container)
             self.workspace = ManagedDockerWorkspace.attach(self.client, container, self.attempt,
-                self.task.config.environment.workdir or container.attrs["Config"].get("WorkingDir") or "/")
+                self.task.config.environment.workdir or container.attrs["Config"].get("WorkingDir") or "/", cpu_set=self.cpu_set)
             self.agent_timeout = self.task.config.agent.timeout_sec
             definition_sha = hashlib.sha256(json.dumps(tree_manifest(self.definition), sort_keys=True).encode()).hexdigest()
             self.invocation = {"identity":{"workload":self.workload, "task_id":self.task_id,

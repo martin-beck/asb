@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).parents[1] / "assets/benchmarks/asb_execution.py"
@@ -102,6 +102,40 @@ class API:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_compose_cpu_allocation_applies_to_services_and_rejects_conflicts(self):
+        services = [{}, {"cpuset": "1,3"}]
+        for service in services:
+            RUNTIME.apply_compose_cpu_set(service, [1, 3])
+            self.assertEqual(service["cpuset"], "1,3")
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "conflicts"):
+            RUNTIME.apply_compose_cpu_set({"cpuset": "1"}, [1, 3])
+        unchanged = {"cpuset": "1"}
+        RUNTIME.apply_compose_cpu_set(unchanged, None)
+        self.assertEqual(unchanged, {"cpuset": "1"})
+
+    def test_compose_verifies_every_owned_container_and_rejects_missing_or_wrong(self):
+        def container(output, attempt="asb-test"):
+            item = Mock()
+            item.attrs = {"Config": {"Labels": {"asb.owner": "asb", "asb.attempt": attempt}}}
+            item.exec_run.return_value = SimpleNamespace(exit_code=0, output=output)
+            return item
+        first = container(b"Cpus_allowed_list:\t1,3\n")
+        second = container(b"Cpus_allowed_list:\t1,3\n")
+        client = Mock()
+        client.containers.list.return_value = [first, second]
+        RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        first.exec_run.assert_called_once()
+        second.exec_run.assert_called_once()
+        second.exec_run.return_value.output = b"Cpus_allowed_list:\t1\n"
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "differs"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        client.containers.list.return_value = []
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "no running"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        client.containers.list.return_value = [container(b"Cpus_allowed_list:\t1,3\n", "other")]
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "outside this attempt"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+
     def test_cpu_list_validation_rejects_duplicates_and_unbounded_ranges(self):
         self.assertEqual(RUNTIME._parse_cpu_list("1,3-4,5"), {1, 3, 4, 5})
         for value in ["", "1,,2", "1-0", "1,1", "0-65536", "1048576", "1-2-3"]:

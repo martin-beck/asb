@@ -18,7 +18,9 @@ import sys
 import uuid
 
 from asb_docker import DockerSession, docker_command
-from asb_execution import ExecutionError, ManagedDockerWorkspace, require_native_compose_service, require_native_docker_host
+from asb_execution import (ExecutionError, ManagedDockerWorkspace, require_native_compose_service,
+                           require_native_docker_host, requested_cpu_set, apply_compose_cpu_set,
+                           verify_compose_cpu_set)
 from asb_resources import ResourceJournal
 from asb_terminal_catalog import verify, tree_manifest
 from asb_harness import (quiet_sdk, restore_task_networks, original_networks,
@@ -189,6 +191,7 @@ class TerminalBenchTask:
             raise ExecutionError("prepared material transport failed: " + type(error).__name__) from None
 
     def __init__(self, client, catalog, task, artifacts):
+        self.cpu_set = requested_cpu_set()
         self.client, self.catalog_path, self.task_id = client, Path(catalog), task
         self.artifacts = Path(artifacts).absolute()
         self.attempt = "asb-" + uuid.uuid4().hex
@@ -244,6 +247,7 @@ class TerminalBenchTask:
         command, attempt, artifacts = docker_command(), self.attempt, self.artifacts
         definition = self.definition
         journal = self.journal
+        cpu_set = self.cpu_set
 
         class ScopedCompose(DockerComposeManager):
             def get_docker_compose_command(manager, arguments):
@@ -275,6 +279,7 @@ class TerminalBenchTask:
                     raise ExecutionError("official task declares an invalid number of services")
                 for name, service in services.items():
                     require_native_compose_service(service)
+                    apply_compose_cpu_set(service, cpu_set)
                     if (service.get("privileged") or service.get("network_mode") == "host"
                             or service.get("pid") == "host" or service.get("ipc") == "host" or service.get("devices")):
                         raise ExecutionError("this task needs a separately isolated host for privileged/device/host-namespace access")
@@ -334,10 +339,11 @@ class TerminalBenchTask:
                 sessions_logs_path=paths.sessions_path, agent_logs_path=paths.agent_logging_dir,
                 commands_path=paths.commands_path, disable_recording=self.handler.task.disable_asciinema)
             self.terminal.start()
+            verify_compose_cpu_set(self.client, self.attempt, self.cpu_set)
             container = self.terminal.container
             self.original_networks = original_networks(container)
             self.workspace = ManagedDockerWorkspace.attach(self.client, container, self.attempt,
-                container.attrs["Config"].get("WorkingDir") or "/")
+                container.attrs["Config"].get("WorkingDir") or "/", cpu_set=self.cpu_set)
             definition_sha = hashlib.sha256(json.dumps(tree_manifest(self.definition), sort_keys=True).encode()).hexdigest()
             self.invocation = {"identity":{"workload":"terminal-bench-1.0", "task_id":self.task_id,
                 "attempt_id":self.attempt, "dataset":self.catalog["dataset"]}, "prompt":self.handler.instruction,
