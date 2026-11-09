@@ -111,6 +111,45 @@ pub(crate) fn analyze(rows: &[ReportRow<'_>]) -> Report {
 
 fn parse_window(row: &ReportRow<'_>, replica: usize) -> Option<(String, Window)> {
     let w = row.documents.get("execution-window")?;
+    let container_phase = w["schema_version"] == 1
+        && w["status"] == "observed"
+        && w["clock"] == "CLOCK_MONOTONIC"
+        && w["scope"] == "controller-observed-execution-phase"
+        && w["root"].is_null()
+        && w["live_observations"] == 0
+        && row
+            .documents
+            .get("kernel-pressure-summary")
+            .is_some_and(|summary| {
+                summary["status"] == "completed"
+                    && summary["scope"] == "owned-container-execution"
+                    && summary["scope_source"] == "verified-owned-container-cgroup"
+            });
+    if container_phase {
+        let domain = w["clock_domain"].as_str()?;
+        if domain.len() != 64 || !domain.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let release = w["release_bound_ns"].as_u64()?;
+        let begin = w["start_bound_ns"].as_u64()?;
+        let end = w["end_bound_ns"].as_u64()?;
+        let exit = w["exit_bound_ns"].as_u64()?;
+        if release != begin || begin >= end || end != exit {
+            return None;
+        }
+        return Some((
+            domain.into(),
+            Window {
+                replica,
+                pid: 0,
+                start_time_ticks: 0,
+                release_ns: release,
+                start_ns: begin,
+                end_ns: end,
+                exit_ns: exit,
+            },
+        ));
+    }
     let target = row.documents.get("measurement-target")?;
     if w["schema_version"] != 1
         || w["status"] != "observed"
@@ -188,7 +227,7 @@ fn fill(result: &mut Cohort, rows: &[&ReportRow<'_>]) -> Result<(), &'static str
         {
             return Err("different_clock_domains");
         }
-        if !roots.insert((window.pid, window.start_time_ticks)) {
+        if window.pid != 0 && !roots.insert((window.pid, window.start_time_ticks)) {
             return Err("duplicate_principal_generation");
         }
         result.clock_domain = Some(domain);
@@ -260,11 +299,16 @@ impl Report {
             let last = c.windows.iter().map(|w| w.exit_ns).max().unwrap_or(first);
             let duration = (last - first) as f64;
             let height = 130 + 30 * c.windows.len();
-            let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {height}\" role=\"img\" aria-label=\"Observed agent principal lifetimes\"><rect width=\"960\" height=\"{height}\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">Observed agent principal lifetimes</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">Solid: verified interior lifetime. Dashed: enclosing agent phase. Sleeping is included; CPU overlap is not inferred.</text>");
+            let container_phase = c.windows.iter().any(|window| window.pid == 0);
+            let title = if container_phase { "Observed owned-container execution phases" } else { "Observed agent principal lifetimes" };
+            let detail = if container_phase { "Solid: controller-observed execution phase for a verified owned container. It is not an agent PID lifetime or CPU residency." } else { "Solid: verified interior lifetime. Dashed: enclosing agent phase. Sleeping is included; CPU overlap is not inferred." };
+            let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {height}\" role=\"img\" aria-label=\"{title}\"><rect width=\"960\" height=\"{height}\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">{title}</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">{detail}</text>");
             let x = |ns: u64| 110.0 + 810.0 * (ns - first) as f64 / duration;
             for (i, w) in c.windows.iter().enumerate() {
                 let y = 77 + 30 * i;
-                svg.push_str(&format!("<text x=\"20\" y=\"{}\" font-family=\"sans-serif\" font-size=\"12\">Replica {}</text><line x1=\"{:.2}\" y1=\"{y}\" x2=\"{:.2}\" y2=\"{y}\" stroke=\"#64748b\" stroke-dasharray=\"4 3\"/><rect x=\"{:.2}\" y=\"{}\" width=\"{:.2}\" height=\"16\" rx=\"3\" fill=\"#047857\"><title>Replica {}: verified lifetime {:.3} ms, PID {}</title></rect>", y + 4, w.replica, x(w.release_ns), x(w.exit_ns), x(w.start_ns), y - 8, x(w.end_ns) - x(w.start_ns), w.replica, (w.end_ns - w.start_ns) as f64 / 1_000_000.0, w.pid));
+                let scope = if w.pid == 0 { "owned-container execution phase" } else { "verified lifetime" };
+                let identity = if w.pid == 0 { String::new() } else { format!(", PID {}", w.pid) };
+                svg.push_str(&format!("<text x=\"20\" y=\"{}\" font-family=\"sans-serif\" font-size=\"12\">Replica {}</text><line x1=\"{:.2}\" y1=\"{y}\" x2=\"{:.2}\" y2=\"{y}\" stroke=\"#64748b\" stroke-dasharray=\"4 3\"/><rect x=\"{:.2}\" y=\"{}\" width=\"{:.2}\" height=\"16\" rx=\"3\" fill=\"#047857\"><title>Replica {}: {} {:.3} ms{}</title></rect>", y + 4, w.replica, x(w.release_ns), x(w.exit_ns), x(w.start_ns), y - 8, x(w.end_ns) - x(w.start_ns), w.replica, scope, (w.end_ns - w.start_ns) as f64 / 1_000_000.0, identity));
             }
             for tick in 0..=5 {
                 let at = 110.0 + tick as f64 * 810.0 / 5.0;
@@ -293,6 +337,10 @@ mod tests {
         let root = json!({"pid":pid,"start_time_ticks":1});
         [("execution-window".into(), json!({"schema_version":1,"status":"observed","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"scope":"verified-native-agent-principal-lifetime","root":root,"live_observations":3,"release_bound_ns":release*1_000_000_000,"start_bound_ns":start*1_000_000_000,"end_bound_ns":end*1_000_000_000,"exit_bound_ns":exit*1_000_000_000})),
          ("measurement-target".into(),json!({"schema_version":1,"scope":"agent-process-tree","source":"owned-stopped-native-principal","root":root,"excluded_guardian":{"pid":900,"start_time_ticks":1},"excluded_controller_pid":901}))].into()
+    }
+    fn container_docs(begin: u64, end: u64) -> BTreeMap<String, Value> {
+        [("execution-window".into(), json!({"schema_version":1,"status":"observed","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"scope":"controller-observed-execution-phase","root":null,"live_observations":0,"release_bound_ns":begin*1_000_000_000,"start_bound_ns":begin*1_000_000_000,"end_bound_ns":end*1_000_000_000,"exit_bound_ns":end*1_000_000_000})),
+         ("kernel-pressure-summary".into(), json!({"status":"completed","scope":"owned-container-execution","scope_source":"verified-owned-container-cgroup"}))].into()
     }
     pub(super) fn row<'a>(
         slot: usize,
@@ -342,6 +390,28 @@ mod tests {
         assert!(graph.svg.contains("Replica 1"));
         assert!(graph.svg.contains("0.000</text>"));
         assert_eq!(graph.filename, "cohort-lifetimes-0001.svg");
+    }
+
+    #[test]
+    fn verified_owned_container_phases_form_a_clearly_scoped_cohort() {
+        let membership = membership(vec![1, 2], 2);
+        let first = container_docs(1, 6);
+        let second = container_docs(3, 8);
+        let metrics = BTreeMap::new();
+        let report = analyze(&[
+            row(1, &membership, &first, &metrics),
+            row(2, &membership, &second, &metrics),
+        ]);
+        let cohort = &report.cohorts[0];
+        assert_eq!(cohort.status, "observed");
+        assert_eq!(cohort.peak_live_principals_lower_bound, Some(2));
+        assert_eq!(
+            cohort.multiple_principals_overlap_lower_bound_ms,
+            Some(3000.0)
+        );
+        let graph = &report.graphs()[0].svg;
+        assert!(graph.contains("owned-container execution phase"));
+        assert!(!graph.contains("PID 0"));
     }
     #[test]
     fn sequential_and_touching_lifetimes_have_observed_zero_overlap() {
