@@ -7735,3 +7735,74 @@ fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
     assert!(!project.0.join("run.log").exists());
     assert!(!project.0.join(".asb/execution-plans").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools and at least two allowed CPUs"]
+fn isolated_cpu_pool_two_replica_sweep_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let expected: std::collections::BTreeSet<u64> =
+        groups.iter().map(|group| u64::from(group[0])).collect();
+    let project = replay_project(2);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        groups[0][0], groups[1][0]
+    )
+    .unwrap();
+    drop(config);
+    project.write("suite.toml", "configs=['benchmark.toml']\n");
+    let cassette = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &cassette,
+    );
+    let result = project.command_with_env(
+        &[
+            "sweep",
+            "suite.toml",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    let mut cpus = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            cpus.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap(),
+            );
+        }
+    }
+    assert_eq!(cpus, expected);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .exists()
+    );
+}

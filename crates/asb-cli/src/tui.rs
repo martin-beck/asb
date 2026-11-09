@@ -213,12 +213,18 @@ enum RuntimeEdit {
 impl App {
     fn sync_runtime_choice(&mut self) {
         use crate::runtime::wizard::AffinityChoice;
+        let previously_pooled = self.runtime_wizard.affinity == AffinityChoice::CpuPool;
         self.runtime_wizard.affinity =
             if self.pane(PaneKind::Runtime).selected.get(1) == Some(&true) {
                 AffinityChoice::CpuPool
             } else {
                 AffinityChoice::None
             };
+        if previously_pooled && self.runtime_wizard.affinity == AffinityChoice::None {
+            self.runtime_wizard.perf_record_scope =
+                crate::runtime::settings::PerfRecordScope::ProcessTree;
+            self.runtime_wizard.cpu_description = None;
+        }
     }
 
     fn runtime_settings(&self) -> Result<crate::runtime::settings::RuntimeSettings, Error> {
@@ -2187,11 +2193,17 @@ fn run_loop(
                 ..
             } if app.step == PaneKind::Runtime && modifiers.contains(KeyModifiers::CONTROL) => {
                 use crate::runtime::settings::PerfRecordScope;
-                app.runtime_wizard.perf_record_scope = match app.runtime_wizard.perf_record_scope {
-                    PerfRecordScope::ProcessTree => PerfRecordScope::CpuWide,
-                    PerfRecordScope::CpuWide => PerfRecordScope::ProcessTree,
-                };
-                app.describe_runtime();
+                if app.runtime_wizard.affinity == crate::runtime::wizard::AffinityChoice::CpuPool {
+                    app.runtime_wizard.perf_record_scope =
+                        match app.runtime_wizard.perf_record_scope {
+                            PerfRecordScope::ProcessTree => PerfRecordScope::CpuWide,
+                            PerfRecordScope::CpuWide => PerfRecordScope::ProcessTree,
+                        };
+                    app.describe_runtime();
+                } else {
+                    app.message = "Select CPU pool before enabling CPU-wide perf recording.".into();
+                    app.message_color = Color::Yellow;
+                }
             }
             KeyEvent {
                 code: KeyCode::Esc, ..
@@ -4844,6 +4856,15 @@ mod tests {
         assert_eq!(app.runtime_wizard.num_cpus_per_instance, "1");
         assert_eq!(app.pane(PaneKind::Runtime).selected, vec![false, true]);
         assert_eq!(app.runtime_settings().unwrap().cpu_pool.unwrap().cpus, "1");
+        app.runtime_wizard.perf_record_scope = crate::runtime::settings::PerfRecordScope::CpuWide;
+        app.runtime_wizard.cpu_description =
+            Some(crate::runtime::settings::CpuDescription::current());
+        app.pane_mut(PaneKind::Runtime).selected = vec![true, false];
+        app.sync_runtime_choice();
+        assert_eq!(
+            app.runtime_settings().unwrap(),
+            crate::runtime::settings::RuntimeSettings::default()
+        );
         assert_eq!(std::fs::read_to_string(&input).unwrap(), text);
         std::fs::remove_dir_all(root).unwrap();
     }
