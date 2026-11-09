@@ -3,7 +3,8 @@ use crate::{Error, benchmark};
 use serde::{Deserialize, Serialize};
 use std::sync::{Condvar, Mutex, mpsc};
 
-pub(crate) const MAX_JOBS: usize = 32;
+/// Sweep job admission shares the bounded replica concurrency contract.
+pub(crate) const MAX_JOBS: usize = benchmark::MAX_CONCURRENCY;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -657,9 +658,15 @@ mod tests {
             Scheduling::new(4, None, &[1]).unwrap().max_active_attempts,
             4
         );
+        assert_eq!(
+            Scheduling::new(MAX_JOBS, Some(MAX_JOBS), &[1])
+                .expect("the shared concurrency cap is schedulable")
+                .jobs,
+            crate::benchmark::MAX_CONCURRENCY
+        );
         for (jobs, budget, weights) in [
             (0, None, vec![1]),
-            (33, None, vec![1]),
+            (MAX_JOBS + 1, None, vec![1]),
             (1, Some(0), vec![1]),
             (1, Some(crate::benchmark::MAX_CONCURRENCY + 1), vec![1]),
             (2, Some(1), vec![2]),
