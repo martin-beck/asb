@@ -91,7 +91,7 @@ impl CollectorAdapter for PerfCollector {
         3072
     }
     fn description(&self) -> &'static str {
-        "process-tree performance counter samples"
+        "performance samples and process-tree counters"
     }
     fn id(&self) -> &'static str {
         "perf"
@@ -385,7 +385,7 @@ fn validate_record(
             "kernel_symbols": summary.get("kernel_symbols"),
             "partial_symbol_tree": symfs.as_ref().is_some_and(|(_, partial)| *partial),
             "inline_frames_omitted": symfs.as_ref().is_some_and(|(_, partial)| *partial),
-        "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
+        "reason": "Unknown frames can reflect missing agent, other sampled process or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Symbol custody follows the agent tree and may not include unrelated CPU-wide samples. Zero unknown frames alone does not prove complete debug information."
         }),
     )?;
     for capture in &captures {
