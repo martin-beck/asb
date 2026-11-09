@@ -44,7 +44,7 @@ impl CollectorAdapter for FlamegraphCollector {
             "flamegraph.json" => Some(ArtifactDisplay::Status {
                 class: "flamegraph-status",
                 label: "Flamegraph collector status",
-                suffix: "An SVG is embedded here when collection completed.",
+                suffix: "The graph is displayed in Charts when available.",
             }),
             _ => None,
         }

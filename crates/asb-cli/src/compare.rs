@@ -704,6 +704,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 let name = artifact.rsplit('/').next().unwrap_or(artifact);
                 match crate::collectors::display_artifact(name) {
                     Some(crate::collectors::ArtifactDisplay::Svg { class, label }) => {
+                        if class == "flamegraph" {
+                            continue;
+                        }
                         let svg =
                             prepared.data.previews.get(artifact).ok_or_else(|| {
                                 Error::Run("validated SVG preview is missing".into())
@@ -777,11 +780,76 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     {
         html.push_str(&chart_figure(stage, graph)?);
     }
+    for benchmark in benchmarks {
+        html.push_str(&flamegraph_figure(benchmark, &prepared.data.previews));
+    }
     html.push_str("</div></section><footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
     html.push_str(INTERACTIVE_SCRIPT);
     html.push_str(HTML_SCRIPT);
     fs::write(stage.join("report.html"), html)
         .map_err(|error| Error::Run(format!("cannot write HTML report: {error}")))
+}
+
+fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, String>) -> String {
+    let graph = benchmark
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.rsplit('/').next() == Some("flamegraph.svg"));
+    let status = benchmark
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.rsplit('/').next() == Some("flamegraph.json"));
+    let mut body = String::new();
+    if let Some(artifact) =
+        graph.filter(|_| benchmark.result_source != ResultSource::RecoveredOfficialGrade)
+    {
+        if let Some(svg) = previews.get(artifact) {
+            // An opaque-origin sandbox prevents the SVG's scripts and IDs from
+            // affecting the report or other graphs. CSP restricts subresources;
+            // it is not a general network isolation boundary.
+            // FlameGraph persists zoom in its URL, which opaque srcdoc frames
+            // cannot replace with the inherited parent URL. Preserve zoom and
+            // ignore only that specific browser security error.
+            let document = format!(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style><script>(()=>{{const replace=history.replaceState.bind(history);history.replaceState=(...args)=>{{try{{return replace(...args)}}catch(error){{if(error.name!=='SecurityError')throw error}}}}}})()</script>{svg}"
+            );
+            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
+        }
+    } else {
+        body.push_str("<p>Flamegraph unavailable or not recorded.</p>");
+    }
+    if let Some(status) = status {
+        let state = benchmark
+            .collector_documents
+            .get("flamegraph")
+            .and_then(|document| {
+                let state = document.get("status")?.as_str()?.to_owned();
+                let reason = document
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                Some((state, reason))
+            })
+            .unwrap_or_else(|| ("unknown".into(), None));
+        body.push_str(&format!(
+            " <a href=\"{}\">Collector status: {}</a>",
+            escape(status),
+            escape(&state.0)
+        ));
+        if let Some(reason) = state.1 {
+            body.push_str(&format!(" <span>{}</span>", escape(&reason)));
+        }
+    } else {
+        body.push_str(" <span>Collector status unavailable.</span>");
+    }
+    format!(
+        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}</figure>",
+        escape(&benchmark.label),
+        escape(&benchmark.agent),
+        escape(&benchmark.workload),
+        escape(trial_label(benchmark)),
+        escape(&attempt_label(benchmark))
+    )
 }
 
 fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String, Error> {
@@ -831,7 +899,7 @@ const MODAL_STYLE: &str = r#"body.chart-open{overflow:hidden}.chart-backdrop{dis
 
 const INLINE_SVG_STYLE: &str = r#".embedded-svg{display:block;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;margin:8px 0}.embedded-svg svg{display:block;width:100%;height:auto}.embedded-svg.perfetto-metric{width:min(760px,100%);max-height:260px}.embedded-svg.bpftrace-profile{width:min(760px,100%);max-height:300px}.embedded-svg.flamegraph{width:100%;max-height:520px}.embedded-svg.flamegraph svg{min-width:900px}"#;
 
-const JSON_DETAILS_STYLE: &str = ".json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}";
+const JSON_DETAILS_STYLE: &str = ".json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.flamegraph-chart{grid-column:1/-1;min-width:0}.flamegraph-chart[hidden]{display:none}.flamegraph-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.flamegraph-toolbar strong{flex:1;overflow-wrap:anywhere}.flamegraph-chart iframe{display:block;width:100%;height:500px;border:1px solid var(--line);margin:8px 0}.flamegraph-chart.expanded{position:fixed;z-index:40;inset:5vh 5vw;width:90vw;height:90vh;overflow:auto;box-shadow:0 0 0 100vmax #081522c9;background:white}.flamegraph-chart.expanded iframe{height:calc(100% - 100px);min-height:180px}";
 
 const INTERACTIVE_SCRIPT: &str = concat!(
     "<script>\n",
@@ -1554,6 +1622,93 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual browser validation; requires ASB_TEST_FLAMEGRAPH SVG"]
+    fn generate_flamegraph_browser_fixture() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/flamegraph-browser-fixture");
+        let svg = std::env::var_os("ASB_TEST_FLAMEGRAPH").expect("ASB_TEST_FLAMEGRAPH");
+        for (index, name) in ["one", "two"].iter().enumerate() {
+            let dir = root.join(format!("sweep-results/{index:03}-{name}/measurements"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                root.join(format!("{name}.toml")),
+                format!(
+                    "agent=\"{}\"\nworkload=\"bug-fix\"\nprovider=\"local\"\nmodel=\"m\"\n",
+                    if index == 0 { "codex" } else { "pi" }
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("run.json"),
+                r#"{"status":"completed","elapsed_ms":12}"#,
+            )
+            .unwrap();
+            std::fs::copy(&svg, dir.join("flamegraph.svg")).unwrap();
+            std::fs::write(
+                dir.join("flamegraph.json"),
+                r#"{"status":"completed","artifact":"flamegraph.svg"}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("sweep.toml"),
+            "configs=[\"one.toml\",\"two.toml\"]\n",
+        )
+        .unwrap();
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        println!(
+            "{}",
+            root.join("results/sweep-comparison/report.html").display()
+        );
+    }
+
+    #[test]
+    fn flamegraph_charts_distinguish_incomplete_and_missing_runs() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(root.join(format!(
+                "sweep-results/{}-{name}/measurements",
+                if name == "one" { "000" } else { "001" }
+            )))
+            .unwrap();
+            std::fs::write(
+                root.join(format!("{name}.toml")),
+                "agent=\"codex\"\nworkload=\"bug-fix\"\nprovider=\"local\"\nmodel=\"m\"\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("sweep.toml"),
+            "configs=[\"one.toml\",\"two.toml\"]\n",
+        )
+        .unwrap();
+        let dir = root.join("sweep-results/000-one/measurements");
+        std::fs::write(
+            dir.join("run.json"),
+            r#"{"status":"completed","elapsed_ms":12}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("flamegraph.json"),
+            r#"{"status":"unavailable","reason":"bad <capture>"}"#,
+        )
+        .unwrap();
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        let html =
+            std::fs::read_to_string(root.join("results/sweep-comparison/report.html")).unwrap();
+        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
+        assert!(html.contains("Collector status: unavailable"));
+        assert!(html.contains("bad &lt;capture&gt;"));
+        assert!(html.contains("Collector status unavailable."));
+        assert_eq!(
+            html.matches("Flamegraph unavailable or not recorded.")
+                .count(),
+            2
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn compares_measurements_and_writes_svg() {
         let root = std::env::temp_dir().join(format!(
             "asb-compare-{}",
@@ -1807,11 +1962,11 @@ mod tests {
             "<div class=\"embedded-svg bpftrace-profile\" aria-label=\"bpftrace profile SVG\"><svg>"
         ));
         assert!(report.contains("bpftrace profiles"));
-        assert!(report.contains("class=\"embedded-svg flamegraph\""));
+        assert!(report.contains("class=\"flamegraph-chart\""));
         assert!(report.contains("flamegraph.svg"));
-        assert!(report.contains(
-            "<div class=\"embedded-svg flamegraph\" aria-label=\"Flamegraph SVG\"><svg>"
-        ));
+        assert!(report.contains("sandbox=\"allow-scripts allow-modals\""));
+        assert!(report.contains("Collector status: completed"));
+        assert!(!report.contains("class=\"embedded-svg flamegraph\""));
         assert!(!report.contains("<object class=\"flamegraph\""));
         assert!(report.contains("Flamegraph collector status"));
         assert!(report.contains("class=\"interactive-chart\""));
