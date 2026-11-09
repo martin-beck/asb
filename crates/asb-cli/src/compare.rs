@@ -718,6 +718,24 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         label,
                         suffix,
                     }) => {
+                        if name == "perf-record-scope.json"
+                            && let Some(document) =
+                                benchmark.collector_documents.get("perf-record-scope")
+                            && document.get("scope").and_then(Value::as_str) == Some("cpu-wide")
+                            && let Some(cpus) =
+                                document.get("logical_cpus").and_then(Value::as_array)
+                            && !cpus.is_empty()
+                            && cpus.len() <= 65_536
+                            && let Some(ids) =
+                                cpus.iter().map(Value::as_u64).collect::<Option<Vec<_>>>()
+                        {
+                            let ids = ids
+                                .iter()
+                                .map(u64::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            previews.push_str(&format!("<p class=\"perf-record-scope\">CPU-wide perf recording on logical CPUs {}. Perf stat uses the agent process tree.</p>", escape(&ids)));
+                        }
                         if name == "perf-symbol-quality.json"
                             && let Some(document) =
                                 benchmark.collector_documents.get("perf-symbol-quality")
@@ -1845,6 +1863,10 @@ mod tests {
             root.join("sweep-results/000-one/measurements/perf-symbol-quality.json"),
             r#"{"kernel_symbols":{"status":"indeterminate","guidance":"unknown <frames>","address_map_guidance":"map hidden","build_id_guidance":"build unknown"}}"#,
         ).unwrap();
+        std::fs::write(
+            root.join("sweep-results/000-one/measurements/perf-record-scope.json"),
+            r#"{"schema_version":1,"scope":"cpu-wide","logical_cpus":[1,3],"perf_stat_scope":"agent-process-tree"}"#,
+        ).unwrap();
         run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
         assert!(
             root.join("results/sweep-comparison/comparison.json")
@@ -1998,6 +2020,8 @@ mod tests {
         assert!(!report.contains("<object class=\"flamegraph\""));
         assert!(report.contains("Flamegraph collector status"));
         assert!(report.contains("Kernel symbols: indeterminate."));
+        assert!(report.contains("CPU-wide perf recording on logical CPUs 1, 3."));
+        assert!(report.contains("perf stat remains agent-process-tree scoped"));
         assert!(report.contains("unknown &lt;frames&gt;"));
         assert!(report.contains("map hidden build unknown"));
         assert!(report.contains("class=\"interactive-chart\""));

@@ -105,7 +105,7 @@ impl CollectorAdapter for PerfCollector {
     fn prioritizes_artifact(&self, name: &str) -> bool {
         matches!(
             name,
-            "perf-symbol-quality.json" | "perf-symbol-custody.json"
+            "perf-symbol-quality.json" | "perf-symbol-custody.json" | "perf-record-scope.json"
         )
     }
     fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
@@ -119,6 +119,11 @@ impl CollectorAdapter for PerfCollector {
                 class: "perf-symbol-custody",
                 label: "Perf symbol custody",
                 suffix: "See the helper output for recorded images and unavailable debug files.",
+            }),
+            "perf-record-scope.json" => Some(ArtifactDisplay::Status {
+                class: "perf-record-scope",
+                label: "Perf recording scope",
+                suffix: "CPU-wide samples can include unrelated host, kernel and collector activity; perf stat remains agent-process-tree scoped. CPU leases do not reserve CPUs from other host activity.",
             }),
             _ => None,
         }
@@ -1298,6 +1303,12 @@ mod tests {
     fn symbol_quality_is_visible_in_reports() {
         use crate::collectors::CollectorAdapter;
         assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-quality.json"));
+        assert!(super::ADAPTER.prioritizes_artifact("perf-record-scope.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-record-scope.json")
+                .is_some()
+        );
         assert!(
             super::ADAPTER
                 .display_artifact("perf-symbol-quality.json")
