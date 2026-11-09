@@ -7251,7 +7251,7 @@ fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools, two allowed CPUs, ss and permission for system-wide perf"]
+#[ignore = "requires enabled CPU pools, two CPUs, ss, real flamegraph tools and system-wide perf permission"]
 fn isolated_cpu_pool_cpu_wide_perf_qualification() {
     use std::io::Write;
     let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
@@ -7269,11 +7269,20 @@ fn isolated_cpu_pool_cpu_wide_perf_qualification() {
     let perf = project.0.join(".asb-tools/perf/bin/perf");
     std::fs::create_dir_all(perf.parent().unwrap()).unwrap();
     std::fs::copy("/usr/bin/perf", &perf).unwrap();
+    let flamegraph_bin = std::path::PathBuf::from(
+        std::env::var_os("ASB_TEST_FLAMEGRAPH")
+            .expect("set ASB_TEST_FLAMEGRAPH to the real flamegraph tools directory"),
+    );
+    let destination = project.0.join(".asb-tools/flamegraph/bin");
+    std::fs::create_dir_all(&destination).unwrap();
+    for name in ["flamegraph", "stackcollapse-perf.pl"] {
+        std::fs::copy(flamegraph_bin.join(name), destination.join(name)).unwrap();
+    }
     let mut config = std::fs::OpenOptions::new()
         .append(true)
         .open(project.0.join("benchmark.toml"))
         .unwrap();
-    writeln!(config, "\n[runtime]\nperf_record_scope='cpu-wide'\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perf']", cpus[0], cpus[1]).unwrap();
+    writeln!(config, "\n[runtime]\nperf_record_scope='cpu-wide'\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perf','flamegraph']", cpus[0], cpus[1]).unwrap();
     drop(config);
     let script_path = project.0.join(".asb-tools/pi/bin/pi");
     let script = std::fs::read_to_string(&script_path).unwrap();
@@ -7371,6 +7380,11 @@ while (Date.now() < until) { Math.sqrt(Math.random()); }
         assert_eq!(stat["scope"], "agent-process-tree");
         let data = dir.join("perf.data");
         assert!(data.exists());
+        let graph =
+            std::fs::read_to_string(dir.join("flamegraph.svg")).expect("real flamegraph generated");
+        assert!(graph.contains("<svg") && graph.contains("<rect"));
+        let status = std::fs::read_to_string(dir.join("flamegraph.json")).unwrap();
+        assert!(status.contains("completed"), "{status}");
         let decoded = std::process::Command::new("/usr/bin/perf")
             .args(["script", "-F", "cpu", "-i"])
             .arg(&data)
