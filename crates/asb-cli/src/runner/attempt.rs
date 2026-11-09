@@ -126,7 +126,16 @@ impl<'a> ConfiguredAttempt<'a> {
         let tape_cassette = &context.tape_cassette;
         let mcp_tape_mode = context.mcp_tape_cassette.as_ref().map(|(mode, _)| *mode);
         let json = options.json;
-        let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
+        let runtime_evidence =
+            crate::runtime::evidence::planned(&config.runtime, options.cpu_allocation);
+        let _initial_policy = crate::planning::persist_with_dispatch_and_runtime(
+            project_root,
+            policy,
+            None,
+            None,
+            None,
+            runtime_evidence.as_ref(),
+        )?;
         let measurement_path = &context.measurement_path;
         let measurement_collectors: Vec<_> = policy
             .collectors
@@ -631,12 +640,15 @@ impl<'a> ReadyAttempt<'a> {
                 })
                 .transpose()?
                 .flatten();
-            let execution_plan = crate::planning::persist_with_dispatch(
+            let runtime_evidence =
+                crate::runtime::evidence::planned(&config.runtime, options.cpu_allocation);
+            let execution_plan = crate::planning::persist_with_dispatch_and_runtime(
                 project_root,
                 policy,
                 Some(effective_budgets),
                 Some(&workload_session.invocation().identity),
                 dispatch,
+                runtime_evidence.as_ref(),
             )?;
             let execution_plan_fingerprint = crate::planning::protocol_fingerprint_with_dispatch(
                 config,
