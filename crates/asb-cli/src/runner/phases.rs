@@ -551,7 +551,7 @@ mod tests;
 
 #[cfg(all(test, unix))]
 #[path = "../../tests/unit/runner_entry_support.rs"]
-pub(super) mod entry_test_support;
+pub(crate) mod entry_test_support;
 
 /// Log publication and measurement publication are independent post-grade
 /// obligations. Failure of either prevents a completion receipt, not grading.

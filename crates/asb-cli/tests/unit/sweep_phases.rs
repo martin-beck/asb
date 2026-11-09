@@ -4,6 +4,8 @@ use crate::test_support as support;
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use support::IsolatedEnvironment;
 
 thread_local! {static FAIL_INITIAL: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
@@ -117,6 +119,8 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-reservation-first",
             "campaign-reservation-last",
             "campaign-admission",
+            "campaign-settlement",
+            "campaign-settlement-partial",
             "pricing-preflight",
             "pricing-replay-offline",
         ] {
@@ -143,6 +147,9 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
                 .env("ASB_RUNTIME_EXECUTABLE",&runtime).env("ASB_SWEEP_PHASE_CASE",case);
             if case == "pricing-replay-offline" {
                 command.env("OPENROUTER_API_KEY", "fixture-key");
+            }
+            if case == "campaign-settlement" {
+                command.env("ASB_SWEEP_SETTLEMENT_FIXTURE", "1");
             }
             let child = command.output().unwrap();
             assert!(
@@ -183,12 +190,15 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
     let body = json!({"model":"fixture","tools":[{"type":"function","function":{"name":"fixture","parameters":{"type":"object"}}}],"messages":[]});
     let response = json!({"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"src/cli.py src/registry.py lookup"}]}]});
-    std::fs::write(&agent,format!("#!{}\nconst fs=require('node:fs');fs.appendFileSync({counter_js},process.cwd()+'\\n');const body={body};body.model=process.env.ASB_MODEL;fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(body)}}).then(async r=>{{if(!r.ok)throw new Error('fixture request');await r.text();fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({{schema_version:1,completed:true,steps:1,usage_complete:false,final_answer:'src/cli.py src/registry.py lookup'}}),{{mode:0o600}});console.log(JSON.stringify({response}));process.exitCode=process.env.ASB_MODEL==='bad'?7:0;}}).catch(()=>{{process.exitCode=9;}});\n",node.display())).unwrap();
+    let root_js = serde_json::to_string(root).unwrap();
+    std::fs::write(&agent,format!("#!{}\nconst fs=require('node:fs');fs.appendFileSync({counter_js},process.cwd()+'\\n');const root={root_js};const body={body};body.model=process.env.ASB_MODEL;const settlement=process.env.ASB_SWEEP_SETTLEMENT_FIXTURE==='1';async function waitForRelease(){{const release=root+'/release-b';fs.writeFileSync(root+'/b-held','');while(!fs.existsSync(release))await new Promise(r=>setTimeout(r,5));}}fetch(process.env.OPENAI_BASE_URL+'/chat/completions',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(body)}}).then(async r=>{{if(!r.ok)throw new Error('fixture request');await r.text();if(settlement&&body.model==='b')await waitForRelease();if(settlement&&body.model!=='b')fs.writeFileSync(root+'/a-execution-settled','');fs.writeFileSync(process.env.ASB_PI_SUMMARY_PATH,JSON.stringify({{schema_version:1,completed:true,steps:1,usage_complete:false,final_answer:'src/cli.py src/registry.py lookup'}}),{{mode:0o600}});console.log(JSON.stringify({response}));process.exitCode=body.model==='bad'?7:0;}}).catch(()=>{{process.exitCode=9;}});\n",node.display())).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
     let inputs = root.join("input");
     let replicas = if case == "replicas" { 2 } else { 1 };
     for (index, name) in ["a", "b"].into_iter().enumerate() {
-        let model = if case.starts_with("benchmark") && index == 0 {
+        let model = if index == 1 && case == "campaign-settlement" {
+            "b"
+        } else if case.starts_with("benchmark") && index == 0 {
             "bad"
         } else {
             "fixture"
@@ -206,6 +216,136 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     }
     let manifest = root.join("sweep.toml");
     std::fs::write(&manifest, "configs=['a.toml','b.toml']\n").unwrap();
+    if case == "campaign-settlement-partial" {
+        #[derive(Default)]
+        struct Probe {
+            before_barrier: usize,
+            before_grading: usize,
+        }
+        let state = Arc::new(Mutex::new(Probe::default()));
+        let callback = {
+            let state = Arc::clone(&state);
+            Arc::new(move |phase| {
+                let mut probe = state.lock().unwrap();
+                match phase {
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeSweepBarrier => {
+                        probe.before_barrier += 1
+                    }
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeGrading => {
+                        probe.before_grading += 1
+                    }
+                }
+            })
+        };
+        let _probe = crate::runner::test_support::CampaignSettlementProbeScope::new(root, callback);
+        run_with_options(
+            manifest.to_str().unwrap(),
+            Options {
+                json: true,
+                mode: Some(crate::tape::Mode::Replay),
+                cassette_root: Some(&inputs),
+                repeat: Some(1),
+                jobs: 1,
+                max_active_attempts: Some(1),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let probe = state.lock().unwrap();
+        assert_eq!(
+            probe.before_barrier, 0,
+            "partial scheduler admission must not create a sweep-wide barrier"
+        );
+        assert_eq!(
+            probe.before_grading, 2,
+            "partial scheduler admission must retain one grade per configuration"
+        );
+        return;
+    }
+    if case == "campaign-settlement" {
+        #[derive(Default)]
+        struct Probe {
+            before_barrier: usize,
+            before_grading: usize,
+        }
+        let state = Arc::new((Mutex::new(Probe::default()), Condvar::new()));
+        let callback = {
+            let state = Arc::clone(&state);
+            Arc::new(move |phase| {
+                let (lock, ready) = &*state;
+                let mut probe = lock.lock().unwrap();
+                match phase {
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeSweepBarrier => {
+                        probe.before_barrier += 1
+                    }
+                    crate::runner::test_support::CampaignSettlementPhase::BeforeGrading => {
+                        probe.before_grading += 1
+                    }
+                }
+                ready.notify_all();
+            })
+        };
+        let _probe = crate::runner::test_support::CampaignSettlementProbeScope::new(root, callback);
+        let runner_manifest = manifest.clone();
+        let runner_inputs = inputs.clone();
+        let runner = std::thread::spawn(move || {
+            run_with_options(
+                runner_manifest.to_str().unwrap(),
+                Options {
+                    json: true,
+                    mode: Some(crate::tape::Mode::Replay),
+                    cassette_root: Some(&runner_inputs),
+                    repeat: Some(1),
+                    jobs: 2,
+                    max_active_attempts: Some(2),
+                    ..Default::default()
+                },
+                &mut Vec::new(),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !root.join("a-execution-settled").exists() || !root.join("b-held").exists() {
+            if runner.is_finished() {
+                panic!(
+                    "campaign fixture ended before both agents reached the settlement boundary: {:?}",
+                    runner.join().unwrap().map_err(|error| error.to_string())
+                );
+            }
+            if Instant::now() >= deadline {
+                let entries = std::fs::read_dir(root)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect::<Vec<_>>();
+                panic!(
+                    "fixture agents did not reach the settlement boundary; calls={:?}; root_entries={entries:?}",
+                    std::fs::read_to_string(&counter).ok()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (lock, ready) = &*state;
+        let mut probe = lock.lock().unwrap();
+        while probe.before_barrier == 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "first configuration did not reach the global settlement boundary"
+            );
+            let (next, _) = ready.wait_timeout(probe, remaining).unwrap();
+            probe = next;
+        }
+        assert_eq!(
+            probe.before_grading, 0,
+            "a settled configuration must not grade while b is held"
+        );
+        drop(probe);
+        std::fs::write(root.join("release-b"), "release").unwrap();
+        assert!(runner.join().unwrap().is_ok());
+        assert_eq!(state.0.lock().unwrap().before_grading, 2);
+        return;
+    }
     if case == "history" || case == "pricing-preflight" {
         std::fs::create_dir(root.join("sweep-results")).unwrap();
         std::fs::write(root.join("sweep-results/old-sentinel"), "preserved").unwrap();

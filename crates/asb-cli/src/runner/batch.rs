@@ -244,6 +244,57 @@ pub(crate) struct SettlementBarrier {
     timeout: Duration,
 }
 
+/// A member of a scheduler-admitted sweep-wide settlement cohort.  Local
+/// replica identities stay local to their benchmark configuration; this maps
+/// them into the immutable full-sweep population without changing preparation
+/// or launch admission.
+#[derive(Clone)]
+pub(crate) struct SweepSettlement {
+    barrier: Arc<SettlementBarrier>,
+    first: usize,
+    total: usize,
+}
+
+impl SweepSettlement {
+    pub(crate) fn selected(
+        barrier: Arc<SettlementBarrier>,
+        first: usize,
+        total: usize,
+    ) -> Result<Self, Error> {
+        if first == 0 || first > total {
+            return Err(Error::Input("invalid sweep settlement member range".into()));
+        }
+        Ok(Self {
+            barrier,
+            first,
+            total,
+        })
+    }
+
+    pub(crate) fn arrive(&self, local: Identity) -> Result<(), Error> {
+        if !local.valid()
+            || self
+                .first
+                .checked_add(local.index - 1)
+                .is_none_or(|index| index > self.total)
+        {
+            self.barrier
+                .abort("invalid sweep-wide execution-settlement arrival");
+            return Err(Error::Run(
+                "invalid sweep-wide execution-settlement arrival".into(),
+            ));
+        }
+        self.barrier.arrive(Identity {
+            index: self.first + local.index - 1,
+            total: self.total,
+        })
+    }
+
+    pub(crate) fn abort(&self, reason: &str) {
+        self.barrier.abort(reason);
+    }
+}
+
 struct SettlementState {
     deadline: Option<Instant>,
     participants: Vec<bool>,
@@ -292,6 +343,23 @@ impl SettlementBarrier {
         Self::selected(total, &(1..=total).collect::<Vec<_>>(), timeout)
     }
 
+    #[cfg(test)]
+    pub(crate) fn wait_for_arrivals(&self, expected: usize, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.arrived.iter().filter(|arrived| **arrived).count() >= expected {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+    }
+
     pub(crate) fn arrive(&self, replica: Identity) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         if !replica.valid()
@@ -315,6 +383,7 @@ impl SettlementBarrier {
             );
         }
         state.arrived[replica.index - 1] = true;
+        self.changed.notify_all();
         if state
             .arrived
             .iter()
@@ -824,6 +893,84 @@ mod tests {
                     .to_string()
                     .contains("replica 2 failed while settling execution evidence")
             );
+        });
+    }
+
+    #[test]
+    fn sweep_settlement_maps_distinct_configuration_slots_into_one_cohort() {
+        let barrier = Arc::new(SettlementBarrier::for_test(3, Duration::from_secs(2)).unwrap());
+        let first = SweepSettlement::selected(barrier.clone(), 1, 3).unwrap();
+        let second = SweepSettlement::selected(barrier, 2, 3).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                first.arrive(Identity { index: 1, total: 1 }).unwrap();
+                sender.send(()).unwrap();
+            });
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+            let second_first = second.clone();
+            scope.spawn(move || {
+                second_first
+                    .arrive(Identity { index: 1, total: 2 })
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            second.arrive(Identity { index: 2, total: 2 }).unwrap();
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+    }
+
+    #[test]
+    fn sweep_settlement_abort_wakes_waiting_peer_without_timeout() {
+        let barrier = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let first = SweepSettlement::selected(barrier.clone(), 1, 2).unwrap();
+        let second = SweepSettlement::selected(barrier, 2, 2).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(first.arrive(Identity { index: 1, total: 1 }))
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            second.abort("fixture ordinary configuration failure");
+            let failure = receiver.recv_timeout(Duration::from_millis(500)).unwrap();
+            assert!(
+                failure
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ordinary configuration failure")
+            );
+        });
+    }
+
+    #[test]
+    fn distinct_sweep_repeat_cohorts_do_not_cross_release() {
+        let first = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let second = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let first_a = SweepSettlement::selected(first.clone(), 1, 2).unwrap();
+        let first_b = SweepSettlement::selected(first, 2, 2).unwrap();
+        let second_a = SweepSettlement::selected(second.clone(), 1, 2).unwrap();
+        let second_b = SweepSettlement::selected(second, 2, 2).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(first_a.arrive(Identity { index: 1, total: 1 }))
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            scope.spawn(move || {
+                let _ = second_a.arrive(Identity { index: 1, total: 1 });
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+            first_b.arrive(Identity { index: 1, total: 1 }).unwrap();
+            receiver
+                .recv_timeout(Duration::from_millis(500))
+                .unwrap()
+                .unwrap();
+            second_b.abort("fixture closes unused second cohort");
         });
     }
 

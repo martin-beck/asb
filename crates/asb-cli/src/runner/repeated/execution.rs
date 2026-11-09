@@ -20,6 +20,9 @@ pub(super) struct BatchRun<'a> {
     pub provider_capture_path: Option<PathBuf>,
     pub recording: Option<Arc<super::super::recording::Recorder>>,
     pub normalization: Option<&'a crate::proxy::CustomNormalization>,
+    /// Scheduler-proven full-sweep settlement boundary for this repeat.  It
+    /// is absent when the scheduler cannot dispatch every configuration.
+    pub sweep_settlement: Option<&'a batch::SweepSettlement>,
     pub reused: Option<&'a BTreeMap<usize, serde_json::Value>>,
 }
 
@@ -158,6 +161,7 @@ impl BatchRun<'_> {
                 provider_capture_path: self.provider_capture_path.as_deref(),
                 custom_normalization: self.normalization,
                 on_completion: Some(&observer),
+                sweep_settlement: self.sweep_settlement,
                 reused: self.reused,
                 ..Default::default()
             },
@@ -523,6 +527,7 @@ pub(crate) fn continue_campaign(
                 .map(|_| super::super::recording::producer(&root, number, 1, plan.concurrency)),
             recording: recording.clone(),
             normalization: normalization.as_ref(),
+            sweep_settlement: None,
             reused: Some(&reused),
         }
         .execute(dispatch, output, warnings)?;
