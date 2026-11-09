@@ -805,34 +805,37 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
     {
         if let Some(svg) = previews.get(artifact) {
             // An opaque-origin sandbox prevents the SVG's scripts and IDs from
-            // affecting the report or other graphs. CSP denies network access.
+            // affecting the report or other graphs. CSP restricts subresources;
+            // it is not a general network isolation boundary.
             let document = format!(
                 "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style>{svg}"
             );
-            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact)));
+            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
         }
     } else {
         body.push_str("<p>Flamegraph unavailable or not recorded.</p>");
     }
     if let Some(status) = status {
         let state = benchmark
-            .artifact_sources
-            .get(status)
-            .and_then(|path| {
-                let size = fs::metadata(path).ok()?.len();
-                if size > 64 * 1024 {
-                    return None;
-                }
-                let document: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-                let state = document.get("status")?.as_str()?;
-                Some(state.to_owned())
+            .collector_documents
+            .get("flamegraph")
+            .and_then(|document| {
+                let state = document.get("status")?.as_str()?.to_owned();
+                let reason = document
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                Some((state, reason))
             })
-            .unwrap_or_else(|| "unknown".into());
+            .unwrap_or_else(|| ("unknown".into(), None));
         body.push_str(&format!(
             " <a href=\"{}\">Collector status: {}</a>",
             escape(status),
-            escape(&state)
+            escape(&state.0)
         ));
+        if let Some(reason) = state.1 {
+            body.push_str(&format!(" <span>{}</span>", escape(&reason)));
+        }
     } else {
         body.push_str(" <span>Collector status unavailable.</span>");
     }
@@ -1612,6 +1615,93 @@ mod tests {
         assert!(!html.contains("<th>Benchmark</th>"));
         assert!(!html.contains("<strong>000-one</strong>"));
         assert!(html.contains("<td>default</td><td>run 1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual browser validation; requires ASB_TEST_FLAMEGRAPH SVG"]
+    fn generate_flamegraph_browser_fixture() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/flamegraph-browser-fixture");
+        let svg = std::env::var_os("ASB_TEST_FLAMEGRAPH").expect("ASB_TEST_FLAMEGRAPH");
+        for (index, name) in ["one", "two"].iter().enumerate() {
+            let dir = root.join(format!("sweep-results/{index:03}-{name}/measurements"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                root.join(format!("{name}.toml")),
+                format!(
+                    "agent=\"{}\"\nworkload=\"bug-fix\"\nprovider=\"local\"\nmodel=\"m\"\n",
+                    if index == 0 { "codex" } else { "pi" }
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("run.json"),
+                r#"{"status":"completed","elapsed_ms":12}"#,
+            )
+            .unwrap();
+            std::fs::copy(&svg, dir.join("flamegraph.svg")).unwrap();
+            std::fs::write(
+                dir.join("flamegraph.json"),
+                r#"{"status":"completed","artifact":"flamegraph.svg"}"#,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("sweep.toml"),
+            "configs=[\"one.toml\",\"two.toml\"]\n",
+        )
+        .unwrap();
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        println!(
+            "{}",
+            root.join("results/sweep-comparison/report.html").display()
+        );
+    }
+
+    #[test]
+    fn flamegraph_charts_distinguish_incomplete_and_missing_runs() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        for name in ["one", "two"] {
+            std::fs::create_dir_all(root.join(format!(
+                "sweep-results/{}-{name}/measurements",
+                if name == "one" { "000" } else { "001" }
+            )))
+            .unwrap();
+            std::fs::write(
+                root.join(format!("{name}.toml")),
+                "agent=\"codex\"\nworkload=\"bug-fix\"\nprovider=\"local\"\nmodel=\"m\"\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("sweep.toml"),
+            "configs=[\"one.toml\",\"two.toml\"]\n",
+        )
+        .unwrap();
+        let dir = root.join("sweep-results/000-one/measurements");
+        std::fs::write(
+            dir.join("run.json"),
+            r#"{"status":"completed","elapsed_ms":12}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("flamegraph.json"),
+            r#"{"status":"unavailable","reason":"bad <capture>"}"#,
+        )
+        .unwrap();
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        let html =
+            std::fs::read_to_string(root.join("results/sweep-comparison/report.html")).unwrap();
+        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
+        assert!(html.contains("Collector status: unavailable"));
+        assert!(html.contains("bad &lt;capture&gt;"));
+        assert!(html.contains("Collector status unavailable."));
+        assert_eq!(
+            html.matches("Flamegraph unavailable or not recorded.")
+                .count(),
+            2
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
