@@ -7491,3 +7491,108 @@ fn isolated_cpu_pool_target_change_confirmation_qualification() {
     let missing = replay(&project, "success", &[]);
     expect_failure(&missing, "does not exist on the execution target");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools and a Linux execution target"]
+fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let first = replay_project(1);
+    let second = replay_project(1);
+    for project in [&first, &second] {
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(project.0.join("benchmark.toml"))
+            .unwrap();
+        writeln!(
+            config,
+            "\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1"
+        )
+        .unwrap();
+    }
+    let script_path = first.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"if (behavior === 'lease-hold') {
+    const path = require('path');
+    const root = process.env.ASB_FIXTURE_BARRIER;
+    fs.mkdirSync(root, {recursive:true});
+    fs.writeFileSync(path.join(root, 'agent-pid'), String(process.pid));
+    const deadline = Date.now() + 30000;
+    while (!fs.existsSync(path.join(root, 'release'))) {
+      if (Date.now() > deadline) throw new Error('lease qualification timed out');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    process.exitCode = 7;
+  }
+  if (behavior === 'replica-barrier') {"#;
+    assert!(script.contains("if (behavior === 'replica-barrier') {"));
+    std::fs::write(
+        &script_path,
+        script.replacen("if (behavior === 'replica-barrier') {", hook, 1),
+    )
+    .unwrap();
+    let hold = first.0.join("hold");
+    let args = [
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+    ];
+    let mut child = first
+        .invocation(
+            &first.0,
+            &args,
+            &[
+                ("ASB_FIXTURE_BEHAVIOR", "lease-hold"),
+                ("ASB_FIXTURE_BARRIER", hold.to_str().unwrap()),
+            ],
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !hold.join("agent-pid").exists() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("agent failed to enter held phase");
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("first run ended before hold: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = std::fs::read_to_string(hold.join("agent-pid")).unwrap();
+    let home = first.0.to_str().unwrap();
+    let conflict = second.command_with_env(&args, &[("HOME", home)]);
+    let release = std::fs::write(hold.join("release"), "release");
+    let first_result = child.wait_with_output().unwrap();
+    release.unwrap();
+    expect_failure(
+        &conflict,
+        "already leased by another cooperating ASB campaign",
+    );
+    assert!(
+        !first_result.status.success(),
+        "fixture intentionally failed after release"
+    );
+    assert!(
+        !std::path::Path::new("/proc").join(pid.trim()).exists(),
+        "agent survived failed-run cleanup"
+    );
+    let retry = second.command_with_env(&args, &[("HOME", home)]);
+    expect_success(&retry);
+}
