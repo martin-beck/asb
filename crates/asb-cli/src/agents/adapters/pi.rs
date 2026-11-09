@@ -7,7 +7,9 @@ use std::path::Path;
 pub(super) mod snapshot;
 const TOOL_PROGRESS_FILENAME: &str = "pi-progress.json";
 // Pi's Responses client uses its freshly generated session UUID only as a
-// provider-side prompt cache key. It changes across replay launches.
+// provider-side prompt cache key. It changes across replay launches. Its
+// generated developer prompt also contains the current date directly before
+// its generated working-directory line; preserve every other date.
 const TAPE_WIRE_EXTENSION: &str = r#"
 export function normalizeRequest(request) {
   const body = request?.body;
@@ -15,6 +17,13 @@ export function normalizeRequest(request) {
       && typeof body.prompt_cache_key === 'string'
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.prompt_cache_key)) {
     body.prompt_cache_key = '<asb-pi-session-cache>';
+  }
+  if (request?.url?.endsWith('/responses') && Array.isArray(body?.input)
+      && body.input[0]?.role === 'developer' && typeof body.input[0]?.content === 'string') {
+    body.input[0].content = body.input[0].content.replace(
+      /\nCurrent date: \d{4}-\d\d-\d\d(?=\nCurrent working directory: )/,
+      '\nCurrent date: <asb-pi-current-date>',
+    );
   }
   return body;
 }
@@ -871,6 +880,12 @@ if (JSON.stringify(norm('/v1/responses',one)) !== JSON.stringify(norm('/v1/respo
 if (JSON.stringify(norm('/v1/chat/completions',one)) === JSON.stringify(norm('/v1/chat/completions',two))) throw Error('wrong endpoint changed');
 if (norm('/v1/responses','user-key').prompt_cache_key !== 'user-key') throw Error('non-UUID changed');
 if (JSON.stringify(norm('/v1/responses',one,'one')) === JSON.stringify(norm('/v1/responses',two,'two'))) throw Error('input changed');
+const developer = date => normalizeRequest({url:'/v1/responses',body:{input:[{role:'developer',content:`Policy.\nCurrent date: ${date}\nCurrent working directory: /workspace`}]}});
+if (JSON.stringify(developer('2026-11-08')) !== JSON.stringify(developer('2026-11-09'))) throw Error('generated date differs');
+const policy = date => normalizeRequest({url:'/v1/responses',body:{input:[{role:'developer',content:`Policy date: ${date}\nCurrent date: 2026-11-09\nCurrent working directory: /workspace`}]}});
+if (JSON.stringify(policy('2026-11-08')) === JSON.stringify(policy('2026-11-09'))) throw Error('policy date changed');
+const wrong = date => normalizeRequest({url:'/v1/chat/completions',body:{input:[{role:'developer',content:`\nCurrent date: ${date}\nCurrent working directory: /workspace`}]}});
+if (JSON.stringify(wrong('2026-11-08')) === JSON.stringify(wrong('2026-11-09'))) throw Error('wrong endpoint changed');
 "#).unwrap();
         let output = std::process::Command::new("node")
             .arg(root.join("test.mjs"))
