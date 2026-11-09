@@ -554,6 +554,7 @@ impl<'a> ReadyAttempt<'a> {
                     ))
                 })?;
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
+                    cpu_allocation: options.cpu_allocation,
                     expected_material_sha256: expected_material.as_deref(),
                     retain_recorded_material: options.mode == Some(tape::Mode::Record),
                     tool_mode: options.effective_tool_mode(),

@@ -100,6 +100,8 @@ impl TaskIdentity {
 }
 
 pub(crate) struct PreparationContext<'a> {
+    /// Per-replica CPU IDs, if placement was selected and admitted.
+    pub cpu_allocation: Option<&'a [u32]>,
     /// Cassette material expected for an offline replay, if available.
     pub expected_material_sha256: Option<&'a str>,
     /// Retain prepared source material for a provider recording.
@@ -678,6 +680,7 @@ mod tests {
         super::super::populate_builtin_prompts(&catalog).unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = super::PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -789,6 +792,7 @@ mod tests {
         std::fs::write(root.join("fixture.py"), "original material").unwrap();
         let project = crate::project::ProjectConfig::default();
         let context = PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -830,6 +834,7 @@ mod tests {
             ..Default::default()
         };
         let context = super::PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -953,6 +958,7 @@ mod tests {
         std::fs::create_dir_all(&workloads).unwrap();
         super::super::populate(&workloads).unwrap();
         let mut session = super::super::prepare_task(&PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -986,6 +992,7 @@ mod tests {
         assert_eq!(session.baseline_passed(), Some(false));
         assert_eq!(session.initial_material_sha256().unwrap(), initial_material);
         let later = super::super::prepare_task(&PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -1020,6 +1027,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -1064,6 +1072,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,
@@ -1105,6 +1114,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let context = PreparationContext {
+            cpu_allocation: None,
             native_snapshot_record: false,
             expected_material_sha256: None,
             retain_recorded_material: false,

@@ -303,6 +303,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
     let workspace = fixture.root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let context = PreparationContext {
+        cpu_allocation: None,
         expected_material_sha256: None,
         retain_recorded_material: false,
         native_snapshot_record: false,
@@ -495,6 +496,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         assert!(!error.contains("cancellation cleanup failed"), "{error}");
     }
     let no_trial = PreparationContext {
+        cpu_allocation: None,
         trial: None,
         ..context
     };
@@ -510,5 +512,22 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         .err()
         .unwrap()
         .contains("select an official instance ID")
+    );
+    let unsupported = PreparationContext {
+        cpu_allocation: Some(&[1]),
+        ..no_trial
+    };
+    assert!(
+        launch(
+            "fixture-sdk",
+            "controller.py",
+            None,
+            "fixture",
+            fixture.reference.dataset.clone(),
+            &unsupported
+        )
+        .err()
+        .unwrap()
+        .contains("does not yet support verified managed-container CPU placement")
     );
 }

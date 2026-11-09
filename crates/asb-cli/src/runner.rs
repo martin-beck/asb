@@ -216,6 +216,8 @@ impl RunResult<'_> {
 pub(crate) struct RunOptions<'a> {
     /// Prevalidated allocation for this one replica's managed processes.
     pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
+    /// Ordered logical CPU IDs for the same replica allocation.
+    pub cpu_allocation: Option<&'a [u32]>,
     pub invocation_dir: Option<&'a Path>,
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,

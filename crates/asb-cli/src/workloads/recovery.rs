@@ -352,6 +352,7 @@ mod tests {
             &fixture.reference.workload,
             fixture.reference.dataset.clone(),
             &super::super::PreparationContext {
+                cpu_allocation: None,
                 native_snapshot_record: false,
                 expected_material_sha256: None,
                 retain_recorded_material: false,

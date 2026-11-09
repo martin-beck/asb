@@ -15,7 +15,7 @@ pub(super) fn prepare(
     }
     let tool = context.tool_root(ENGINE.tool());
     ENGINE.publish(&tool).map_err(|error| error.to_string())?;
-    crate::workloads::remote::launch(
+    crate::workloads::remote::launch_with_cpu_allocation(
         ENGINE.tool(),
         &ENGINE.script(),
         Some("session"),
