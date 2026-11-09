@@ -7427,3 +7427,67 @@ while (Date.now() < until) { Math.sqrt(Math.random()); }
     }
     assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools and a local pseudo-terminal"]
+fn isolated_cpu_pool_target_change_confirmation_qualification() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let project = replay_project(1);
+    let path = project.0.join("benchmark.toml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let configure = |cpu: u32| {
+        format!(
+            "{original}\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1\n[runtime.cpu_description]\narchitecture='qualification-other-architecture'\n"
+        )
+    };
+    std::fs::write(&path, configure(cpu)).unwrap();
+    let no_terminal = replay(&project, "success", &[]);
+    expect_failure(&no_terminal, "CPU topology differs from setup");
+    assert!(!project.0.join("run.log").exists());
+    let command = format!(
+        "'{}' run benchmark.toml --llm-replay --cassette tape.jsonl",
+        env!("CARGO_BIN_EXE_asb")
+    );
+    let run_interactive = |answer: &[u8]| {
+        let mut command_process = Command::new("script");
+        command_process
+            .current_dir(&project.0)
+            .args(["-q", "-e", "-c", &command, "/dev/null"])
+            .isolated_env()
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command_process.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(answer).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let declined = run_interactive(b"n\n");
+    assert!(!declined.status.success(), "{}", stdout(&declined));
+    assert!(stdout(&declined).contains("CPU topology differs from setup"));
+    assert!(!project.0.join("run.log").exists());
+    let accepted = run_interactive(b"y\n");
+    assert!(
+        accepted.status.success(),
+        "stdout: {} stderr: {}",
+        stdout(&accepted),
+        stderr(&accepted)
+    );
+    assert!(stdout(&accepted).contains("Continuing with the current host CPU topology"));
+    std::fs::write(&path, configure(1048575)).unwrap();
+    let missing = replay(&project, "success", &[]);
+    expect_failure(&missing, "does not exist on the execution target");
+}
