@@ -26,7 +26,9 @@ pub(super) struct Capture {
     sample_read_us_total: u64,
     sample_read_us_max: u64,
     interval_jitter_us_max: u64,
-    previous_sample_us: Option<u64>,
+    schedule_lateness_us_max: u64,
+    missed_scheduled_intervals: u64,
+    previous_scheduled_sample_us: Option<u64>,
     interval_us: u64,
 }
 
@@ -41,24 +43,38 @@ impl Capture {
             sample_read_us_total: 0,
             sample_read_us_max: 0,
             interval_jitter_us_max: 0,
-            previous_sample_us: None,
+            schedule_lateness_us_max: 0,
+            missed_scheduled_intervals: 0,
+            previous_scheduled_sample_us: None,
             interval_us,
         };
-        capture.push(0, initial, initial_read_us);
+        capture.push(0, 0, initial, initial_read_us, None);
         capture
     }
-    fn push(&mut self, elapsed_us: u64, point: Snapshot, read_us: u64) {
+    fn push(
+        &mut self,
+        sample_started_us: u64,
+        elapsed_us: u64,
+        point: Snapshot,
+        read_us: u64,
+        scheduled_due_us: Option<u64>,
+    ) {
         self.samples = self.samples.saturating_add(1);
         self.sample_read_us_total = self.sample_read_us_total.saturating_add(read_us);
         self.sample_read_us_max = self.sample_read_us_max.max(read_us);
-        if let Some(previous) = self.previous_sample_us {
-            self.interval_jitter_us_max = self.interval_jitter_us_max.max(
-                elapsed_us
-                    .saturating_sub(previous)
-                    .abs_diff(self.interval_us),
-            );
+        if let Some(due_us) = scheduled_due_us {
+            self.schedule_lateness_us_max = self
+                .schedule_lateness_us_max
+                .max(sample_started_us.saturating_sub(due_us));
+            if let Some(previous) = self.previous_scheduled_sample_us {
+                self.interval_jitter_us_max = self.interval_jitter_us_max.max(
+                    sample_started_us
+                        .saturating_sub(previous)
+                        .abs_diff(self.interval_us),
+                );
+            }
+            self.previous_scheduled_sample_us = Some(sample_started_us);
         }
-        self.previous_sample_us = Some(elapsed_us);
         self.unavailable.extend(point.unavailable.clone());
         if let Some((_, previous)) = self.points.last() {
             for (key, before) in &previous.values {
@@ -88,12 +104,18 @@ impl Capture {
         self.points.push((elapsed_us, point));
     }
 
+    fn record_missed_scheduled_intervals(&mut self, missed: u64) {
+        self.missed_scheduled_intervals = self.missed_scheduled_intervals.saturating_add(missed);
+    }
+
     fn overhead(&self) -> serde_json::Value {
         serde_json::json!({
             "sample_count": self.samples,
             "sample_read_us_total": self.sample_read_us_total,
             "sample_read_us_max": self.sample_read_us_max,
             "interval_jitter_us_max": self.interval_jitter_us_max,
+            "schedule_lateness_us_max": self.schedule_lateness_us_max,
+            "missed_scheduled_intervals": self.missed_scheduled_intervals,
             "configured_interval_us": self.interval_us,
         })
     }
@@ -120,19 +142,40 @@ impl Sampler {
             .spawn(move || {
                 let mut capture =
                     Capture::new(initial, initial_read_us, interval_ms.saturating_mul(1_000));
+                let interval = Duration::from_millis(interval_ms);
+                let mut next_deadline = started + interval;
                 loop {
                     let stopped = !matches!(
-                        receiver.recv_timeout(Duration::from_millis(interval_ms)),
+                        receiver
+                            .recv_timeout(next_deadline.saturating_duration_since(Instant::now())),
                         Err(mpsc::RecvTimeoutError::Timeout)
                     );
                     let read_started = Instant::now();
                     let point = snapshot(&path);
                     let elapsed_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    let sample_started_us = read_started
+                        .saturating_duration_since(started)
+                        .as_micros()
+                        .min(u64::MAX as u128) as u64;
                     let read_us = read_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-                    capture.push(elapsed_us, point, read_us);
+                    let due_us = next_deadline
+                        .saturating_duration_since(started)
+                        .as_micros()
+                        .min(u64::MAX as u128) as u64;
+                    capture.push(
+                        sample_started_us,
+                        elapsed_us,
+                        point,
+                        read_us,
+                        (!stopped).then_some(due_us),
+                    );
                     if stopped {
                         break;
                     }
+                    let (advanced, missed) =
+                        advance_deadline(next_deadline, Instant::now(), interval);
+                    next_deadline = advanced;
+                    capture.record_missed_scheduled_intervals(missed);
                 }
                 capture
             })
@@ -158,6 +201,20 @@ impl Drop for Sampler {
             let _ = handle.join();
         }
     }
+}
+
+fn advance_deadline(
+    mut deadline: Instant,
+    observed: Instant,
+    interval: Duration,
+) -> (Instant, u64) {
+    deadline += interval;
+    let mut missed = 0_u64;
+    while deadline <= observed {
+        deadline += interval;
+        missed = missed.saturating_add(1);
+    }
+    (deadline, missed)
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -556,6 +613,7 @@ mod tests {
         );
         capture.push(
             1_000_000,
+            1_000_000,
             point(&[
                 ("cpu.some_total_us", 100_100),
                 ("cpu.throttled_total_us", 3_000_000),
@@ -563,6 +621,7 @@ mod tests {
                 ("io.read_bytes", 101),
             ]),
             2,
+            Some(1_000_000),
         );
         let (report, summary) = report(
             Some(&capture),
@@ -596,13 +655,75 @@ mod tests {
         assert_eq!(summary["collector_overhead"]["sample_read_us_total"], 3);
         assert_eq!(summary["collector_overhead"]["sample_read_us_max"], 2);
         assert_eq!(summary["collector_overhead"]["interval_jitter_us_max"], 0);
+        assert_eq!(summary["collector_overhead"]["schedule_lateness_us_max"], 0);
+        assert_eq!(
+            summary["collector_overhead"]["missed_scheduled_intervals"],
+            0
+        );
         assert!(summary.get("series").is_none());
+    }
+
+    #[test]
+    fn overhead_keeps_read_cost_separate_from_schedule_lateness() {
+        let mut capture = Capture::new(point(&[("memory.current_bytes", 10)]), 1, 1_000_000);
+        // The first scheduled sample took 650 ms, but it began exactly on its
+        // absolute deadline. Read duration is overhead, not scheduling lateness.
+        capture.push(
+            1_000_000,
+            1_650_000,
+            point(&[("memory.current_bytes", 11)]),
+            650_000,
+            Some(1_000_000),
+        );
+        // The following sample started 50 ms late. Its lower read cost must
+        // not be added to that lateness or the observed cadence jitter.
+        capture.push(
+            2_050_000,
+            2_100_000,
+            point(&[("memory.current_bytes", 12)]),
+            50_000,
+            Some(2_000_000),
+        );
+        let (_, summary) = report(
+            Some(&capture),
+            None,
+            super::super::PressureScope::AgentProcessTree,
+        );
+        assert_eq!(summary["collector_overhead"]["sample_read_us_max"], 650_000);
+        assert_eq!(
+            summary["collector_overhead"]["schedule_lateness_us_max"],
+            50_000
+        );
+        assert_eq!(
+            summary["collector_overhead"]["interval_jitter_us_max"],
+            50_000
+        );
+    }
+
+    #[test]
+    fn cadence_advances_from_absolute_deadlines_and_counts_missed_intervals() {
+        let started = Instant::now();
+        let interval = Duration::from_secs(1);
+        let first_deadline = started + interval;
+        let (next, missed) = advance_deadline(
+            first_deadline,
+            started + Duration::from_millis(3_250),
+            interval,
+        );
+        assert_eq!(missed, 2);
+        assert_eq!(next.duration_since(started), Duration::from_secs(4));
     }
 
     #[test]
     fn owned_container_scope_is_explicit_not_agent_process_tree() {
         let mut capture = Capture::new(point(&[("memory.current_bytes", 10)]), 1, 1_000);
-        capture.push(1_000, point(&[("memory.current_bytes", 11)]), 2);
+        capture.push(
+            1_000,
+            1_000,
+            point(&[("memory.current_bytes", 11)]),
+            2,
+            Some(1_000),
+        );
         let (report, summary) = report(
             Some(&capture),
             None,
@@ -626,18 +747,22 @@ mod tests {
         );
         capture.push(
             100,
+            100,
             point(&[("cpu.some_total_us", 10), ("io.read_bytes", 11)]),
             2,
+            Some(100),
         );
         let mut missing = point(&[("cpu.some_total_us", 30)]);
         missing
             .unavailable
             .insert("io.read_bytes".into(), "fixture inaccessible".into());
-        capture.push(200, missing, 2);
+        capture.push(200, 200, missing, 2, Some(200));
         capture.push(
+            300,
             300,
             point(&[("cpu.some_total_us", 50), ("io.read_bytes", 15)]),
             2,
+            Some(300),
         );
         let (report, summary) = report(
             Some(&capture),
@@ -660,8 +785,10 @@ mod tests {
         for index in 1..MAX_POINTS * 3 {
             capture.push(
                 index as u64 * 1000,
+                index as u64 * 1000,
                 point(&[("cpu.some_total_us", index as u64)]),
                 1,
+                Some(index as u64 * 1000),
             );
         }
         assert!(capture.downsampled);
