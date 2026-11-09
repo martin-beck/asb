@@ -274,7 +274,7 @@ def main():
         assert not (root / ".asb/install.log").exists(), "navigation must not install dependencies"
 
         # End reaches the real public maximum; publication must retain numeric
-        # 64, and single-selection must replace the default rather than add it.
+        # 512, and single-selection must replace the default rather than add it.
         code, transcript = session(binary, root, ["setup", "tui"],
             b"pi \tlocal \t \tbug-fix \t\t\x1b[F \t")
         assert code == 0, transcript
@@ -283,7 +283,7 @@ def main():
         manifest64 = tomllib.loads(next_sweeps.pop().read_text())
         assert len(manifest64["configs"]) == 1
         config64 = tomllib.loads((root / manifest64["configs"][0]).read_text())
-        assert config64["concurrency"] == 64 and isinstance(config64["concurrency"], int)
+        assert config64["concurrency"] == 512 and isinstance(config64["concurrency"], int)
         assert not (root / "invoked-agent").exists()
         assert not (root / ".asb/install.log").exists(), "navigation must not install dependencies"
 
