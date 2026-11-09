@@ -407,9 +407,45 @@ section listing every collector module and defaulting its output directory to
 `measurements`, plus a `log_file` defaulting to the configuration's stem with a
 `.log` extension. They also include `concurrency = 1`; increase it to run
 isolated copies of the same agent/model/workload in parallel. The setup TUI has
-a final concurrency step for selecting this value. A hand-written configuration
+concurrency and runtime steps for these settings. A hand-written configuration
 can omit that section to retain the no-collection behavior, or pass `--measurements DIR` to enable collection
 for one run.
+
+### CPU pools and perf recording scope
+
+The runtime step in `asb setup tui` defaults to **None (portable)**, which
+leaves CPU scheduling unchanged. Select **CPU pool** and use Ctrl-P to edit
+the logical CPU list and Ctrl-G to set the number assigned to each concurrent
+replica. The preview shows capacity and the ordered, disjoint allocations.
+Ctrl-W switches perf recording between the default process tree and CPU-wide
+sampling. A CPU pool can also be used without selecting perf.
+
+For example, this configuration assigns CPUs 1–3 to the first replica and
+5–7 to the second. Select `perf` in the measurements section to record samples,
+or select `flamegraph` to record them and generate a flamegraph:
+
+```toml
+concurrency = 2
+
+[runtime]
+perf_record_scope = "cpu-wide"
+
+[runtime.cpu_pool]
+cpus = "1-3,5-7"
+num_cpus_per_instance = 3
+```
+
+CPU pools require Linux. At run time ASB checks every requested logical CPU
+against the target's present, online and effective-allowed sets, and verifies
+placement before launching the agent and controlled containers. A setup-to-run
+CPU description mismatch prompts for confirmation; noninteractive runs fail
+with a message so the difference can be reviewed. Pools coordinate cooperating
+ASB campaigns using the same user cache, but do not reserve CPUs from the
+operating system. Containers created independently by another daemon client
+may run outside the assigned group. CPU-wide perf samples can also include
+unrelated host, kernel and collector activity; perf stat remains scoped to the
+agent process tree. These limits and the observed scope are retained in the
+execution evidence and comparison report.
 
 `asb sweep` automatically runs the same comparison after all benchmark entries
 finish, including partial sweeps so failed or missing entries remain visible.
