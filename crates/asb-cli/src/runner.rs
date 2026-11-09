@@ -53,16 +53,12 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration =
     Duration::from_secs(crate::planning::DEFAULT_NATIVE_EXECUTION_SECONDS);
 
-/// Temporary admission guard until all runtime-placement boundaries are wired.
-/// Never silently run a requested CPU pool without actually enforcing it.
+/// Validate the declarative CPU plan before execution-specific admission.
 pub(crate) fn validate_runtime_configuration(config: &BenchmarkConfig) -> Result<(), Error> {
     config
         .runtime
         .plan(config.concurrency)
         .map_err(Error::Input)?;
-    if config.runtime != crate::runtime::settings::RuntimeSettings::default() {
-        return Err(Error::Input("runtime CPU placement is not yet integrated; remove the runtime section before running".into()));
-    }
     Ok(())
 }
 

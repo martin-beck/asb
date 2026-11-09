@@ -216,7 +216,7 @@ mod tests {
     use super::{BenchmarkConfig, MAX_MCP_ARGUMENTS, MAX_MCP_SERVERS, default_log_path};
 
     #[test]
-    fn runtime_settings_roundtrip_and_reject_execution_until_integrated() {
+    fn runtime_settings_roundtrip_and_validate_capacity() {
         let base = "agent='pi'\nprovider='local'\nmodel='m'\nworkload='bug-fix'\nconcurrency=2\n";
         let default: BenchmarkConfig = toml::from_str(base).unwrap();
         assert!(!toml::to_string(&default).unwrap().contains("[runtime]"));
@@ -229,12 +229,7 @@ mod tests {
             configured.runtime.plan(2).unwrap().unwrap(),
             vec![vec![1, 2, 3], vec![5, 6, 7]]
         );
-        assert!(
-            crate::runner::validate_runtime_configuration(&configured)
-                .unwrap_err()
-                .to_string()
-                .contains("not yet integrated")
-        );
+        assert!(crate::runner::validate_runtime_configuration(&configured).is_ok());
         let encoded = toml::to_string(&configured).unwrap();
         assert_eq!(
             toml::from_str::<BenchmarkConfig>(&encoded).unwrap(),

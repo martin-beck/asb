@@ -969,23 +969,93 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
 }
 
 #[test]
-fn requested_runtime_pool_is_rejected_before_run_or_sweep_mutation() {
+fn invalid_runtime_pool_is_rejected_before_run_or_sweep_mutation() {
     let project = Project::new();
     project.init();
-    project.write("benchmark.toml", "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nconcurrency=1\n[runtime.cpu_pool]\ncpus='1'\nnum_cpus_per_instance=1\n");
+    project.write("benchmark.toml", "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nconcurrency=1\n[runtime.cpu_pool]\ncpus='1,1'\nnum_cpus_per_instance=1\n");
     project.write("sweep.toml", "configs=['benchmark.toml']\n");
     project.write("sweep-results/previous", "retain result");
     for args in [&["run", "benchmark.toml"][..], &["sweep", "sweep.toml"][..]] {
-        expect_failure(
-            &project.command(args),
-            "runtime CPU placement is not yet integrated",
-        );
+        expect_failure(&project.command(args), "CPU pool repeats logical CPU 1");
     }
     assert_eq!(
         std::fs::read_to_string(project.0.join("sweep-results/previous")).unwrap(),
         "retain result"
     );
     assert!(!project.0.join("sweep-history").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn runtime_pool_pins_offline_agent_and_records_proxy_launch() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let project = replay_project(1);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1"
+    )
+    .unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = "const fs = require('fs');\nconst affinity = fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\\s*(.*)$/m)[1];\nfs.writeFileSync(process.env.ASB_FIXTURE_CPU_LOG, affinity);";
+    assert!(script.contains("const fs = require('fs');"));
+    std::fs::write(
+        &script_path,
+        script.replacen("const fs = require('fs');", hook, 1),
+    )
+    .unwrap();
+    let cpu_log = project.0.join("cpu-log");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap())],
+    );
+    expect_success(&result);
+    assert_eq!(
+        std::fs::read_to_string(cpu_log).unwrap().trim(),
+        cpu.to_string()
+    );
+    let mut found = false;
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["effective_boundary_cpus"],
+                serde_json::json!([cpu])
+            );
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"],
+                serde_json::json!([[cpu]])
+            );
+            found = true;
+        }
+    }
+    assert!(found, "missing verified launch record");
 }
 
 #[test]
@@ -7144,7 +7214,7 @@ fn sidecar_follows_same_origin_redirects_but_refuses_cross_origin_credentials() 
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "runtime CPU pool remains gated pending complete qualification"]
+#[ignore = "requires at least two allowed CPUs and ss process inspection"]
 fn isolated_cpu_pool_two_replica_replay_qualification() {
     use std::io::Write;
     let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
@@ -7259,7 +7329,7 @@ fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools, two CPUs, ss, real flamegraph tools and system-wide perf permission"]
+#[ignore = "requires two CPUs, ss, real flamegraph tools and system-wide perf permission"]
 fn isolated_cpu_pool_cpu_wide_perf_qualification() {
     use std::io::Write;
     let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
@@ -7430,7 +7500,7 @@ while (Date.now() < until) { Math.sqrt(Math.random()); }
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools and a local pseudo-terminal"]
+#[ignore = "requires the script utility and a local pseudo-terminal"]
 fn isolated_cpu_pool_target_change_confirmation_qualification() {
     use std::io::Write;
     use std::process::Stdio;
@@ -7494,7 +7564,6 @@ fn isolated_cpu_pool_target_change_confirmation_qualification() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools and a Linux execution target"]
 fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -7599,7 +7668,7 @@ fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools and ASB_TEST_CROSS_HOST_CONFIG from another architecture"]
+#[ignore = "requires ASB_TEST_CROSS_HOST_CONFIG from another architecture"]
 fn cross_host_cpu_pool_configuration_qualification() {
     use std::io::Write;
     use std::process::Stdio;
@@ -7689,7 +7758,6 @@ fn cross_host_cpu_pool_configuration_qualification() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools and at least two allowed CPUs"]
 fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
     use std::io::Write;
     let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
@@ -7698,10 +7766,12 @@ fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
         .unwrap()
         .trim();
-    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+    let Ok(groups) = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
         .unwrap()
         .allocate(2)
-        .expect("qualification requires two CPUs");
+    else {
+        return;
+    };
     let cpus = [groups[0][0], groups[1][0]];
     let project = replay_project(1);
     let mut config = std::fs::OpenOptions::new()
@@ -7738,7 +7808,6 @@ fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires enabled CPU pools and at least two allowed CPUs"]
 fn isolated_cpu_pool_two_replica_sweep_qualification() {
     use std::io::Write;
     let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
@@ -7747,10 +7816,12 @@ fn isolated_cpu_pool_two_replica_sweep_qualification() {
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
         .unwrap()
         .trim();
-    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+    let Ok(groups) = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
         .unwrap()
         .allocate(2)
-        .expect("qualification requires two CPUs");
+    else {
+        return;
+    };
     let expected: std::collections::BTreeSet<u64> =
         groups.iter().map(|group| u64::from(group[0])).collect();
     let project = replay_project(2);

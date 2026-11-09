@@ -51,9 +51,9 @@ CPU-wide perf samples, and real flamegraph generation. The explicit Docker
 fixture also observed disjoint managed workloads and independent-container and
 host noise in CPU-wide captures. An approximate offline two-replica SWE-bench
 run verified managed and proxy placement and task-container cleanup; its
-unresolved task is not a benchmark-correctness result. These tests do not yet
-qualify target changes after admission or all replay and failure/cleanup paths.
-Run and sweep admission still reject
-nondefault runtime settings pending those checks and full review. A lease only
-coordinates campaigns using the same lock directory and is not crash recovery
-or an operating-system CPU reservation.
+unresolved task is not a benchmark-correctness result. A real x86-to-aarch64
+target change, disallowed target CPU, sweep replay and failure-time lease
+release were exercised. These tests do not exhaust all replay and cleanup
+paths. Run and sweep now admit valid runtime settings; final review and exact
+head CI are still required. A lease only coordinates campaigns using the same
+lock directory and is not crash recovery or an operating-system CPU reservation.
