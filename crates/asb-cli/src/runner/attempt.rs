@@ -175,6 +175,17 @@ impl<'a> ConfiguredAttempt<'a> {
             measurement_session.as_mut(),
         );
         if let Some(session) = measurement_session.as_mut() {
+            if config.runtime.perf_record_scope
+                == crate::runtime::settings::PerfRecordScope::CpuWide
+            {
+                session
+                    .configure_perf_cpu_scope(options.cpu_allocation.ok_or_else(|| {
+                        Error::Run(
+                            "CPU-wide perf recording requires a verified replica allocation".into(),
+                        )
+                    })?)
+                    .map_err(Error::Run)?;
+            }
             session
                 .event(LifecycleEvent::RunStarted)
                 .map_err(Error::Run)?;

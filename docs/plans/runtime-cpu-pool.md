@@ -42,9 +42,13 @@ been implemented and qualified.
    CPU-wide capture scope, including explicit unverified-container disclosures.
    Confirm existing native unconfigured and process-tree behavior remains intact.
 
-The draft currently provides allocation, target snapshots, cooperative lease
-and affinity primitives, configuration and setup-wizard state. Run and sweep
-admission still reject nondefault runtime settings: the runner does not yet
-place agents, proxies or containers or enable CPU-wide sampling. A lease only
-coordinates campaigns using the same lock directory and is not crash recovery
-or an operating-system CPU reservation.
+The draft provides allocation, target snapshots, cooperative leases, affinity
+primitives, configuration and setup-wizard state. Replica dispatch now holds a
+lease and propagates allocations to agent and proxy launches and to the partial
+SWE-bench workload integration. The perf collector has an opt-in CPU-wide
+recording path with separate process-tree stat evidence. These paths have not
+yet been qualified together. Run and sweep admission still reject nondefault
+runtime settings until all managed workload boundaries, early admission,
+topology confirmation, evidence and end-to-end qualification are complete.
+A lease only coordinates campaigns using the same lock directory and is not
+crash recovery or an operating-system CPU reservation.

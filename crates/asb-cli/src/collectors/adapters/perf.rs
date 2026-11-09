@@ -623,6 +623,14 @@ use std::io::{BufRead, Read};
 #[derive(Default)]
 struct PerfState {
     enabled: bool,
+    cpu_wide: Option<Vec<u32>>,
+}
+
+fn selected_record_args(pid: u32, cpu_wide: Option<&[u32]>) -> Result<Vec<String>, String> {
+    match cpu_wide {
+        Some(cpus) => crate::runtime::perf_scope::cpu_wide_record_args(cpus),
+        None => Ok(record_args(pid)),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -642,6 +650,13 @@ pub(super) fn validate_agent_target(
 }
 
 impl measurements::Session {
+    pub(crate) fn configure_perf_cpu_scope(&mut self, cpus: &[u32]) -> Result<(), String> {
+        // Validate the full allocation before retaining it for collector startup.
+        crate::runtime::perf_scope::cpu_wide_record_args(cpus)?;
+        self.state::<PerfState>().borrow_mut().cpu_wide = Some(cpus.to_vec());
+        Ok(())
+    }
+
     pub(crate) fn start_perf(&mut self, pid: u32) -> Result<(), String> {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
@@ -673,7 +688,8 @@ impl measurements::Session {
         // Unlike a one-time comma-separated PID snapshot, perf's inheritance
         // follows helpers forked after attachment as well as descendants of
         // those helpers, while remaining scoped to this benchmark tree.
-        let record_args = record_args(pid);
+        let cpu_wide = self.state::<PerfState>().borrow().cpu_wide.clone();
+        let record_args = selected_record_args(pid, cpu_wide.as_deref())?;
         let (mut command, route) = self.collector_command("perf")?;
         command
             // Keep perf data bounded enough for the offline flamegraph
@@ -711,6 +727,18 @@ impl measurements::Session {
         }
         self.set_artifact(SharedArtifact::StackSamples, data);
         self.collectors.push(collector);
+        if let Some(cpus) = cpu_wide {
+            measurements::write_json(
+                &self.dir.join("perf-record-scope.json"),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "scope": "cpu-wide",
+                    "logical_cpus": cpus,
+                    "perf_stat_scope": "agent-process-tree",
+                    "warning": "CPU-wide samples can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
+                }),
+            )?;
+        }
         let stat_stdout_path = self.dir.join("perf-stat.stdout");
         let stat_stderr_path = self.dir.join("perf-stat.stderr");
         let captures = [
@@ -1052,6 +1080,18 @@ pub(crate) fn perf_permission_error() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_record_scope_switches_without_changing_the_default() {
+        assert_eq!(
+            super::selected_record_args(42, None).unwrap(),
+            super::record_args(42)
+        );
+        let args = super::selected_record_args(42, Some(&[3, 5])).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["-C", "3,5"]));
+        assert!(args.iter().any(|arg| arg == "-a"));
+        assert!(!args.iter().any(|arg| arg == "-p"));
+        assert!(super::selected_record_args(42, Some(&[])).is_err());
+    }
     #[test]
     fn symfs_marker_distinguishes_partial_complete_and_invalid_trees() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
