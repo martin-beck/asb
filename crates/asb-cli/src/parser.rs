@@ -1498,7 +1498,7 @@ struct SweepArgs {
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     cassette_root: Option<String>,
     /// Maximum distinct configurations running at once (not identical replicas).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=32))]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=512))]
     jobs: u16,
     /// Total simultaneous replicas across all jobs; defaults to max(jobs, largest concurrency).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
@@ -1887,6 +1887,26 @@ mod tests {
             vec!["asb", "sweep", "suite.toml", "--continue", "3"],
         ] {
             Cli::try_parse_from(args).expect("continue sweep option parses");
+        }
+    }
+
+    #[test]
+    fn sweep_parallelism_accepts_the_shared_512_cap() {
+        Cli::try_parse_from([
+            "asb",
+            "sweep",
+            "suite.toml",
+            "--jobs",
+            "512",
+            "--max-active-attempts",
+            "512",
+        ])
+        .expect("the shared concurrency cap parses for both sweep limits");
+        for option in ["--jobs", "--max-active-attempts"] {
+            assert!(
+                Cli::try_parse_from(["asb", "sweep", "suite.toml", option, "513"]).is_err(),
+                "{option} must still reject values above the shared cap"
+            );
         }
     }
 
