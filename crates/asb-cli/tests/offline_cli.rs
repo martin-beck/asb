@@ -7596,3 +7596,93 @@ fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
     let retry = second.command_with_env(&args, &[("HOME", home)]);
     expect_success(&retry);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools and ASB_TEST_CROSS_HOST_CONFIG from another architecture"]
+fn cross_host_cpu_pool_configuration_qualification() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let source = std::env::var_os("ASB_TEST_CROSS_HOST_CONFIG").expect(
+        "set ASB_TEST_CROSS_HOST_CONFIG to a TUI configuration created on a different architecture",
+    );
+    let setup: toml::Value = toml::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+    let setup_arch = setup["runtime"]["cpu_description"]["architecture"]
+        .as_str()
+        .unwrap();
+    assert_ne!(setup_arch, std::env::consts::ARCH);
+    let cpu_pool = setup["runtime"]["cpu_pool"]["cpus"].as_str().unwrap();
+    let group_size = usize::try_from(
+        setup["runtime"]["cpu_pool"]["num_cpus_per_instance"]
+            .as_integer()
+            .unwrap(),
+    )
+    .unwrap();
+    let expected = asb_cli::runtime::cpu_pool::CpuPool::parse(cpu_pool, group_size)
+        .unwrap()
+        .allocate(2)
+        .unwrap();
+    let project = replay_project(2);
+    let mut root = toml::map::Map::new();
+    root.insert("runtime".into(), setup["runtime"].clone());
+    let runtime = toml::to_string(&toml::Value::Table(root)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let original = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(config, format!("{original}\n{runtime}")).unwrap();
+    let noninteractive = replay(&project, "success", &[]);
+    expect_failure(&noninteractive, "CPU topology differs from setup");
+    let command = format!(
+        "'{}' run benchmark.toml --llm-replay --cassette tape.jsonl",
+        env!("CARGO_BIN_EXE_asb")
+    );
+    let mut runner = Command::new("script");
+    runner
+        .current_dir(&project.0)
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .isolated_env()
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = runner.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {} stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stdout(&output).contains("Continuing with the current host CPU topology"));
+    let mut cpus = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let plan: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if plan["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                plan["runtime"]["target_cpu_description"]["architecture"],
+                std::env::consts::ARCH
+            );
+            assert_eq!(
+                plan["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            cpus.insert(
+                plan["runtime"]["effective_boundary_cpus"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cpu| cpu.as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    assert_eq!(
+        cpus,
+        expected
+            .into_iter()
+            .map(|group| group.into_iter().map(u64::from).collect::<Vec<_>>())
+            .collect()
+    );
+}
