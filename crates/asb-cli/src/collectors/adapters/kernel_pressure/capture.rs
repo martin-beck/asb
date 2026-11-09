@@ -22,20 +22,43 @@ pub(super) struct Capture {
     unavailable: BTreeMap<String, String>,
     peaks: BTreeMap<String, u64>,
     downsampled: bool,
+    samples: u64,
+    sample_read_us_total: u64,
+    sample_read_us_max: u64,
+    interval_jitter_us_max: u64,
+    previous_sample_us: Option<u64>,
+    interval_us: u64,
 }
 
 impl Capture {
-    fn new(initial: Snapshot) -> Self {
+    fn new(initial: Snapshot, initial_read_us: u64, interval_us: u64) -> Self {
         let mut capture = Self {
             points: Vec::new(),
             unavailable: BTreeMap::new(),
             peaks: BTreeMap::new(),
             downsampled: false,
+            samples: 0,
+            sample_read_us_total: 0,
+            sample_read_us_max: 0,
+            interval_jitter_us_max: 0,
+            previous_sample_us: None,
+            interval_us,
         };
-        capture.push(0, initial);
+        capture.push(0, initial, initial_read_us);
         capture
     }
-    fn push(&mut self, elapsed_us: u64, point: Snapshot) {
+    fn push(&mut self, elapsed_us: u64, point: Snapshot, read_us: u64) {
+        self.samples = self.samples.saturating_add(1);
+        self.sample_read_us_total = self.sample_read_us_total.saturating_add(read_us);
+        self.sample_read_us_max = self.sample_read_us_max.max(read_us);
+        if let Some(previous) = self.previous_sample_us {
+            self.interval_jitter_us_max = self.interval_jitter_us_max.max(
+                elapsed_us
+                    .saturating_sub(previous)
+                    .abs_diff(self.interval_us),
+            );
+        }
+        self.previous_sample_us = Some(elapsed_us);
         self.unavailable.extend(point.unavailable.clone());
         if let Some((_, previous)) = self.points.last() {
             for (key, before) in &previous.values {
@@ -64,6 +87,16 @@ impl Capture {
         }
         self.points.push((elapsed_us, point));
     }
+
+    fn overhead(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sample_count": self.samples,
+            "sample_read_us_total": self.sample_read_us_total,
+            "sample_read_us_max": self.sample_read_us_max,
+            "interval_jitter_us_max": self.interval_jitter_us_max,
+            "configured_interval_us": self.interval_us,
+        })
+    }
 }
 
 pub(super) struct Sampler {
@@ -72,7 +105,9 @@ pub(super) struct Sampler {
 }
 impl Sampler {
     pub(super) fn start(path: PathBuf, interval_ms: u64) -> Result<Self, String> {
+        let initial_started = Instant::now();
         let initial = snapshot(&path);
+        let initial_read_us = initial_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         if initial.values.is_empty() {
             return Err(
                 "Exclusive agent cgroup exposes no readable pressure/accounting fields".into(),
@@ -83,16 +118,18 @@ impl Sampler {
         let handle = std::thread::Builder::new()
             .name("asb-agent-pressure".into())
             .spawn(move || {
-                let mut capture = Capture::new(initial);
+                let mut capture =
+                    Capture::new(initial, initial_read_us, interval_ms.saturating_mul(1_000));
                 loop {
                     let stopped = !matches!(
                         receiver.recv_timeout(Duration::from_millis(interval_ms)),
                         Err(mpsc::RecvTimeoutError::Timeout)
                     );
-                    capture.push(
-                        started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                        snapshot(&path),
-                    );
+                    let read_started = Instant::now();
+                    let point = snapshot(&path);
+                    let elapsed_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    let read_us = read_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    capture.push(elapsed_us, point, read_us);
                     if stopped {
                         break;
                     }
@@ -430,6 +467,7 @@ pub(super) fn report(
         "reason":reason.or(if metrics.is_empty() {Some("No complete agent-only execution interval was observed")} else {None}),
         "duration_us":duration_us, "observations":metrics, "unavailable":unavailable,
         "limitations":LIMITATIONS,
+        "collector_overhead":capture.map(Capture::overhead),
     });
     let mut report = summary.clone();
     report["metrics"] = report
@@ -506,12 +544,16 @@ mod tests {
     }
     #[test]
     fn counters_use_real_intervals_and_thread_throttling_is_not_wall_occupancy() {
-        let mut capture = Capture::new(point(&[
-            ("cpu.some_total_us", 100),
-            ("cpu.throttled_total_us", 0),
-            ("memory.current_bytes", 20),
-            ("io.read_bytes", 1),
-        ]));
+        let mut capture = Capture::new(
+            point(&[
+                ("cpu.some_total_us", 100),
+                ("cpu.throttled_total_us", 0),
+                ("memory.current_bytes", 20),
+                ("io.read_bytes", 1),
+            ]),
+            1,
+            1_000_000,
+        );
         capture.push(
             1_000_000,
             point(&[
@@ -520,6 +562,7 @@ mod tests {
                 ("memory.current_bytes", 10),
                 ("io.read_bytes", 101),
             ]),
+            2,
         );
         let (report, summary) = report(
             Some(&capture),
@@ -549,13 +592,17 @@ mod tests {
             1.0
         );
         assert_eq!(report["raw_initial"]["values"]["cpu.some_total_us"], 100);
+        assert_eq!(summary["collector_overhead"]["sample_count"], 2);
+        assert_eq!(summary["collector_overhead"]["sample_read_us_total"], 3);
+        assert_eq!(summary["collector_overhead"]["sample_read_us_max"], 2);
+        assert_eq!(summary["collector_overhead"]["interval_jitter_us_max"], 0);
         assert!(summary.get("series").is_none());
     }
 
     #[test]
     fn owned_container_scope_is_explicit_not_agent_process_tree() {
-        let mut capture = Capture::new(point(&[("memory.current_bytes", 10)]));
-        capture.push(1_000, point(&[("memory.current_bytes", 11)]));
+        let mut capture = Capture::new(point(&[("memory.current_bytes", 10)]), 1, 1_000);
+        capture.push(1_000, point(&[("memory.current_bytes", 11)]), 2);
         let (report, summary) = report(
             Some(&capture),
             None,
@@ -572,19 +619,25 @@ mod tests {
     }
     #[test]
     fn reset_and_mid_capture_loss_invalidate_entire_metric_not_other_fields() {
-        let mut capture = Capture::new(point(&[("cpu.some_total_us", 20), ("io.read_bytes", 10)]));
+        let mut capture = Capture::new(
+            point(&[("cpu.some_total_us", 20), ("io.read_bytes", 10)]),
+            1,
+            100,
+        );
         capture.push(
             100,
             point(&[("cpu.some_total_us", 10), ("io.read_bytes", 11)]),
+            2,
         );
         let mut missing = point(&[("cpu.some_total_us", 30)]);
         missing
             .unavailable
             .insert("io.read_bytes".into(), "fixture inaccessible".into());
-        capture.push(200, missing);
+        capture.push(200, missing, 2);
         capture.push(
             300,
             point(&[("cpu.some_total_us", 50), ("io.read_bytes", 15)]),
+            2,
         );
         let (report, summary) = report(
             Some(&capture),
@@ -603,11 +656,12 @@ mod tests {
     }
     #[test]
     fn retained_series_is_bounded_and_preserves_actual_elapsed_timestamps() {
-        let mut capture = Capture::new(point(&[("cpu.some_total_us", 0)]));
+        let mut capture = Capture::new(point(&[("cpu.some_total_us", 0)]), 1, 1_000);
         for index in 1..MAX_POINTS * 3 {
             capture.push(
                 index as u64 * 1000,
                 point(&[("cpu.some_total_us", index as u64)]),
+                1,
             );
         }
         assert!(capture.downsampled);
