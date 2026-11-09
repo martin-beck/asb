@@ -165,6 +165,126 @@ fn verify_descendant_at(value: &serde_json::Value, proc: &Path) -> Result<LocalT
         return Err("isolated driver does not belong to its owned container".into());
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let candidates = descendant_candidates(proc, target.daemon_pid, deadline)?;
+    let mut selected = None;
+    for pid in candidates.into_iter().skip(1) {
+        if std::time::Instant::now() >= deadline {
+            return Err("isolated target candidate scan exceeded its deadline".into());
+        }
+        let mut candidate = value.clone();
+        candidate["daemon_pid"] = serde_json::json!(pid);
+        if let Ok(found) = verify_at(&candidate, proc) {
+            if selected.is_some() {
+                return Err("isolated stopped target identity is ambiguous".into());
+            }
+            selected = Some(found);
+        }
+    }
+    if start_time(&read(&driver.join("stat"))?)? != driver_start
+        || read(&driver.join("cgroup"))? != cgroup
+    {
+        return Err("isolated driver changed during target resolution".into());
+    }
+    let selected = selected.ok_or("cannot identify the stopped agent under its owned driver")?;
+    let mut final_candidate = value.clone();
+    final_candidate["daemon_pid"] = serde_json::json!(selected.pid);
+    verify_at(&final_candidate, proc)
+}
+
+/// Prefer the kernel's per-thread child lists.  Under a dense concurrent
+/// sweep this avoids having every verification walk the entire host `/proc`
+/// tree.  `children` belongs to each thread, rather than only the process
+/// leader: a Docker driver may spawn the owned target from a non-leader
+/// thread. Some fixture roots and constrained procfs mounts omit this Linux
+/// interface or prevent a complete thread traversal, so retain the bounded
+/// stat-scan fallback for those environments.
+fn descendant_candidates(
+    proc: &Path,
+    root: u32,
+    deadline: std::time::Instant,
+) -> Result<Vec<u32>, String> {
+    match descendants_from_children(proc, root, deadline)? {
+        Some(candidates) => Ok(candidates),
+        None => descendants_from_stat_scan(proc, root, deadline),
+    }
+}
+
+const TARGET_PROCESS_TREE_LIMIT: usize = 4096;
+
+fn descendants_from_children(
+    proc: &Path,
+    root: u32,
+    deadline: std::time::Instant,
+) -> Result<Option<Vec<u32>>, String> {
+    let mut candidates = vec![root];
+    let mut seen = std::collections::BTreeSet::from([root]);
+    let mut index = 0;
+    while index < candidates.len() {
+        if std::time::Instant::now() >= deadline {
+            return Err("isolated target candidate scan exceeded its deadline".into());
+        }
+        let pid = candidates[index];
+        let task_root = proc.join(pid.to_string()).join("task");
+        let tasks = match std::fs::read_dir(&task_root) {
+            Ok(tasks) => tasks,
+            // We cannot prove that a per-thread traversal covers every
+            // launcher thread, so use the existing bounded stat fallback.
+            Err(_) => return Ok(None),
+        };
+        for (task_index, task) in tasks.enumerate() {
+            if std::time::Instant::now() >= deadline {
+                return Err("isolated target candidate scan exceeded its deadline".into());
+            }
+            if task_index >= TARGET_PROCESS_TREE_LIMIT {
+                // More task entries than the bounded candidate traversal can
+                // prove complete coverage for. Retain the pre-existing
+                // bounded stat fallback rather than silently omitting a
+                // launcher thread.
+                return Ok(None);
+            }
+            let task = match task {
+                Ok(task) => task,
+                Err(_) => return Ok(None),
+            };
+            let Some(tid) = task
+                .file_name()
+                .to_str()
+                .and_then(|tid| tid.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if tid == 0 {
+                return Err("isolated target task list is invalid".into());
+            }
+            let children = match read(&task.path().join("children")) {
+                Ok(children) => children,
+                Err(_) => return Ok(None),
+            };
+            for child in children.split_ascii_whitespace() {
+                let pid = child
+                    .parse::<u32>()
+                    .map_err(|_| "isolated target children list is invalid")?;
+                if pid == 0 {
+                    return Err("isolated target children list is invalid".into());
+                }
+                if seen.insert(pid) {
+                    candidates.push(pid);
+                }
+                if candidates.len() > TARGET_PROCESS_TREE_LIMIT {
+                    return Err("isolated target process tree exceeds its bound".into());
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(Some(candidates))
+}
+
+fn descendants_from_stat_scan(
+    proc: &Path,
+    root: u32,
+    deadline: std::time::Instant,
+) -> Result<Vec<u32>, String> {
     let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
     let entries =
         std::fs::read_dir(proc).map_err(|_| "cannot enumerate isolated target candidates")?;
@@ -191,8 +311,8 @@ fn verify_descendant_at(value: &serde_json::Value, proc: &Path) -> Result<LocalT
         };
         children.entry(parent).or_default().push(pid);
     }
-    let mut candidates = vec![target.daemon_pid];
-    let mut seen = std::collections::BTreeSet::from([target.daemon_pid]);
+    let mut candidates = vec![root];
+    let mut seen = std::collections::BTreeSet::from([root]);
     let mut index = 0;
     while index < candidates.len() {
         if let Some(items) = children.get(&candidates[index]) {
@@ -207,29 +327,7 @@ fn verify_descendant_at(value: &serde_json::Value, proc: &Path) -> Result<LocalT
         }
         index += 1;
     }
-    let mut selected = None;
-    for pid in candidates.into_iter().skip(1) {
-        if std::time::Instant::now() >= deadline {
-            return Err("isolated target candidate scan exceeded its deadline".into());
-        }
-        let mut candidate = value.clone();
-        candidate["daemon_pid"] = serde_json::json!(pid);
-        if let Ok(found) = verify_at(&candidate, proc) {
-            if selected.is_some() {
-                return Err("isolated stopped target identity is ambiguous".into());
-            }
-            selected = Some(found);
-        }
-    }
-    if start_time(&read(&driver.join("stat"))?)? != driver_start
-        || read(&driver.join("cgroup"))? != cgroup
-    {
-        return Err("isolated driver changed during target resolution".into());
-    }
-    let selected = selected.ok_or("cannot identify the stopped agent under its owned driver")?;
-    let mut final_candidate = value.clone();
-    final_candidate["daemon_pid"] = serde_json::json!(selected.pid);
-    verify_at(&final_candidate, proc)
+    Ok(candidates)
 }
 
 /// Candidate daemon PIDs are hints, never authority or a substitute bridge PID.
@@ -494,6 +592,145 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn descendants_prefer_proc_children_without_scanning_unrelated_processes() {
+        let root = std::env::temp_dir()
+            .join(super::super::TaskIdentity::local("target-proc-children", None).attempt_id);
+        for pid in [100, 101, 102] {
+            std::fs::create_dir_all(
+                root.join(pid.to_string())
+                    .join("task")
+                    .join(pid.to_string()),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("100/task/100/children"), "101\n").unwrap();
+        std::fs::write(root.join("101/task/101/children"), "102\n").unwrap();
+        std::fs::write(root.join("102/task/102/children"), "").unwrap();
+
+        assert_eq!(
+            descendants_from_children(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap()
+            .unwrap(),
+            vec![100, 101, 102]
+        );
+        assert_eq!(
+            descendant_candidates(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap(),
+            vec![100, 101, 102]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descendants_include_children_of_non_leader_threads() {
+        let root = std::env::temp_dir().join(
+            super::super::TaskIdentity::local("target-proc-non-leader-children", None).attempt_id,
+        );
+        for (pid, tid) in [(100, 100), (100, 101), (102, 102)] {
+            std::fs::create_dir_all(
+                root.join(pid.to_string())
+                    .join("task")
+                    .join(tid.to_string()),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("100/task/100/children"), "").unwrap();
+        std::fs::write(root.join("100/task/101/children"), "102\n").unwrap();
+        std::fs::write(root.join("102/task/102/children"), "").unwrap();
+
+        assert_eq!(
+            descendants_from_children(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap()
+            .unwrap(),
+            vec![100, 102]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descendants_fall_back_to_bounded_stat_scan_when_thread_lists_are_incomplete() {
+        let root = std::env::temp_dir().join(
+            super::super::TaskIdentity::local("target-proc-children-fallback", None).attempt_id,
+        );
+        for (pid, parent) in [(100, 1), (101, 100)] {
+            std::fs::create_dir_all(root.join(pid.to_string())).unwrap();
+            std::fs::write(
+                root.join(pid.to_string()).join("stat"),
+                format!("{pid} (fixture) S {parent} {}", ["0"; 20].join(" ")),
+            )
+            .unwrap();
+        }
+        // A visible task directory without its per-thread children list is
+        // incomplete coverage, not proof that there are no descendants.
+        std::fs::create_dir_all(root.join("100/task/100")).unwrap();
+        assert_eq!(
+            descendants_from_children(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            descendant_candidates(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .unwrap(),
+            vec![100, 101]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descendants_fall_back_when_thread_list_exceeds_its_bound() {
+        let root = std::env::temp_dir()
+            .join(super::super::TaskIdentity::local("target-proc-thread-bound", None).attempt_id);
+        for tid in 100..=u32::try_from(100 + TARGET_PROCESS_TREE_LIMIT).unwrap() {
+            let task = root.join("100/task").join(tid.to_string());
+            std::fs::create_dir_all(&task).unwrap();
+            std::fs::write(task.join("children"), "").unwrap();
+        }
+        assert_eq!(
+            descendants_from_children(
+                &root,
+                100,
+                std::time::Instant::now() + std::time::Duration::from_secs(5)
+            )
+            .unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn descendants_stop_when_thread_traversal_deadline_has_elapsed() {
+        let root = std::env::temp_dir().join(
+            super::super::TaskIdentity::local("target-proc-thread-deadline", None).attempt_id,
+        );
+        let task = root.join("100/task/100");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join("children"), "").unwrap();
+        assert!(descendants_from_children(&root, 100, std::time::Instant::now()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn stat_parser_rejects_partial_or_zero_start_times() {
         assert!(start_time("1 (partial)").is_err());
