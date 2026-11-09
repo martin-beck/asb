@@ -163,11 +163,17 @@ class RelayTests(unittest.TestCase):
                 self.cleanup(self.process)
 
     def test_target_count_is_bounded(self):
-        for count in ("0", "65", "-1", "not-a-number"):
+        for count in ("0", "513", "-1", "not-a-number"):
             result = subprocess.run([os.environ["ASB_TEST_HOST_ASB"], "__asb-relay", count],
                                     capture_output=True, timeout=3)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b"")
+
+        # The supported population was raised from 64 to 512. Confirm that a
+        # value just above the former cap is admitted and exits on input EOF.
+        admitted = subprocess.run([os.environ["ASB_TEST_HOST_ASB"], "__asb-relay", "65"],
+                                  input=b"", capture_output=True, timeout=10)
+        self.assertEqual(admitted.returncode, 0, admitted.stderr)
 
     def test_listener_arguments_cannot_expose_non_loopback_interfaces(self):
         for address in ("0.0.0.0", "::", "192.0.2.1", "localhost", "not-an-address"):
