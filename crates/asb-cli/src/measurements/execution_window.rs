@@ -88,6 +88,15 @@ impl Window {
         self.invalid = true;
     }
 
+    /// A terminal outcome after an execution interval completed does not erase
+    /// the interval. The outcome remains in the run record; this receipt only
+    /// establishes that the measured execution phase occurred.
+    pub(super) fn invalidate_if_incomplete(&mut self) {
+        if !self.completed {
+            self.invalid = true;
+        }
+    }
+
     fn receipt(&self) -> Receipt<'_> {
         let native_observed = !self.invalid
             && self.completed
@@ -349,6 +358,23 @@ mod tests {
         assert_eq!(receipt.live_observations, 0);
         assert_eq!(receipt.start_bound_ns, Some(10));
         assert_eq!(receipt.end_bound_ns, Some(20));
+    }
+
+    #[test]
+    fn completed_execution_interval_survives_a_later_terminal_failure() {
+        let mut w = Window {
+            phase_domain: Some("a".repeat(64)),
+            phase_begin: Some(10),
+            phase_end: Some(20),
+            completed: true,
+            ..Window::default()
+        };
+        w.invalidate_if_incomplete();
+        assert_eq!(w.receipt().status, "observed");
+
+        let mut incomplete = Window::default();
+        incomplete.invalidate_if_incomplete();
+        assert_eq!(incomplete.receipt().status, "unavailable");
     }
     #[test]
     fn missing_short_failed_or_backwards_observations_are_not_zero_windows() {

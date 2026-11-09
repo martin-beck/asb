@@ -776,8 +776,11 @@ impl Session {
                 self.execution_window.borrow_mut().begin_execution_phase()
             }
             collectors::LifecycleEvent::AgentExecuteEnd => self.execution_window.borrow_mut().end(),
-            collectors::LifecycleEvent::RunFailed
-            | collectors::LifecycleEvent::AgentWaitFailed
+            collectors::LifecycleEvent::RunFailed => self
+                .execution_window
+                .borrow_mut()
+                .invalidate_if_incomplete(),
+            collectors::LifecycleEvent::AgentWaitFailed
             | collectors::LifecycleEvent::AgentAttachFailed
             | collectors::LifecycleEvent::AgentSpawnFailed => {
                 self.execution_window.borrow_mut().invalidate()
