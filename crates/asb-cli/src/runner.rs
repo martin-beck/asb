@@ -795,6 +795,24 @@ fn run_dispatched(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
+    // Keep admission alive through replica settlement and managed cleanup. All
+    // cooperating campaigns for this user share the same host-local lock path.
+    let admission = if config.runtime.cpu_pool.is_some() {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Error::Input("CPU pool needs HOME to coordinate local campaign leases".into())
+            })?;
+        let lock_directory = Path::new(&home).join(".cache/asb/cpu-leases");
+        crate::runtime::admission::Admission::acquire(
+            &config.runtime,
+            config.concurrency,
+            &lock_directory,
+        )
+        .map_err(Error::Input)?
+    } else {
+        None
+    };
     // Parallel sweep configurations can share project-local tool paths.
     // Serialize readiness publication, not benchmark execution.
     static RUNTIME_PREPARATION: Mutex<()> = Mutex::new(());
@@ -849,8 +867,28 @@ fn run_dispatched(
     if config.concurrency > 1 {
         // Concurrent replicas buffer ordinary output for deterministic ordered
         // presentation. A shared one-line display would race those buffers.
-        return run_concurrent(config_path, &config, options, output, warnings);
+        return run_concurrent(
+            config_path,
+            &config,
+            options,
+            admission.as_ref(),
+            output,
+            warnings,
+        );
     }
+    let allocation = admission
+        .as_ref()
+        .map(|value| {
+            value
+                .replica(1)
+                .ok_or_else(|| Error::Run("CPU allocation missing for replica 1".into()))
+        })
+        .transpose()?;
+    let options = RunOptions {
+        cpu_allocation: allocation.map(|(cpus, _)| cpus),
+        cpu_affinity: allocation.map(|(_, mask)| mask),
+        ..options
+    };
     run_mode(config_path, config, options, output, warnings)
 }
 
@@ -862,6 +900,7 @@ fn run_concurrent(
     config_path: &Path,
     config: &BenchmarkConfig,
     options: RunOptions<'_>,
+    admission: Option<&crate::runtime::admission::Admission>,
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
@@ -942,10 +981,22 @@ fn run_concurrent(
                             cassette.as_ref().map(|(_, path)| path.to_string_lossy());
                         let cassette_path = cassette_path.as_deref();
                         let measurement_path = measurement.as_deref().and_then(Path::to_str);
+                        let allocation = admission
+                            .map(|value| {
+                                value.replica(index + 1).ok_or_else(|| {
+                                    Error::Run(format!(
+                                        "CPU allocation missing for replica {}",
+                                        index + 1
+                                    ))
+                                })
+                            })
+                            .transpose()?;
                         run_mode(
                             config_path,
                             replica,
                             RunOptions {
+                                cpu_allocation: allocation.map(|(cpus, _)| cpus),
+                                cpu_affinity: allocation.map(|(_, mask)| mask),
                                 replica: replica::Identity {
                                     index: index + 1,
                                     total: config.concurrency,
@@ -2342,6 +2393,7 @@ mod tests {
                 preparation_gate: Some(&gate),
                 ..Default::default()
             },
+            None,
             &mut output,
             &warnings,
         );

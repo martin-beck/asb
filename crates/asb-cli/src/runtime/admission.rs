@@ -118,4 +118,33 @@ mod tests {
         assert!(Admission::acquire(&settings, 1, &root).unwrap().is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn concurrent_replicas_receive_distinct_stable_allocations() {
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let allowed = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim();
+        let pool = CpuPool::parse(allowed, 1).unwrap();
+        let Ok(groups) = pool.allocate(2) else { return };
+        let settings = RuntimeSettings {
+            cpu_pool: Some(CpuPoolSettings {
+                cpus: format!("{},{}", groups[0][0], groups[1][0]),
+                num_cpus_per_instance: 1,
+            }),
+            ..Default::default()
+        };
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let admission = Admission::acquire(&settings, 2, &root).unwrap().unwrap();
+        assert_eq!(admission.replica(1).unwrap().0, groups[0]);
+        assert_eq!(admission.replica(2).unwrap().0, groups[1]);
+        assert_ne!(
+            admission.replica(1).unwrap().0,
+            admission.replica(2).unwrap().0
+        );
+        drop(admission);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
