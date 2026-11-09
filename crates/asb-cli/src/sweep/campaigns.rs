@@ -515,15 +515,15 @@ impl Pool {
                 warnings,
             ),
         };
-        if let Err(failure) = &result {
-            if let Some(settlements) = &entry.sweep_settlements {
-                let reason = format!(
-                    "campaign configuration failed before sweep-wide grading: {}",
-                    failure.to_string().chars().take(512).collect::<String>()
-                );
-                for settlement in settlements {
-                    settlement.abort(&reason);
-                }
+        if let Err(failure) = &result
+            && let Some(settlements) = &entry.sweep_settlements
+        {
+            let reason = format!(
+                "campaign configuration failed before sweep-wide grading: {}",
+                failure.to_string().chars().take(512).collect::<String>()
+            );
+            for settlement in settlements {
+                settlement.abort(&reason);
             }
         }
         let settled = match &entry.settlement {
