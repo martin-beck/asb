@@ -906,9 +906,9 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
     project.write("results/sweep-comparison/report.html", "retain report");
     for options in [
         ["--jobs", "0"],
-        ["--jobs", "33"],
+        ["--jobs", "513"],
         ["--max-active-attempts", "0"],
-        ["--max-active-attempts", "65"],
+        ["--max-active-attempts", "513"],
         ["--max-active-attempts", "1"],
     ] {
         let result = project.command(&["sweep", "sweep.toml", options[0], options[1]]);
@@ -927,7 +927,7 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
     }
     project.write(
         "benchmark.toml",
-        "agent='pi'\nworkload='bug-fix'\nprovider='cli2key'\nmodel='fixture'\nconcurrency=65\n",
+        "agent='pi'\nworkload='bug-fix'\nprovider='cli2key'\nmodel='fixture'\nconcurrency=513\n",
     );
     for arguments in [
         vec!["run", "benchmark.toml"],
@@ -935,7 +935,7 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
     ] {
         expect_failure(
             &project.command(&arguments),
-            "concurrency must not exceed 64",
+            "concurrency must not exceed 512",
         );
     }
     expect_failure(
@@ -950,11 +950,11 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
             "--workload",
             "bug-fix",
             "--concurrency",
-            "65",
+            "513",
             "--output",
             "invalid.toml",
         ]),
-        "concurrency must not exceed 64",
+        "concurrency must not exceed 512",
     );
     assert!(!project.0.join("invalid.toml").exists());
     let help = project.command(&["sweep", "--help"]);
