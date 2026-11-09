@@ -330,6 +330,56 @@ static SHARED_PROVIDERS: std::sync::Mutex<
     std::collections::BTreeMap<PathBuf, std::sync::Arc<SharedFinish>>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// Test-only observation at the campaign-wide execution/grading boundary.
+///
+/// This is deliberately root-scoped and shared rather than thread-local: a
+/// fresh campaign runs admitted configurations on scheduler workers.  It is
+/// compiled only for the crate's private test support and cannot alter a
+/// production execution path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CampaignSettlementPhase {
+    BeforeSweepBarrier,
+    BeforeGrading,
+}
+type SharedCampaignSettlementProbe = dyn Fn(CampaignSettlementPhase) + Send + Sync + 'static;
+static SHARED_CAMPAIGN_SETTLEMENT_PROBES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, std::sync::Arc<SharedCampaignSettlementProbe>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub(crate) struct CampaignSettlementProbeScope(PathBuf);
+impl CampaignSettlementProbeScope {
+    pub fn new(root: &Path, probe: std::sync::Arc<SharedCampaignSettlementProbe>) -> Self {
+        let root = root.canonicalize().unwrap();
+        assert!(
+            SHARED_CAMPAIGN_SETTLEMENT_PROBES
+                .lock()
+                .unwrap()
+                .insert(root.clone(), probe)
+                .is_none()
+        );
+        Self(root)
+    }
+}
+impl Drop for CampaignSettlementProbeScope {
+    fn drop(&mut self) {
+        SHARED_CAMPAIGN_SETTLEMENT_PROBES
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
+
+pub(crate) fn observe_campaign_settlement(root: &Path, phase: CampaignSettlementPhase) {
+    let probe = SHARED_CAMPAIGN_SETTLEMENT_PROBES
+        .lock()
+        .unwrap()
+        .get(root)
+        .cloned();
+    if let Some(probe) = probe {
+        probe(phase);
+    }
+}
+
 /// Root-scoped fixture shared with actual concurrent runner threads. No runtime
 /// environment switches or production provider registry changes are involved.
 pub(crate) struct SharedProviderScope(PathBuf);

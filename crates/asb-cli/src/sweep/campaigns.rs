@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -20,6 +20,9 @@ struct Entry {
     published: Mutex<Option<Worker>>,
     settlement: Settlement,
     stop: AtomicBool,
+    /// One member for every repeat.  Presence means scheduler admission proved
+    /// that the entire campaign population can run at once.
+    sweep_settlements: Option<Vec<runner::batch::SweepSettlement>>,
 }
 
 enum Settlement {
@@ -317,18 +320,124 @@ pub(super) fn prepare(
     Ok(Some(Prepared { entries }))
 }
 
+/// Enable the cross-configuration execution/collection boundary only when the
+/// scheduler can admit every configuration and replica in each repeat.  A
+/// partially admitted population would wait on work that cannot start, so it
+/// deliberately retains the existing per-configuration boundary instead.
+fn sweep_settlements(
+    plan: &plan::SweepPlan,
+    scheduling: super::scheduler::Scheduling,
+    weights: &[usize],
+    reservations: &[crate::planning::Resources],
+) -> Result<Option<Vec<Vec<runner::batch::SweepSettlement>>>, Error> {
+    let Some(intent) = &plan.execution else {
+        return Ok(None);
+    };
+    if weights.len() != plan.entries.len() || reservations.len() != weights.len() {
+        return Err(error(
+            "campaign scheduler shape differs from published plans",
+        ));
+    }
+    let total = weights
+        .iter()
+        .try_fold(0usize, |sum, weight| sum.checked_add(*weight));
+    let resources = reservations
+        .iter()
+        .try_fold(crate::planning::Resources::default(), |sum, reservation| {
+            sum.checked_add(*reservation)
+        });
+    let Some(total) = total else { return Ok(None) };
+    let Some(resources) = resources else {
+        return Ok(None);
+    };
+    if !all_at_once(
+        plan.entries.len(),
+        total,
+        resources,
+        plan.resources,
+        scheduling,
+    ) {
+        return Ok(None);
+    }
+    let timeout = crate::planning::BatchAdmissionPolicy::current().launch_timeout();
+    let mut cohorts = Vec::with_capacity(intent.repeat as usize);
+    for _ in 0..intent.repeat {
+        cohorts.push(Arc::new(
+            runner::batch::SettlementBarrier::selected(
+                total,
+                &(1..=total).collect::<Vec<_>>(),
+                timeout,
+            )
+            .map_err(|failure| error(&failure.to_string()))?,
+        ));
+    }
+    let mut first = 1usize;
+    let mut entries = Vec::with_capacity(weights.len());
+    for weight in weights {
+        let entry = cohorts
+            .iter()
+            .cloned()
+            .map(|barrier| runner::batch::SweepSettlement::selected(barrier, first, total))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|failure| error(&failure.to_string()))?;
+        first = first
+            .checked_add(*weight)
+            .ok_or_else(|| error("sweep settlement member range overflow"))?;
+        entries.push(entry);
+    }
+    Ok(Some(entries))
+}
+
+fn all_at_once(
+    configurations: usize,
+    total: usize,
+    resources: crate::planning::Resources,
+    capacity: Option<crate::planning::Resources>,
+    scheduling: super::scheduler::Scheduling,
+) -> bool {
+    configurations > 1
+        && total <= crate::benchmark::MAX_CONCURRENCY
+        && scheduling.jobs >= configurations
+        && scheduling.max_active_attempts >= total
+        && capacity.is_none_or(|capacity| resources.fits(capacity))
+}
+
 impl Prepared {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn publish(self, results: &Path) -> Result<Pool, Error> {
+        self.publish_with_scheduling(results, None)
+    }
+
+    pub fn publish_with_scheduling(
+        self,
+        results: &Path,
+        scheduling: Option<(
+            &plan::SweepPlan,
+            super::scheduler::Scheduling,
+            &[usize],
+            &[crate::planning::Resources],
+        )>,
+    ) -> Result<Pool, Error> {
         // Collect ALL publications before returning execution authority. A
         // failure drops locks but retains the index and already-published roots.
+        let sweep_settlements = scheduling
+            .map(|(plan, scheduling, weights, reservations)| {
+                sweep_settlements(plan, scheduling, weights, reservations)
+            })
+            .transpose()?
+            .flatten();
         let entries = self
             .entries
             .into_iter()
-            .map(|(prepared, root)| {
+            .enumerate()
+            .map(|(index, (prepared, root))| {
                 runner::repeated::publish_campaign(prepared).map(|published| Entry {
                     published: Mutex::new(Some(Worker::Fresh(Box::new(published)))),
                     settlement: Settlement::Attempt(root),
                     stop: AtomicBool::new(false),
+                    sweep_settlements: sweep_settlements
+                        .as_ref()
+                        .map(|entries| entries[index].clone()),
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -367,6 +476,7 @@ impl Pool {
                         })))),
                         settlement,
                         stop: AtomicBool::new(false),
+                        sweep_settlements: None,
                     }
                 })
                 .collect(),
@@ -390,7 +500,12 @@ impl Pool {
                 .ok_or_else(|| error("campaign was already consumed"))?
         };
         let result = match published {
-            Worker::Fresh(published) => runner::repeated::execute(*published, output, warnings),
+            Worker::Fresh(published) => runner::repeated::execute_with_sweep_settlement(
+                *published,
+                entry.sweep_settlements.as_deref(),
+                output,
+                warnings,
+            ),
             Worker::Continued(worker) => worker.admitted.execute(
                 worker.json,
                 worker.show_output,
@@ -400,6 +515,17 @@ impl Pool {
                 warnings,
             ),
         };
+        if let Err(failure) = &result
+            && let Some(settlements) = &entry.sweep_settlements
+        {
+            let reason = format!(
+                "campaign configuration failed before sweep-wide grading: {}",
+                failure.to_string().chars().take(512).collect::<String>()
+            );
+            for settlement in settlements {
+                settlement.abort(&reason);
+            }
+        }
         let settled = match &entry.settlement {
             // Reuse validates the complete retained population without a new
             // attempt; absence of a new finished.json is therefore expected.

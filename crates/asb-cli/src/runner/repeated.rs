@@ -657,6 +657,15 @@ pub(crate) fn execute(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
+    execute_with_sweep_settlement(published, None, output, warnings)
+}
+
+pub(crate) fn execute_with_sweep_settlement(
+    published: PublishedCampaign,
+    sweep_settlements: Option<&[batch::SweepSettlement]>,
+    output: &mut dyn Write,
+    warnings: &Mutex<BTreeSet<String>>,
+) -> Result<(), Error> {
     let PublishedCampaign {
         config_path,
         options,
@@ -775,6 +784,12 @@ pub(crate) fn execute(
         } else {
             private_cassette.clone()
         };
+        let sweep_settlement = match sweep_settlements {
+            Some(settlements) => Some(settlements.get((number - 1) as usize).ok_or_else(|| {
+                Error::Input("sweep settlement cohort differs from campaign repeat count".into())
+            })?),
+            None => None,
+        };
         let settled = execution::BatchRun {
             config_path: &config_path,
             plan: &plan,
@@ -791,6 +806,7 @@ pub(crate) fn execute(
                 .map(|_| super::recording::producer(&root, number, 1, config.concurrency)),
             recording: recording.clone(),
             normalization: normalization.as_ref(),
+            sweep_settlement,
             reused: None,
         }
         .execute(dispatch, output, warnings)?;

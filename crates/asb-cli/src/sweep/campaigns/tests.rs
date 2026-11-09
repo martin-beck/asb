@@ -144,3 +144,47 @@ fn late_invalid_source_metadata_precedes_any_earlier_payload_hash() {
         fixture.refuse(selector, if selector { "byte limit" } else { "64 MiB" });
     }
 }
+
+#[test]
+fn global_settlement_requires_full_scheduler_and_resource_admission() {
+    let resources = crate::planning::Resources {
+        cpu_millis: 300,
+        memory_mib: 30,
+        disk_mib: 3,
+    };
+    let full = super::super::scheduler::Scheduling {
+        jobs: 3,
+        max_active_attempts: 6,
+    };
+    assert!(super::all_at_once(3, 6, resources, Some(resources), full));
+    assert!(!super::all_at_once(
+        3,
+        6,
+        resources,
+        Some(resources),
+        super::super::scheduler::Scheduling {
+            jobs: 2,
+            max_active_attempts: 6,
+        },
+    ));
+    assert!(!super::all_at_once(
+        3,
+        6,
+        resources,
+        Some(resources),
+        super::super::scheduler::Scheduling {
+            jobs: 3,
+            max_active_attempts: 5,
+        },
+    ));
+    assert!(!super::all_at_once(
+        3,
+        6,
+        resources,
+        Some(crate::planning::Resources {
+            cpu_millis: 299,
+            ..resources
+        }),
+        full,
+    ));
+}
