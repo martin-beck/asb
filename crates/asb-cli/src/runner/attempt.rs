@@ -42,6 +42,11 @@ impl<'a> ConfiguredAttempt<'a> {
             project_config,
         } = admitted;
         super::validate_runtime_configuration(&config)?;
+        if options.cpu_allocation.is_some() != options.cpu_affinity.is_some() {
+            return Err(Error::Run(
+                "CPU allocation and affinity mask must be admitted together".into(),
+            ));
+        }
         if options.recording.is_some() && options.mode != Some(tape::Mode::Record) {
             return Err(Error::Run(
                 "recording attempt lost its selected record mode before adapter preparation".into(),
@@ -999,7 +1004,7 @@ impl<'a> ReadyAttempt<'a> {
     ) -> Result<CompletedAttempt<'a>, Error> {
         let Self {
             context,
-            metadata,
+            mut metadata,
             mut prepared,
             selected_offer,
             launch,
@@ -1222,6 +1227,35 @@ impl<'a> ReadyAttempt<'a> {
                 return Err(error);
             }
         };
+        if let Some(cpus) = options.cpu_allocation {
+            let Some(runtime_evidence) =
+                crate::runtime::evidence::launched(&config.runtime, cpus, evidence.guest.is_some())
+            else {
+                let error = Error::Run("CPU allocation lost its runtime configuration".into());
+                if let Some(arrival) = arrival.as_mut() {
+                    arrival.abort(&error.to_string());
+                }
+                return Err(error);
+            };
+            let dispatch = options.execution_cohort.and_then(|cohort| cohort.dispatch);
+            let record = crate::planning::persist_with_dispatch_and_runtime(
+                project_root,
+                &context.policy,
+                Some(metadata.effective_budgets),
+                Some(&prepared.workload.invocation().identity),
+                dispatch,
+                Some(&runtime_evidence),
+            );
+            match record {
+                Ok(path) => metadata.execution_plan = path,
+                Err(error) => {
+                    if let Some(arrival) = arrival.as_mut() {
+                        arrival.abort(&error.to_string());
+                    }
+                    return Err(error);
+                }
+            }
+        }
         let settled = prepared
             .executed(evidence, issues)
             .settle(tape_cassette.as_ref());

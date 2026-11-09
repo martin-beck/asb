@@ -30,6 +30,24 @@ pub fn planned(
     }))
 }
 
+/// Record the boundary verified at launch without asserting that descendants
+/// retain affinity or that independent containers and proxies were verified.
+pub fn launched(
+    settings: &RuntimeSettings,
+    cpus: &[u32],
+    managed_container: bool,
+) -> Option<serde_json::Value> {
+    let mut value = planned(settings, Some(cpus))?;
+    value["placement_status"] = serde_json::json!(if managed_container {
+        "managed_container_verified_before_execution"
+    } else {
+        "native_launcher_verified_before_exec"
+    });
+    value["effective_boundary_cpus"] = serde_json::json!(cpus);
+    value["proxy_placement_status"] = serde_json::json!("not_recorded");
+    Some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::settings::CpuPoolSettings;
@@ -59,5 +77,19 @@ mod tests {
             std::env::consts::ARCH
         );
         assert!(evidence.get("effective_replica_cpus").is_none());
+        let launched = launched(&settings, &[1, 3], false).unwrap();
+        assert_eq!(
+            launched["placement_status"],
+            "native_launcher_verified_before_exec"
+        );
+        assert_eq!(
+            launched["effective_boundary_cpus"],
+            serde_json::json!([1, 3])
+        );
+        assert_eq!(launched["proxy_placement_status"], "not_recorded");
+        assert_eq!(
+            super::launched(&settings, &[1, 3], true).unwrap()["placement_status"],
+            "managed_container_verified_before_execution"
+        );
     }
 }
