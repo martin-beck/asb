@@ -718,6 +718,30 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                         label,
                         suffix,
                     }) => {
+                        if name == "perf-symbol-quality.json"
+                            && let Some(document) =
+                                benchmark.collector_documents.get("perf-symbol-quality")
+                            && let Some(kernel) = document.get("kernel_symbols")
+                            && let Some(status) = kernel.get("status").and_then(Value::as_str)
+                        {
+                            let guidance =
+                                kernel.get("guidance").and_then(Value::as_str).unwrap_or("");
+                            let map_guidance = kernel
+                                .get("address_map_guidance")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            let build_id_guidance = kernel
+                                .get("build_id_guidance")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            previews.push_str(&format!(
+                                "<p class=\"perf-symbol-quality\">Kernel symbols: {}. {} {} {}</p>",
+                                escape(status),
+                                escape(guidance),
+                                escape(map_guidance),
+                                escape(build_id_guidance)
+                            ));
+                        }
                         previews.push_str(&format!(
                             "<p class=\"{}\">{}: <a href=\"{}\">{}</a>. {}</p>",
                             escape(class),
@@ -1817,6 +1841,10 @@ mod tests {
             r#"{"status":"completed","artifact":"flamegraph.svg"}"#,
         )
         .unwrap();
+        std::fs::write(
+            root.join("sweep-results/000-one/measurements/perf-symbol-quality.json"),
+            r#"{"kernel_symbols":{"status":"indeterminate","guidance":"unknown <frames>","address_map_guidance":"map hidden","build_id_guidance":"build unknown"}}"#,
+        ).unwrap();
         run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
         assert!(
             root.join("results/sweep-comparison/comparison.json")
@@ -1969,6 +1997,9 @@ mod tests {
         assert!(!report.contains("class=\"embedded-svg flamegraph\""));
         assert!(!report.contains("<object class=\"flamegraph\""));
         assert!(report.contains("Flamegraph collector status"));
+        assert!(report.contains("Kernel symbols: indeterminate."));
+        assert!(report.contains("unknown &lt;frames&gt;"));
+        assert!(report.contains("map hidden build unknown"));
         assert!(report.contains("class=\"interactive-chart\""));
         assert!(report.contains("series-perfetto.scheduler_events_per_s.svg"));
         assert!(report.contains("data-timestamp=\"12000\""));
