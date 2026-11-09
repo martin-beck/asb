@@ -134,7 +134,7 @@ impl CpuPool {
 }
 
 #[cfg(target_os = "linux")]
-fn read_small(path: &str) -> Result<String, String> {
+pub(super) fn read_small(path: &str) -> Result<String, String> {
     use std::io::Read;
     let file = std::fs::File::open(path)
         .map_err(|error| format!("cannot inspect target CPU information {path}: {error}"))?;

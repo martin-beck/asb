@@ -233,9 +233,14 @@ impl App {
             .selected_choices()
             .find_map(|choice| choice.key.concurrency())
             .ok_or_else(|| Error::Input("select a concurrency value".into()))?;
-        self.runtime_wizard
+        let mut settings = self
+            .runtime_wizard
             .settings(concurrency)
-            .map_err(Error::Input)
+            .map_err(Error::Input)?;
+        if settings.cpu_pool.is_some() && settings.cpu_description.is_none() {
+            settings.cpu_description = Some(crate::runtime::settings::CpuDescription::current());
+        }
+        Ok(settings)
     }
 
     fn describe_runtime(&mut self) {

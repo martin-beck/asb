@@ -39,6 +39,35 @@ pub struct CpuDescription {
 }
 
 impl CpuDescription {
+    /// Capture advisory local characteristics without binding a configuration
+    /// to a machine. Missing or unreadable observations remain unknown.
+    pub fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        let (model, logical_cpus) = {
+            let model = super::cpu_pool::read_small("/proc/cpuinfo")
+                .ok()
+                .and_then(|text| {
+                    text.lines().find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        (key.trim() == "model name")
+                            .then(|| value.trim().to_owned())
+                            .filter(|value| !value.is_empty())
+                    })
+                });
+            let logical_cpus = super::cpu_pool::read_small("/sys/devices/system/cpu/present")
+                .ok()
+                .and_then(|value| CpuPool::parse(value.trim(), 1).ok())
+                .map(|pool| pool.capacity());
+            (model, logical_cpus)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (model, logical_cpus) = (None, None);
+        Self {
+            architecture: Some(std::env::consts::ARCH.into()),
+            model,
+            logical_cpus,
+        }
+    }
     /// Human-readable differences; absent observations never become mismatches.
     pub fn differences(&self, actual: &Self) -> Vec<&'static str> {
         let mut differences = Vec::new();
@@ -165,5 +194,9 @@ mod tests {
             vec!["architecture", "logical CPU count"]
         );
         assert!(saved.differences(&CpuDescription::default()).is_empty());
+        assert_eq!(
+            CpuDescription::current().architecture.as_deref(),
+            Some(std::env::consts::ARCH)
+        );
     }
 }
