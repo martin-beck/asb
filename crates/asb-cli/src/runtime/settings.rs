@@ -137,9 +137,94 @@ impl RuntimeSettings {
     }
 }
 
+/// Ask once for an advisory configuration-time CPU mismatch across an entire
+/// invocation. Missing observations do not count as mismatches.
+pub(crate) fn confirm_topology<'a>(
+    settings: impl Iterator<Item = &'a RuntimeSettings>,
+    interactive: bool,
+    output: &mut dyn std::io::Write,
+) -> Result<(), crate::Error> {
+    use std::io::IsTerminal;
+    let actual = CpuDescription::current();
+    let differences: std::collections::BTreeSet<_> = settings
+        .filter(|settings| settings.cpu_pool.is_some())
+        .filter_map(|settings| settings.cpu_description.as_ref())
+        .flat_map(|saved| saved.differences(&actual))
+        .collect();
+    let terminal = interactive && std::io::stdin().is_terminal();
+    confirm_differences(&differences, terminal, &mut std::io::stdin().lock(), output)
+}
+
+fn confirm_differences(
+    differences: &std::collections::BTreeSet<&str>,
+    interactive: bool,
+    input: &mut dyn std::io::BufRead,
+    output: &mut dyn std::io::Write,
+) -> Result<(), crate::Error> {
+    if differences.is_empty() {
+        return Ok(());
+    }
+    if !interactive {
+        return Err(crate::Error::Input(format!(
+            "CPU topology differs from setup ({}); rerun interactively to review and confirm",
+            differences.iter().copied().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    write!(output, "CPU topology differs from setup ({}). The selected logical CPUs were validated on this host. Continue? [y/N] ", differences.iter().copied().collect::<Vec<_>>().join(", "))
+        .map_err(crate::io_error)?;
+    output.flush().map_err(crate::io_error)?;
+    let mut answer = String::new();
+    input.read_line(&mut answer).map_err(crate::io_error)?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        writeln!(output, "Continuing with the current host CPU topology.")
+            .map_err(crate::io_error)?;
+        Ok(())
+    } else {
+        Err(crate::Error::Input(
+            "benchmark cancelled at the CPU topology warning".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topology_mismatch_requires_explicit_confirmation_and_no_mismatch_is_silent() {
+        let mismatches = std::collections::BTreeSet::from(["CPU model", "logical CPU count"]);
+        for (answer, accepted) in [("y\n", true), ("Y\n", true), ("n\n", false), ("\n", false)] {
+            let mut output = Vec::new();
+            let result = confirm_differences(
+                &mismatches,
+                true,
+                &mut std::io::Cursor::new(answer),
+                &mut output,
+            );
+            assert_eq!(result.is_ok(), accepted);
+            assert!(String::from_utf8(output).unwrap().contains("[y/N]"));
+        }
+        assert!(
+            confirm_differences(
+                &mismatches,
+                false,
+                &mut std::io::Cursor::new("y\n"),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+        let mut output = Vec::new();
+        assert!(
+            confirm_differences(
+                &Default::default(),
+                false,
+                &mut std::io::Cursor::new(""),
+                &mut output
+            )
+            .is_ok()
+        );
+        assert!(output.is_empty());
+    }
     #[test]
     fn defaults_are_portable_and_cpu_wide_requires_a_pool() {
         let default: RuntimeSettings = toml::from_str("").unwrap();

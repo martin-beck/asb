@@ -66,6 +66,18 @@ pub(crate) fn validate_runtime_configuration(config: &BenchmarkConfig) -> Result
     Ok(())
 }
 
+/// Check the complete requested pool on the actual execution target before
+/// installers or benchmark work can run. Applying affinity is verified again
+/// at each child and managed-container boundary.
+pub(crate) fn validate_runtime_target(config: &BenchmarkConfig) -> Result<(), Error> {
+    if let Some(pool) = &config.runtime.cpu_pool {
+        crate::runtime::cpu_pool::CpuPool::parse(&pool.cpus, pool.num_cpus_per_instance)
+            .and_then(|pool| pool.validate_current_target())
+            .map_err(Error::Input)?;
+    }
+    Ok(())
+}
+
 /// Validate static MCP configuration before public execution entry points
 /// allocate resources. Attempt admission repeats this for internal paths.
 pub(crate) fn validate_mcp_configuration(
@@ -413,6 +425,12 @@ pub(crate) fn run_with_diagnostics(
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
     validate_runtime_configuration(&config)?;
+    validate_runtime_target(&config)?;
+    crate::runtime::settings::confirm_topology(
+        std::iter::once(&config.runtime),
+        options.interactive && !options.json,
+        output,
+    )?;
     select_adapter_recording_transport(&mut config, options.effective_tool_mode());
     let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
@@ -813,6 +831,12 @@ fn run_dispatched(
     } else {
         None
     };
+    if admission.is_some() && !options.json {
+        emit_warning(warnings, output, "CPU allocations coordinate ASB campaigns using the same user cache; they do not reserve CPUs from the operating system. Independently created Docker containers may run outside the allocation and cannot be verified by ASB.".into())?;
+        if config.runtime.perf_record_scope == crate::runtime::settings::PerfRecordScope::CpuWide {
+            emit_warning(warnings, output, "CPU-wide perf samples may include unrelated host, kernel and collector activity; perf stat remains scoped to the agent process tree.".into())?;
+        }
+    }
     // Parallel sweep configurations can share project-local tool paths.
     // Serialize readiness publication, not benchmark execution.
     static RUNTIME_PREPARATION: Mutex<()> = Mutex::new(());
@@ -2238,6 +2262,27 @@ mod tests {
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
     use crate::tape;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn runtime_target_validation_rejects_absent_cpu_and_accepts_portable() {
+        let portable: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        super::validate_runtime_target(&portable).unwrap();
+        let mut impossible = portable;
+        impossible.runtime.cpu_pool = Some(crate::runtime::settings::CpuPoolSettings {
+            cpus: "1048575".into(),
+            num_cpus_per_instance: 1,
+        });
+        assert!(
+            super::validate_runtime_target(&impossible)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+    }
 
     #[test]
     fn direct_mcp_recording_rejects_before_execution_preflight() {
