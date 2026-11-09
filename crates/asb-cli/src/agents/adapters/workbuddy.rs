@@ -34,6 +34,18 @@ export function normalizeRequest(request) {
     && typeof value.temperature === "number"
     && typeof value.verbosity === "string";
   if (!workBuddyMessage) return value;
+  // WorkBuddy regenerates its `Today's date:` line in the first system prompt.
+  // Restrict normalization to the exact OpenAI-chat envelope and generated
+  // format; other policy and user-authored dates stay cassette-significant.
+  const firstMessage = value.messages[0];
+  if (request?.url?.endsWith("/chat/completions")
+      && firstMessage && typeof firstMessage === "object" && !Array.isArray(firstMessage)
+      && firstMessage.role === "system" && typeof firstMessage.content === "string") {
+    firstMessage.content = firstMessage.content.replace(
+      /(Today's date:[ \t]+)(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(?:[1-9]|[12]\d|3[01]),\s+\d{4}\b/,
+      "$1<asb-workbuddy-current-date>",
+    );
+  }
   for (const message of value.messages) {
     if (!message || typeof message !== "object" || Array.isArray(message)) continue;
     // CodeBuddy regenerates these per-message continuation identifiers. They
@@ -555,6 +567,97 @@ mod tests {
         assert!(replay_request(&strict, replayed).contains("409 Conflict"));
         assert!(strict.stop().unwrap_err().to_string().contains("rejected"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tape_normalizes_only_workbuddy_generated_system_date() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-workbuddy-tape-date-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let cassette = root.join("record.jsonl");
+        let recorded = r#"{"model":"m","messages":[{"role":"system","content":"Policy.\nToday's date: Saturday, Nov 8, 2026\n"},{"role":"assistant","agent":"workbuddy","conversationRequestId":"0123456789abcdef0123456789abcdef","content":"work"},{"role":"user","content":"Keep Saturday, Nov 8, 2026 unchanged."}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function"}]}"#;
+        let replayed = r#"{"model":"m","messages":[{"role":"system","content":"Policy.\nToday's date: Monday, Nov 10, 2026\n"},{"role":"assistant","agent":"workbuddy","conversationRequestId":"abcdef0123456789abcdef0123456789","content":"work"},{"role":"user","content":"Keep Saturday, Nov 8, 2026 unchanged."}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function"}]}"#;
+        let changed_user_content = r#"{"model":"m","messages":[{"role":"system","content":"Policy.\nToday's date: Monday, Nov 10, 2026\n"},{"role":"assistant","agent":"workbuddy","conversationRequestId":"abcdef0123456789abcdef0123456789","content":"work"},{"role":"user","content":"Keep Monday, Nov 10, 2026 unchanged."}],"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function"}]}"#;
+        let line = serde_json::json!({
+            "request": {"method":"POST", "url":"/v1/chat/completions", "body":recorded},
+            "response": {"status":200, "headers":{"content-type":"application/json"}, "body":"{\"ok\":true}"}
+        });
+        std::fs::write(&cassette, format!("{line}\n")).unwrap();
+
+        let session = crate::tape::Session::start_for_agent(
+            crate::tape::Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("workbuddy"),
+            None,
+        )
+        .unwrap();
+        assert!(replay_request(&session, replayed).contains("200 OK"));
+        session.stop().unwrap();
+
+        let strict = crate::tape::Session::start_for_agent(
+            crate::tape::Mode::Replay,
+            &cassette,
+            None,
+            false,
+            &root,
+            Some("workbuddy"),
+            None,
+        )
+        .unwrap();
+        assert!(replay_request(&strict, changed_user_content).contains("409 Conflict"));
+        assert!(strict.stop().unwrap_err().to_string().contains("rejected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workbuddy_date_wire_extension_preserves_non_generated_content() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-workbuddy-date-wire-extension-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("extension.mjs"), TAPE_WIRE_EXTENSION).unwrap();
+        std::fs::write(
+            root.join("test.mjs"),
+            r#"import { normalizeRequest } from './extension.mjs';
+const request = (date, policy = 'keep policy text', user = 'keep user text', url = '/v1/chat/completions') => ({
+  url,
+  body: { messages: [
+    { role: 'system', content: `WorkBuddy startup.\nToday's date: ${date}\n${policy}` },
+    { role: 'assistant', agent: 'workbuddy', conversationRequestId: 'ephemeral', content: 'work' },
+    { role: 'user', content: user },
+  ] },
+});
+const one = normalizeRequest(request('Saturday, Nov 8, 2026'));
+const two = normalizeRequest(request('Monday, Nov 10, 2026'));
+if (JSON.stringify(one) !== JSON.stringify(two)) throw new Error('generated date was not normalized');
+if (JSON.stringify(normalizeRequest(request('Saturday, Nov 8, 2026', 'Policy date: Monday, Nov 10, 2026'))) === JSON.stringify(normalizeRequest(request('Saturday, Nov 8, 2026', 'Policy date: Tuesday, Nov 11, 2026')))) throw new Error('policy date was normalized');
+if (JSON.stringify(normalizeRequest(request('Saturday, Nov 8, 2026', 'keep policy text', 'User date: Monday, Nov 10, 2026'))) === JSON.stringify(normalizeRequest(request('Saturday, Nov 8, 2026', 'keep policy text', 'User date: Tuesday, Nov 11, 2026')))) throw new Error('user date was normalized');
+if (JSON.stringify(normalizeRequest(request('Saturday, Nov 8, 2026', 'keep policy text', 'keep user text', '/v1/responses'))) === JSON.stringify(normalizeRequest(request('Monday, Nov 10, 2026', 'keep policy text', 'keep user text', '/v1/responses')))) throw new Error('wrong endpoint was normalized');
+const newlineSeparated = date => normalizeRequest({ url: '/v1/chat/completions', body: { messages: [
+  { role: 'system', content: `WorkBuddy startup.\nToday's date:\nPolicy date: ${date}` },
+  { role: 'assistant', agent: 'workbuddy', conversationRequestId: 'ephemeral', content: 'work' },
+] } });
+if (JSON.stringify(newlineSeparated('Monday, Nov 10, 2026')) === JSON.stringify(newlineSeparated('Tuesday, Nov 11, 2026'))) throw new Error('newline-separated policy date was normalized');
+const secondDate = date => normalizeRequest({ url: '/v1/chat/completions', body: { messages: [
+  { role: 'system', content: `WorkBuddy startup.\nToday's date: Saturday, Nov 8, 2026\nPolicy date: Today's date: ${date}` },
+  { role: 'assistant', agent: 'workbuddy', conversationRequestId: 'ephemeral', content: 'work' },
+] } });
+if (JSON.stringify(secondDate('Monday, Nov 10, 2026')) === JSON.stringify(secondDate('Tuesday, Nov 11, 2026'))) throw new Error('second policy date was normalized');
+"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("node")
+            .arg(root.join("test.mjs"))
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(status.success());
     }
 
     #[test]
