@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 /// Generic inputs for a proxy which owns LLM record/replay.
 pub(crate) struct RecordingRequest<'a> {
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
     pub mode: crate::tape::Mode,
     pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
@@ -674,6 +675,7 @@ mod tests {
         let second = RecordingFixture("second");
         let registry: &[&dyn ProxyAdapter] = &[&first, &second];
         let request = RecordingRequest {
+            cpu_affinity: None,
             recorder: Some("second"),
             mode: crate::tape::Mode::Replay,
             cassette: std::path::Path::new("fixture"),
@@ -719,6 +721,7 @@ mod tests {
         assert_eq!(chain.url(), "second-url");
         chain.finish().result.unwrap();
         let missing = RecordingRequest {
+            cpu_affinity: None,
             recorder: Some("missing"),
             ..request
         };
@@ -812,6 +815,7 @@ mod tests {
         assert_eq!(selected.name(), "other-recorder");
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             recorder: None,

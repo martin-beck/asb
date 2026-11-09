@@ -20,6 +20,7 @@ pub(super) struct NativeRoute<'a> {
 
 /// Immutable intent, not shared mutable runtime state.
 pub(super) struct NativePlan<'a> {
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
     pub config_path: &'a Path,
     pub config: &'a BenchmarkConfig,
     pub project_root: &'a Path,
@@ -80,6 +81,7 @@ impl NativePlan<'_> {
         mut measurements: Option<&mut measurements::Session>,
     ) -> Result<PreparedNative, Error> {
         let Self {
+            cpu_affinity,
             config_path,
             config,
             project_root,
@@ -178,6 +180,11 @@ impl NativePlan<'_> {
         #[cfg(not(unix))]
         let gate = None;
         let (mut command, route) = launch.native(gate.as_deref());
+        if let Some(affinity) = cpu_affinity {
+            affinity.prepare_command(&mut command).map_err(|error| {
+                Error::Run(format!("cannot prepare agent CPU affinity: {error}"))
+            })?;
+        }
         project::apply_network_proxy(&mut command, config_path)?;
         command.args(specification.args);
         // Do not leak an enclosing Codex session into the benchmark agent. These
@@ -533,6 +540,7 @@ mod tests {
         };
         let prepare = || {
             NativePlan {
+                cpu_affinity: None,
                 config_path: &root.join("benchmark.toml"),
                 config: &config,
                 project_root: &root,
@@ -662,6 +670,7 @@ mod tests {
             credential: Some("asb-replay".into()),
         };
         let prepared = NativePlan {
+            cpu_affinity: None,
             config_path: &root.join("benchmark.toml"),
             config: &config,
             project_root: &root,

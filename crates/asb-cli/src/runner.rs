@@ -214,6 +214,8 @@ impl RunResult<'_> {
 /// Execution choices shared by single runs, replicas, and sweeps.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RunOptions<'a> {
+    /// Prevalidated allocation for this one replica's managed processes.
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
     pub invocation_dir: Option<&'a Path>,
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,

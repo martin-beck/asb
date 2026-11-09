@@ -199,6 +199,7 @@ fn materialize_normalizers(
 }
 
 struct Settings {
+    cpu_affinity: Option<crate::runtime::affinity::AffinityMask>,
     mode: Mode,
     cassette: PathBuf,
     respect_record_timings: bool,
@@ -309,6 +310,7 @@ impl ProxyAdapter for LlmtapeAdapter {
         request: &crate::proxy::RecordingRequest<'_>,
     ) -> Result<Box<dyn Any>, Error> {
         Ok(Box::new(Settings {
+            cpu_affinity: request.cpu_affinity.cloned(),
             mode: request.mode,
             cassette: request.cassette.to_path_buf(),
             respect_record_timings: request.respect_record_timings,
@@ -619,6 +621,11 @@ impl ProxyAdapter for LlmtapeAdapter {
             })
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(affinity) = &request.cpu_affinity {
+            affinity.prepare_command(&mut command).map_err(|error| {
+                Error::Run(format!("cannot prepare tape proxy CPU affinity: {error}"))
+            })?;
+        }
         let child = command.spawn().map_err(|error| {
             let help = match (&executable, error.kind()) {
                 (ProxyExecutable::Override(path), std::io::ErrorKind::PermissionDenied) => format!(
@@ -1654,6 +1661,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -1687,6 +1695,7 @@ mod tests {
     fn registry_recording_settings_preserve_invocation_context() {
         use crate::proxy::ProxyAdapter;
         let request = crate::proxy::RecordingRequest {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             recorder: None,
@@ -1878,6 +1887,112 @@ mod tests {
         assert!(request(&session, r#"{"model":"m","messages":[{"content":"work in <asb-workspace>"}],"tools":[{"type":"function"}]}"#).contains("200 OK"));
         session.stop().unwrap();
         assert!(!ready.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn builtin_proxy_applies_affinity_before_readiness() {
+        let root = test_root();
+        let cassette = cassette(&root);
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let allowed = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim();
+        let pool = crate::runtime::cpu_pool::CpuPool::parse(allowed, 1).unwrap();
+        let cpu = pool.allocate(1).unwrap()[0][0];
+        let affinity = crate::runtime::affinity::AffinityMask::new(&[cpu]).unwrap();
+        let session = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                cpu_affinity: Some(&affinity),
+                workspace: &root,
+                ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
+                agent: None,
+                workload: None,
+                task: None,
+                custom_normalization: None,
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
+            },
+        )
+        .unwrap();
+        let ready = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("ready.json"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
+        let pid = receipt["pid"].as_u64().unwrap();
+        let child_status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let actual = child_status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim();
+        assert_eq!(actual, cpu.to_string());
+        assert!(request(&session, r#"{"model":"m","messages":[{"content":"work in <asb-workspace>"}],"tools":[{"type":"function"}]}"#).contains("200 OK"));
+        session.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn builtin_proxy_does_not_start_if_affinity_cannot_be_applied() {
+        let root = test_root();
+        let cassette = cassette(&root);
+        let present = std::fs::read_to_string("/sys/devices/system/cpu/present").unwrap();
+        let pool = crate::runtime::cpu_pool::CpuPool::parse(present.trim(), 1).unwrap();
+        let present: std::collections::BTreeSet<_> = pool
+            .allocate(pool.capacity())
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        let unavailable = (0..=1_048_575)
+            .rev()
+            .find(|cpu| !present.contains(cpu))
+            .unwrap();
+        let affinity = crate::runtime::affinity::AffinityMask::new(&[unavailable]).unwrap();
+        let result = Session::start_for_agent_at(
+            Mode::Replay,
+            &cassette,
+            None,
+            false,
+            crate::tape::AgentContext {
+                cpu_affinity: Some(&affinity),
+                workspace: &root,
+                ignore_provider_mismatch: false,
+                ignore_provider_unconsumed: false,
+                agent: None,
+                workload: None,
+                task: None,
+                custom_normalization: None,
+                recorder: None,
+                invocation_dir: &root,
+                perfetto_observer: None,
+                perfetto_trace_id: None,
+                perfetto_report: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            !std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().join("ready.json").exists())
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4675,6 +4790,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -4730,6 +4846,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -4797,6 +4914,7 @@ mod tests {
             None,
             false,
             crate::tape::AgentContext {
+                cpu_affinity: None,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,

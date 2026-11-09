@@ -875,6 +875,7 @@ impl<'a> ReadyAttempt<'a> {
                             upstream.as_deref(),
                             respect_record_timings,
                             tape::AgentContext {
+                                cpu_affinity: options.cpu_affinity,
                                 workspace: &workspace,
                                 ignore_provider_mismatch: options.ignore_provider_mismatch,
                                 ignore_provider_unconsumed: options.ignore_provider_unconsumed,
@@ -1105,6 +1106,7 @@ impl<'a> ReadyAttempt<'a> {
                 )
             } else {
                 let native = native::NativePlan {
+                    cpu_affinity: options.cpu_affinity,
                     config_path,
                     config,
                     project_root,

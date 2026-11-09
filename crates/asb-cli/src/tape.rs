@@ -19,6 +19,7 @@ pub enum Mode {
 pub struct Session(proxy::Chain);
 
 pub(crate) struct AgentContext<'a> {
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
     pub workspace: &'a Path,
     pub ignore_provider_mismatch: bool,
     pub ignore_provider_unconsumed: bool,
@@ -74,6 +75,7 @@ impl Session {
             upstream,
             respect_record_timings,
             AgentContext {
+                cpu_affinity: None,
                 workspace,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
@@ -124,6 +126,7 @@ impl Session {
             }
         };
         let settings = proxy::RecordingRequest {
+            cpu_affinity: context.cpu_affinity,
             recorder: context.recorder,
             mode,
             cassette,

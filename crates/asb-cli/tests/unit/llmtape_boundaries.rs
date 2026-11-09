@@ -35,6 +35,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
         ),
     ] {
         let settings = Settings {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -78,6 +79,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
     if std::env::var_os(CHILD).is_some() {
         let fixture = Fixture::new();
         let settings = Settings {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -271,6 +273,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
             _ => std::os::unix::fs::symlink(fixture.0.join("absent"), &path).unwrap(),
         }
         let settings = Settings {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -312,6 +315,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
     if let Ok(scenario) = std::env::var(CHILD) {
         let root = Fixture::new();
         let mut settings = Settings {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
