@@ -42,13 +42,16 @@ been implemented and qualified.
    CPU-wide capture scope, including explicit unverified-container disclosures.
    Confirm existing native unconfigured and process-tree behavior remains intact.
 
-The draft provides allocation, target snapshots, cooperative leases, affinity
-primitives, configuration and setup-wizard state. Replica dispatch now holds a
-lease and propagates allocations to agent and proxy launches and to the partial
-SWE-bench workload integration. The perf collector has an opt-in CPU-wide
-recording path with separate process-tree stat evidence. These paths have not
-yet been qualified together. Run and sweep admission still reject nondefault
-runtime settings until all managed workload boundaries, early admission,
-topology confirmation, evidence and end-to-end qualification are complete.
-A lease only coordinates campaigns using the same lock directory and is not
-crash recovery or an operating-system CPU reservation.
+The draft provides target admission, topology confirmation, cooperative leases,
+replica dispatch, verified launch boundaries, managed SWE-bench and Compose
+placement, CPU-wide perf recording, separate process-tree stat evidence and a
+report disclosure. An isolated guard-disabled checkout passed two-replica
+offline replay with observed agent, descendant and llmtape affinity, real
+CPU-wide perf samples, and real flamegraph generation. The explicit Docker
+fixture also observed disjoint managed workloads and independent-container and
+host noise in CPU-wide captures. These tests do not yet qualify an actual
+official managed workload end to end, target changes after admission, or all
+replay and failure/cleanup paths. Run and sweep admission still reject
+nondefault runtime settings pending those checks and full review. A lease only
+coordinates campaigns using the same lock directory and is not crash recovery
+or an operating-system CPU reservation.

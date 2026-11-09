@@ -1846,3 +1846,13 @@ on each, and invoke the opt-in `inspect_real_perf_script` test with
 `ASB_TEST_PERF_SCRIPT` and `ASB_TEST_PERF_EXPECT` set to the expected state.
 The separate `inspect_real_recorded_build_id` test uses `ASB_TEST_PERF_DATA`
 for a recording of the local kernel. These tests are not normal CI gates.
+
+The opt-in `crates/asb-cli/tests/cpu_pool_docker_qualification.py` fixture
+requires Linux, a local Docker daemon, Python Docker SDK, two allowed CPUs,
+permission for CPU-wide perf, and `ASB_TEST_IMAGE` naming an already installed
+native image with Python 3. Set `ASB_TEST_TEMP_ROOT` to a suitable local
+directory. It creates uniquely named managed and independent containers,
+records each selected CPU, checks sample scope and removes its owned resources.
+The independent container is deliberately outside ASB's CPU control; the
+fixture pins one of its processes itself to demonstrate that CPU-wide perf can
+capture it. It does not establish official workload or agent correctness.
