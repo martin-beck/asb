@@ -805,6 +805,7 @@ fn durable_truncated_guest_transcript_keeps_its_sealed_terminal_metadata() {
             evaluation: &grade,
             evaluation_kind: workloads::KnownEvaluationKind::UpstreamHarness,
             process_success: agent.failure.is_none(),
+            execution_timed_out: false,
             agent_failure: agent.failure.as_deref(),
             capture_incomplete: true,
             run_error: None,
