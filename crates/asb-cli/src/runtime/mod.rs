@@ -4,5 +4,6 @@
 //! enforcement and CPU-wide profiling are separate, required integration work.
 
 pub mod affinity;
+pub mod cpu_lease;
 pub mod cpu_pool;
 pub mod settings;
