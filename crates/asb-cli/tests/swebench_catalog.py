@@ -32,6 +32,27 @@ def row(task_id="owner__repo-1"):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_evaluator_start_checks_affinity_before_returning_to_harness(self):
+        events = []
+        container = SimpleNamespace(start=lambda: events.append('start'))
+        CATALOG.verify_evaluator_start(container, '1,3', lambda obj, cpus: events.append((obj, cpus)))
+        container.start()
+        self.assertEqual(events, ['start', (container, '1,3')])
+
+    def test_evaluator_affinity_failure_is_propagated(self):
+        container = SimpleNamespace(start=lambda: None)
+        def reject(_container, _cpus):
+            raise ValueError('affinity mismatch')
+        CATALOG.verify_evaluator_start(container, '1', reject)
+        with self.assertRaisesRegex(ValueError, 'affinity mismatch'):
+            container.start()
+
+    def test_evaluator_default_does_not_change_start(self):
+        container = SimpleNamespace(start=lambda: 'started')
+        original = container.start
+        CATALOG.verify_evaluator_start(container, None, lambda *_: self.fail('unexpected verification'))
+        self.assertIs(container.start, original)
+
     def test_official_report_keeps_grading_arguments_but_never_inventories_the_host(self):
         class UnrelatedDaemon:
             def __getattr__(self,name):

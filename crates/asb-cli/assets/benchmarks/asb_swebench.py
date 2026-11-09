@@ -743,13 +743,30 @@ def attempt_report(reporter):
     return report
 
 
+def verify_evaluator_start(container, cpu_set, verify):
+    """Interpose on the harness start before it can apply or evaluate a patch."""
+    if cpu_set is None:
+        return container
+    start = container.start
+    def checked_start(*args, **kwargs):
+        result = start(*args, **kwargs)
+        verify(container, cpu_set)
+        return result
+    container.start = checked_start
+    return container
+
+
 def official_harness(arguments):
     """Run the pinned SDK with scoped Docker transport and no root Python."""
     from asb_docker import DockerSession
     from asb_resources import ResourceJournal, RecoveryError
     from swebench.harness import run_evaluation
+    from asb_execution import _parse_cpu_list, verify_container_cpu_set
     import docker.errors
     identity = sdk_identity()
+    cpu_set = os.environ.get("ASB_CPU_ALLOCATION")
+    if cpu_set is not None:
+        cpu_set = ",".join(map(str, sorted(_parse_cpu_list(cpu_set))))
     atomic_write(Path.cwd() / "sdk-identity.json", encoded(identity))
     if (not re.fullmatch(r"asb-[0-9a-f]{32}", arguments.run_id)
             or len(arguments.instance_ids) != 1
@@ -778,6 +795,8 @@ def official_harness(arguments):
                 if kwargs.get("name") != owned_name:
                     raise RecoveryError("evaluator cannot change its declared container identity")
                 kwargs.setdefault("labels", {}).update(journal.declare("containers", owned_name))
+                if cpu_set is not None:
+                    kwargs["cpuset_cpus"] = cpu_set
                 return client.containers.create(*args, **kwargs)
         class ScopedClient:
             containers = ScopedContainers()
@@ -803,7 +822,7 @@ def official_harness(arguments):
                     "architecture": image.attrs.get("Architecture"),
                     "os": image.attrs.get("Os"),
                 }))
-                return container
+                return verify_evaluator_start(container, cpu_set, verify_container_cpu_set)
             except BaseException:
                 # Creation succeeded but provenance capture failed; do not
                 # leak that newly owned container or accept an unbound score.
