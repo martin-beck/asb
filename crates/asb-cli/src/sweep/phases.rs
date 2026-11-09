@@ -357,7 +357,15 @@ impl<'a> PreparedSweep<'a> {
                         .map_err(Error::Io)?;
                 }
                 if let Some(prepared) = self.campaigns {
-                    campaigns = Some(prepared.publish(&self.results)?);
+                    campaigns = Some(prepared.publish_with_scheduling(
+                        &self.results,
+                        Some((
+                            &self.plan,
+                            self.scheduling,
+                            &self.weights,
+                            &self.reservations,
+                        )),
+                    )?);
                     #[cfg(all(test, unix))]
                     tests::before_initial_seal(&self.results);
                     match checkpoint::Inputs::begin(

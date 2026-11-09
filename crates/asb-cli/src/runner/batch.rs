@@ -244,6 +244,57 @@ pub(crate) struct SettlementBarrier {
     timeout: Duration,
 }
 
+/// A member of a scheduler-admitted sweep-wide settlement cohort.  Local
+/// replica identities stay local to their benchmark configuration; this maps
+/// them into the immutable full-sweep population without changing preparation
+/// or launch admission.
+#[derive(Clone)]
+pub(crate) struct SweepSettlement {
+    barrier: Arc<SettlementBarrier>,
+    first: usize,
+    total: usize,
+}
+
+impl SweepSettlement {
+    pub(crate) fn selected(
+        barrier: Arc<SettlementBarrier>,
+        first: usize,
+        total: usize,
+    ) -> Result<Self, Error> {
+        if first == 0 || first > total {
+            return Err(Error::Input("invalid sweep settlement member range".into()));
+        }
+        Ok(Self {
+            barrier,
+            first,
+            total,
+        })
+    }
+
+    pub(crate) fn arrive(&self, local: Identity) -> Result<(), Error> {
+        if !local.valid()
+            || self
+                .first
+                .checked_add(local.index - 1)
+                .is_none_or(|index| index > self.total)
+        {
+            self.barrier
+                .abort("invalid sweep-wide execution-settlement arrival");
+            return Err(Error::Run(
+                "invalid sweep-wide execution-settlement arrival".into(),
+            ));
+        }
+        self.barrier.arrive(Identity {
+            index: self.first + local.index - 1,
+            total: self.total,
+        })
+    }
+
+    pub(crate) fn abort(&self, reason: &str) {
+        self.barrier.abort(reason);
+    }
+}
+
 struct SettlementState {
     deadline: Option<Instant>,
     participants: Vec<bool>,
@@ -824,6 +875,30 @@ mod tests {
                     .to_string()
                     .contains("replica 2 failed while settling execution evidence")
             );
+        });
+    }
+
+    #[test]
+    fn sweep_settlement_maps_distinct_configuration_slots_into_one_cohort() {
+        let barrier = Arc::new(SettlementBarrier::for_test(3, Duration::from_secs(2)).unwrap());
+        let first = SweepSettlement::selected(barrier.clone(), 1, 3).unwrap();
+        let second = SweepSettlement::selected(barrier, 2, 3).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                first.arrive(Identity { index: 1, total: 1 }).unwrap();
+                sender.send(()).unwrap();
+            });
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+            let second_first = second.clone();
+            scope.spawn(move || {
+                second_first
+                    .arrive(Identity { index: 1, total: 2 })
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            second.arrive(Identity { index: 2, total: 2 }).unwrap();
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         });
     }
 

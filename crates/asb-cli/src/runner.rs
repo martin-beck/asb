@@ -229,6 +229,10 @@ pub(crate) struct RunOptions<'a> {
     /// Holds official grading and post-processing until every admitted peer
     /// has settled its agent execution and measurement collection.
     pub settlement_barrier: Option<&'a batch::SettlementBarrier>,
+    /// Optional sweep-wide second boundary. It is supplied only by an
+    /// all-at-once scheduler admission and is distinct from each
+    /// configuration's local preparation/launch cohort.
+    pub sweep_settlement: Option<&'a batch::SweepSettlement>,
     pub policy: Option<&'a crate::planning::ResolvedPlan>,
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
@@ -731,6 +735,7 @@ fn public_direct_run(options: &RunOptions<'_>) -> bool {
         && options.preparation_gate.is_none()
         && options.launch_gate.is_none()
         && options.settlement_barrier.is_none()
+        && options.sweep_settlement.is_none()
         && options.batch.is_none()
         && options.on_completion.is_none()
 }
@@ -1034,6 +1039,9 @@ fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
     if let Some(barrier) = options.settlement_barrier {
         barrier.abort(reason);
     }
+    if let Some(barrier) = options.sweep_settlement {
+        barrier.abort(reason);
+    }
 }
 
 fn run_replica_catching(
@@ -1132,6 +1140,14 @@ fn run_mode(
     {
         barrier.abort(&format!(
             "replica {} failed before cohort grading: {error}",
+            options.replica.index
+        ));
+    }
+    if let Err(error) = &result
+        && let Some(barrier) = options.sweep_settlement
+    {
+        barrier.abort(&format!(
+            "replica {} failed before sweep-wide cohort grading: {error}",
             options.replica.index
         ));
     }
