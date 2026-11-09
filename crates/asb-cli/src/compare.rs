@@ -807,8 +807,11 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
             // An opaque-origin sandbox prevents the SVG's scripts and IDs from
             // affecting the report or other graphs. CSP restricts subresources;
             // it is not a general network isolation boundary.
+            // FlameGraph persists zoom in its URL, which opaque srcdoc frames
+            // cannot replace with the inherited parent URL. Preserve zoom and
+            // ignore only that specific browser security error.
             let document = format!(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style>{svg}"
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style><script>(()=>{{const replace=history.replaceState.bind(history);history.replaceState=(...args)=>{{try{{return replace(...args)}}catch(error){{if(error.name!=='SecurityError')throw error}}}}}})()</script>{svg}"
             );
             body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
         }
