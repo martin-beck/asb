@@ -18,6 +18,7 @@ pub(crate) enum RunStatus {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FailureKind {
     RunError,
+    ExecutionTimeout,
     AgentFailure,
     ProviderMismatch,
     ProviderUnconsumed,
@@ -36,6 +37,7 @@ impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RunError => "run_error",
+            Self::ExecutionTimeout => "execution_timeout",
             Self::AgentFailure => "agent_failure",
             Self::ProviderMismatch => "provider_mismatch",
             Self::ProviderUnconsumed => "provider_unconsumed",
@@ -108,6 +110,10 @@ pub(super) struct RunFacts<'a> {
     pub ignore_collector: bool,
     pub evaluation_kind: crate::workloads::KnownEvaluationKind,
     pub process_success: bool,
+    /// The workload-owned execution deadline elapsed.  Keep this distinct
+    /// from an incidental non-zero exit or a later replay-cleanup error: the
+    /// deadline is the primary operational fact an analysis consumer needs.
+    pub execution_timed_out: bool,
     pub agent_failure: Option<&'a str>,
     /// The runner could not retain a complete agent transcript. This is
     /// distinct from an execution or evaluator failure: a completed
@@ -129,6 +135,7 @@ impl RunFacts<'_> {
     // an evaluation failure is the primary reported disposition.
     pub fn replay_operational_success(&self) -> bool {
         self.process_success
+            && !self.execution_timed_out
             && self.agent_failure.is_none()
             && !self.capture_incomplete
             && self.run_error.is_none()
@@ -186,9 +193,25 @@ impl RunDisposition {
                 }
             }
         };
+        // A guest deadline is an independently observed terminal fact.  It
+        // must not depend on a later diagnostic surviving finalization: the
+        // timeout itself is the primary operational result, while a retained
+        // run error gives that result its most useful bounded reason.
         consider(
-            facts
-                .run_error
+            facts.execution_timed_out.then(|| {
+                RunFailure::new(
+                    FailureKind::ExecutionTimeout,
+                    facts
+                        .run_error
+                        .unwrap_or("workload execution deadline elapsed"),
+                )
+            }),
+            false,
+        );
+        consider(
+            (!facts.execution_timed_out)
+                .then_some(facts.run_error)
+                .flatten()
                 .map(|reason| RunFailure::new(FailureKind::RunError, reason)),
             false,
         );
@@ -292,6 +315,7 @@ mod tests {
             ignore_collector: false,
             evaluation_kind: crate::workloads::KnownEvaluationKind::BundledFixture,
             process_success: true,
+            execution_timed_out: false,
             agent_failure: None,
             capture_incomplete: false,
             run_error: None,
@@ -318,6 +342,40 @@ mod tests {
         let mut output = facts(&grade);
         output.output_error = Some("output failed");
         assert!(!output.replay_operational_success());
+    }
+
+    #[test]
+    fn timeout_precedes_a_secondary_replay_cleanup_error() {
+        let grade = EvaluationOutcome::binary(false);
+        let mut input = facts(&grade);
+        input.execution_timed_out = true;
+        input.run_error = Some("replay consumed 1 of 46 requests");
+
+        let result = RunDisposition::from_facts(input);
+        let failure = result
+            .failure
+            .as_ref()
+            .expect("timeout must remain observable");
+        assert_eq!(failure.kind, FailureKind::ExecutionTimeout);
+        assert_eq!(failure.reason, "replay consumed 1 of 46 requests");
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["failure_kind"],
+            "execution_timeout"
+        );
+    }
+
+    #[test]
+    fn timeout_without_a_retained_run_error_is_still_primary() {
+        let grade = EvaluationOutcome::binary(true);
+        let mut input = facts(&grade);
+        input.execution_timed_out = true;
+        input.process_success = false;
+
+        assert!(!input.replay_operational_success());
+        let result = RunDisposition::from_facts(input);
+        let failure = result.failure.as_ref().expect("timeout must be terminal");
+        assert_eq!(failure.kind, FailureKind::ExecutionTimeout);
+        assert_eq!(failure.reason, "workload execution deadline elapsed");
     }
 
     #[test]

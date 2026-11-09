@@ -1593,6 +1593,7 @@ impl ResultFacts {
             issues,
             resource_disposition: workload_resource_disposition,
         } = finalized;
+        let execution_timed_out = guest.as_ref().is_some_and(|guest| guest.timed_out);
         let cassette_usage_verified = cassette_usage_verified
             && ignored_tool_mismatches.is_empty()
             && ignored_mcp_mismatches.is_empty();
@@ -1616,6 +1617,7 @@ impl ResultFacts {
             ignore_collector: options.ignore_collector,
             evaluation_kind,
             process_success,
+            execution_timed_out,
             agent_failure: agent_failure.as_deref(),
             capture_incomplete: !capture_complete,
             run_error: run_error.as_deref(),
