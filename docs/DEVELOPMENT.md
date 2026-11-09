@@ -1,20 +1,5 @@
 # Development
 
-The perf symbol-quality artifact includes bounded decoder-context kernel
-observations. Explicit core-kernel DSO frames are counted separately; an
-unidentified frame is never assumed to be a kernel frame. The address-map
-probe, recording-versus-host build-ID comparison, and a limited debug-file
-candidate search are independent evidence, not proof of complete debug
-information. The reported host kernel describes the decoder, which may differ
-from the recording host. Unavailable build IDs, inaccessible maps, unidentified
-frames and unchecked symbol search locations remain unknown. Changing kernel
-settings is never automatic. To check this on a suitable host, retain a perf
-capture taken without kernel map access and another with it, run `perf script`
-on each, and invoke the opt-in `inspect_real_perf_script` test with
-`ASB_TEST_PERF_SCRIPT` and `ASB_TEST_PERF_EXPECT` set to the expected state.
-The separate `inspect_real_recorded_build_id` test uses `ASB_TEST_PERF_DATA`
-for a recording of the local kernel. These tests are not normal CI gates.
-
 The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
 uses a local model fixture to record one official SWE-bench task and replay it
 in two isolated replicas. It checks the grade, cleanup and native tool-stream
@@ -1838,3 +1823,18 @@ Ordinary CI runs only the fixture's unprivileged selector/evidence tests through
 the existing Python policy test step. It never starts these services or hardware
 benchmarks. These probes qualify an exercised native path; they do not establish
 adversarial sandbox containment, installed-agent correctness or model quality.
+
+The perf symbol-quality artifact includes bounded decoder-context kernel
+observations. Explicit core-kernel DSO frames are counted separately; an
+unidentified frame is never assumed to be a kernel frame. The address-map
+probe, recording-versus-host build-ID comparison, and a limited debug-file
+candidate search are independent evidence, not proof of complete debug
+information. The reported host kernel describes the decoder, which may differ
+from the recording host. Unavailable build IDs, inaccessible maps, unidentified
+frames and unchecked symbol search locations remain unknown. Changing kernel
+settings is never automatic. To check this on a suitable host, retain a perf
+capture taken without kernel map access and another with it, run `perf script`
+on each, and invoke the opt-in `inspect_real_perf_script` test with
+`ASB_TEST_PERF_SCRIPT` and `ASB_TEST_PERF_EXPECT` set to the expected state.
+The separate `inspect_real_recorded_build_id` test uses `ASB_TEST_PERF_DATA`
+for a recording of the local kernel. These tests are not normal CI gates.
