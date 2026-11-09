@@ -903,6 +903,60 @@ mod tests {
     }
 
     #[test]
+    fn sweep_settlement_abort_wakes_waiting_peer_without_timeout() {
+        let barrier = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let first = SweepSettlement::selected(barrier.clone(), 1, 2).unwrap();
+        let second = SweepSettlement::selected(barrier, 2, 2).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(first.arrive(Identity { index: 1, total: 1 }))
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            second.abort("fixture ordinary configuration failure");
+            let failure = receiver.recv_timeout(Duration::from_millis(500)).unwrap();
+            assert!(
+                failure
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ordinary configuration failure")
+            );
+        });
+    }
+
+    #[test]
+    fn distinct_sweep_repeat_cohorts_do_not_cross_release() {
+        let first = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let second = Arc::new(SettlementBarrier::for_test(2, Duration::from_secs(2)).unwrap());
+        let first_a = SweepSettlement::selected(first.clone(), 1, 2).unwrap();
+        let first_b = SweepSettlement::selected(first, 2, 2).unwrap();
+        let second_a = SweepSettlement::selected(second.clone(), 1, 2).unwrap();
+        let second_b = SweepSettlement::selected(second, 2, 2).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(first_a.arrive(Identity { index: 1, total: 1 }))
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            scope.spawn(move || {
+                let _ = second_a.arrive(Identity { index: 1, total: 1 });
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+            first_b.arrive(Identity { index: 1, total: 1 }).unwrap();
+            receiver
+                .recv_timeout(Duration::from_millis(500))
+                .unwrap()
+                .unwrap();
+            second_b.abort("fixture closes unused second cohort");
+        });
+    }
+
+    #[test]
     fn replica_panic_before_registration_aborts_waiting_peer_and_keeps_output() {
         let gate = Gate::new(2, None, Duration::from_secs(30)).unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
