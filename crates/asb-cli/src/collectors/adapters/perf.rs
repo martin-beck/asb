@@ -689,16 +689,15 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stdout_path)?,
             crate::evidence::Capture::create(&stderr_path)?,
         ];
-        // Attach to the verified agent root and inherit counters into every child.
-        // Unlike a one-time comma-separated PID snapshot, perf's inheritance
-        // follows helpers forked after attachment as well as descendants of
-        // those helpers, while remaining scoped to this benchmark tree.
+        // The default recording attaches to the verified agent root and
+        // inherits into descendants. The optional CPU-wide mode instead
+        // samples every task running on this replica's allocated CPUs.
         let cpu_wide = self.state::<PerfState>().borrow().cpu_wide.clone();
         let record_args = selected_record_args(pid, cpu_wide.as_deref())?;
         let (mut command, route) = self.collector_command("perf")?;
         command
             // Keep perf data bounded enough for the offline flamegraph
-            // renderer while retaining process-scoped call samples.
+            // renderer while retaining call samples in the selected scope.
             .args(&record_args)
             .args(["-o"])
             .arg(&data);
