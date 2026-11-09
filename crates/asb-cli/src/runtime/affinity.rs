@@ -54,10 +54,41 @@ impl AffinityMask {
         Ok(())
     }
 
+    /// Configure an owned child to apply and verify this mask after fork and
+    /// before exec. The parent thread is unchanged. The caller still owns
+    /// process launch, readiness, cancellation, and child cleanup.
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)] // The closure uses only affinity syscalls and preallocated memory.
+    pub fn prepare_command(&self, command: &mut std::process::Command) -> io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        let requested = self.words.clone();
+        let mut observed = vec![0usize; requested.len()];
+        unsafe {
+            command.pre_exec(move || {
+                observed.fill(0);
+                set_and_read(&requested, &mut observed)?;
+                if observed != requested {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+
     /// Affinity is not available through this implementation on non-Linux hosts.
     #[cfg(not(target_os = "linux"))]
     pub fn apply_current(&self) -> io::Result<()> {
         let _ = &self.words;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "CPU affinity requires Linux",
+        ))
+    }
+
+    /// Preparing a child affinity is currently supported only on Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn prepare_command(&self, _: &mut std::process::Command) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "CPU affinity requires Linux",
@@ -134,12 +165,6 @@ mod tests {
                 .status()
                 .unwrap();
             assert!(inherited.success());
-            assert!(
-                AffinityMask::new(&[MAX_CPU_ID])
-                    .unwrap()
-                    .apply_current()
-                    .is_err()
-            );
             return;
         }
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -150,5 +175,71 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_command_pins_before_child_starts_without_pinning_parent() {
+        const EXPECTED: &str = "ASB_TEST_CPU_AFFINITY_EXPECTED";
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let allowed = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim();
+        if let Some(expected) = std::env::var_os(EXPECTED) {
+            assert_eq!(std::ffi::OsStr::new(allowed), expected);
+            return;
+        }
+        let pool = super::super::cpu_pool::CpuPool::parse(allowed, 1).unwrap();
+        let cpu = pool.allocate(1).unwrap()[0][0];
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--exact").arg("runtime::affinity::tests::prepared_command_pins_before_child_starts_without_pinning_parent").env(EXPECTED, cpu.to_string());
+        AffinityMask::new(&[cpu])
+            .unwrap()
+            .prepare_command(&mut command)
+            .unwrap();
+        assert!(command.status().unwrap().success());
+        let after = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let after = after
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim();
+        assert_eq!(after, allowed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_child_affinity_never_starts_the_program() {
+        const MARKER: &str = "ASB_TEST_CPU_AFFINITY_MARKER";
+        if let Some(path) = std::env::var_os(MARKER) {
+            std::fs::write(path, b"unexpected execution").unwrap();
+            return;
+        }
+        let present = std::fs::read_to_string("/sys/devices/system/cpu/present").unwrap();
+        let pool = super::super::cpu_pool::CpuPool::parse(present.trim(), 1).unwrap();
+        let used = pool
+            .allocate(pool.capacity())
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
+        let unavailable = (0..=MAX_CPU_ID)
+            .rev()
+            .find(|cpu| !used.contains(cpu))
+            .expect("bounded pool leaves an unavailable CPU");
+        let marker = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("runtime::affinity::tests::failed_child_affinity_never_starts_the_program")
+            .env(MARKER, &marker);
+        AffinityMask::new(&[unavailable])
+            .unwrap()
+            .prepare_command(&mut command)
+            .unwrap();
+        assert!(command.spawn().is_err());
+        assert!(!marker.exists());
     }
 }
