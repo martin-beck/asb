@@ -813,7 +813,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
             let document = format!(
                 "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style><script>(()=>{{const replace=history.replaceState.bind(history);history.replaceState=(...args)=>{{try{{return replace(...args)}}catch(error){{if(error.name!=='SecurityError')throw error}}}}}})()</script>{svg}"
             );
-            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
+            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
         }
     } else {
         body.push_str("<p>Flamegraph unavailable or not recorded.</p>");
@@ -1964,7 +1964,7 @@ mod tests {
         assert!(report.contains("bpftrace profiles"));
         assert!(report.contains("class=\"flamegraph-chart\""));
         assert!(report.contains("flamegraph.svg"));
-        assert!(report.contains("sandbox=\"allow-scripts\""));
+        assert!(report.contains("sandbox=\"allow-scripts allow-modals\""));
         assert!(report.contains("Collector status: completed"));
         assert!(!report.contains("class=\"embedded-svg flamegraph\""));
         assert!(!report.contains("<object class=\"flamegraph\""));
