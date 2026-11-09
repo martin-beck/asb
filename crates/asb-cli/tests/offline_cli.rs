@@ -7248,3 +7248,152 @@ fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
     assert_eq!(recorded, cpus.into_iter().collect());
     assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires enabled CPU pools, two allowed CPUs, ss and permission for system-wide perf"]
+fn isolated_cpu_pool_cpu_wide_perf_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(2);
+    let perf = project.0.join(".asb-tools/perf/bin/perf");
+    std::fs::create_dir_all(perf.parent().unwrap()).unwrap();
+    std::fs::copy("/usr/bin/perf", &perf).unwrap();
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(config, "\n[runtime]\nperf_record_scope='cpu-wide'\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perf']", cpus[0], cpus[1]).unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"const fs = require('fs');
+const {spawnSync} = require('child_process');
+const status = () => fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+const child = spawnSync('/bin/sh', ['-c', "sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status"], {encoding:'utf8'});
+if (child.status !== 0) process.exit(19);
+fs.appendFileSync(process.env.ASB_FIXTURE_CPU_LOG, status() + ':' + child.stdout.trim() + '\n');
+"#;
+    assert!(script.contains("const fs = require('fs');"));
+    let proxy_hook = r#"const endpoint = config.providers.asb.baseUrl;
+const port = new URL(endpoint).port;
+const sockets = spawnSync('ss', ['-ltnp'], {encoding:'utf8'});
+const row = sockets.stdout.split('\n').find(line => line.includes(':' + port + ' ') && line.includes('pid='));
+if (!row) { console.error('proxy socket not found', port, sockets.stdout); process.exit(20); }
+const match = row.match(/pid=(\d+)/);
+const proxyStatus = fs.readFileSync('/proc/' + match[1] + '/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
+const until = Date.now() + 1200;
+while (Date.now() < until) { Math.sqrt(Math.random()); }
+"#;
+    let script = script.replacen("const fs = require('fs');", hook, 1);
+    assert!(script.contains("const endpoint = config.providers.asb.baseUrl;"));
+    std::fs::write(
+        &script_path,
+        script.replacen(
+            "const endpoint = config.providers.asb.baseUrl;",
+            proxy_hook,
+            1,
+        ),
+    )
+    .unwrap();
+    let proxy_log = project.0.join("proxy-log");
+    let cpu_log = project.0.join("cpu-log");
+    let barrier = project.0.join("replica-barrier");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--measurements",
+            "measurements",
+        ],
+        &[
+            ("ASB_MEASURE_PERF", "1"),
+            ("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap()),
+            ("ASB_FIXTURE_PROXY_LOG", proxy_log.to_str().unwrap()),
+            ("ASB_FIXTURE_BEHAVIOR", "replica-barrier"),
+            ("ASB_FIXTURE_BARRIER", barrier.to_str().unwrap()),
+        ],
+    );
+    expect_success(&result);
+    let observed = std::fs::read_to_string(cpu_log).unwrap();
+    let rows: std::collections::BTreeSet<_> = observed.lines().map(str::to_owned).collect();
+    assert_eq!(
+        rows,
+        cpus.into_iter().map(|cpu| format!("{cpu}:{cpu}")).collect()
+    );
+    let proxies = std::fs::read_to_string(proxy_log).unwrap();
+    let observed_proxies: std::collections::BTreeSet<_> =
+        proxies.lines().map(str::to_owned).collect();
+    assert_eq!(
+        observed_proxies,
+        cpus.into_iter().map(|cpu| cpu.to_string()).collect()
+    );
+    let plans = std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap();
+    let mut recorded = std::collections::BTreeSet::new();
+    for entry in plans {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            recorded.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap() as u32,
+            );
+        }
+    }
+    assert_eq!(recorded, cpus.into_iter().collect());
+    for (index, cpu) in cpus.into_iter().enumerate() {
+        let dir = project
+            .0
+            .join(format!("measurements-concurrency-{}", index + 1));
+        let scope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("perf-record-scope.json")).unwrap())
+                .unwrap();
+        assert_eq!(scope["scope"], "cpu-wide");
+        assert_eq!(scope["logical_cpus"], serde_json::json!([cpu]));
+        let stat: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("perf-stat-plan.json")).unwrap())
+                .unwrap();
+        assert_eq!(stat["scope"], "agent-process-tree");
+        let data = dir.join("perf.data");
+        assert!(data.exists());
+        let decoded = std::process::Command::new("/usr/bin/perf")
+            .args(["script", "-F", "cpu", "-i"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "perf script failed: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        let samples = String::from_utf8(decoded.stdout).unwrap();
+        assert!(
+            !samples.trim().is_empty(),
+            "CPU-wide capture contained no samples"
+        );
+        for line in samples.lines().filter(|line| !line.trim().is_empty()) {
+            let observed: u32 = line
+                .trim()
+                .trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace())
+                .parse()
+                .unwrap_or_else(|_| panic!("unexpected CPU-only perf sample: {line:?}"));
+            assert_eq!(observed, cpu, "sample outside replica allocation");
+        }
+    }
+    assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
+}
