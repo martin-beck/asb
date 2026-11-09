@@ -100,6 +100,17 @@ mod tests {
     #[test]
     fn isolated_child_applies_and_verifies_an_allowed_cpu() {
         const CHILD: &str = "ASB_TEST_CPU_AFFINITY_CHILD";
+        const GRANDCHILD: &str = "ASB_TEST_CPU_AFFINITY_GRANDCHILD";
+        if let Some(expected) = std::env::var_os(GRANDCHILD) {
+            let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+            let actual = status
+                .lines()
+                .find_map(|s| s.strip_prefix("Cpus_allowed_list:"))
+                .unwrap()
+                .trim();
+            assert_eq!(std::ffi::OsStr::new(actual), expected);
+            return;
+        }
         if std::env::var_os(CHILD).is_some() {
             let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
             let allowed = status
@@ -116,6 +127,13 @@ mod tests {
                 .unwrap()
                 .trim();
             assert_eq!(actual, cpu.to_string());
+            let inherited = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("runtime::affinity::tests::isolated_child_applies_and_verifies_an_allowed_cpu")
+                .env(GRANDCHILD, cpu.to_string())
+                .status()
+                .unwrap();
+            assert!(inherited.success());
             assert!(
                 AffinityMask::new(&[MAX_CPU_ID])
                     .unwrap()
