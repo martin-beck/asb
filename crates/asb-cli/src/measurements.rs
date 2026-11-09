@@ -772,6 +772,9 @@ impl Session {
         // processing, so their overhead cannot become agent execution time.
         self.record_component_event(event);
         match event {
+            collectors::LifecycleEvent::AgentExecuteBegin => {
+                self.execution_window.borrow_mut().begin_execution_phase()
+            }
             collectors::LifecycleEvent::AgentExecuteEnd => self.execution_window.borrow_mut().end(),
             collectors::LifecycleEvent::RunFailed
             | collectors::LifecycleEvent::AgentWaitFailed

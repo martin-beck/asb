@@ -20,6 +20,9 @@ pub(crate) struct Window {
     samples: u64,
     completed: bool,
     invalid: bool,
+    phase_domain: Option<String>,
+    phase_begin: Option<u64>,
+    phase_end: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +66,22 @@ impl Window {
 
     pub(super) fn end(&mut self) {
         self.completed = true;
+        self.phase_end = monotonic_ns();
+    }
+
+    /// Records the host-side execution lifecycle only. This is deliberately
+    /// separate from native-principal sampling: remote/container workloads do
+    /// not expose an agent PID that ASB can generation-verify on the host.
+    pub(super) fn begin_execution_phase(&mut self) {
+        if self.phase_begin.is_some() || self.invalid {
+            self.invalid = true;
+            return;
+        }
+        self.phase_domain = clock_domain();
+        self.phase_begin = monotonic_ns();
+        if self.phase_domain.is_none() || self.phase_begin.is_none() {
+            self.invalid = true;
+        }
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -70,7 +89,7 @@ impl Window {
     }
 
     fn receipt(&self) -> Receipt<'_> {
-        let observed = !self.invalid
+        let native_observed = !self.invalid
             && self.completed
             && self.samples >= 2
             && self.root.is_some()
@@ -87,12 +106,29 @@ impl Window {
                 .first_after
                 .zip(self.last_before)
                 .is_some_and(|(start, end)| end > start);
+        let phase_observed = !self.invalid
+            && self.completed
+            && self.root.is_none()
+            && self.phase_domain.is_some()
+            && self
+                .phase_begin
+                .zip(self.phase_end)
+                .is_some_and(|(begin, end)| end > begin);
+        let observed = native_observed || phase_observed;
         Receipt {
             schema_version: 1,
             status: if observed { "observed" } else { "unavailable" },
-            scope: "verified-native-agent-principal-lifetime",
+            scope: if native_observed || !phase_observed {
+                "verified-native-agent-principal-lifetime"
+            } else {
+                "controller-observed-execution-phase"
+            },
             clock: "CLOCK_MONOTONIC",
-            clock_domain: &self.domain,
+            clock_domain: if native_observed || !phase_observed {
+                &self.domain
+            } else {
+                &self.phase_domain
+            },
             arm_counter: {
                 let counter_observed = observed && self.counter_release_before.zip(self.counter_exit_after)
                     .is_some_and(|(start, end)| end > start);
@@ -103,15 +139,15 @@ impl Window {
                     exit_bound_ticks: counter_observed.then_some(self.counter_exit_after).flatten(),
                 }
             },
-            root: &self.root,
-            release_bound_ns: observed.then_some(self.release_before).flatten(),
-            exit_bound_ns: observed.then_some(self.exit_after).flatten(),
-            start_bound_ns: observed.then_some(self.first_after).flatten(),
-            end_bound_ns: observed.then_some(self.last_before).flatten(),
-            live_observations: self.samples,
-            sampling_interval_ms: 100,
+            root: if native_observed { &self.root } else { &None },
+            release_bound_ns: if native_observed { self.release_before } else if phase_observed { self.phase_begin } else { None },
+            exit_bound_ns: if native_observed { self.exit_after } else if phase_observed { self.phase_end } else { None },
+            start_bound_ns: if native_observed { self.first_after } else if phase_observed { self.phase_begin } else { None },
+            end_bound_ns: if native_observed { self.last_before } else if phase_observed { self.phase_end } else { None },
+            live_observations: if native_observed { self.samples } else { 0 },
+            sampling_interval_ms: if native_observed { 100 } else { 0 },
             unavailable_reason: (!observed).then_some("requires two ordered live observations of the verified actual native agent principal, a stable clock domain and completed execution"),
-            limitations: "Conservative interior of a generation-verified live native principal lifetime, not CPU execution/residency or the full process-tree duration. Includes sleeping and stopped time between observations. Unsampled launch/exit tails and descendants after principal exit are excluded. Only identical boot/time-namespace clock domains are comparable. Missing, short, failed or unsupported observations remain unavailable.",
+            limitations: if native_observed || !phase_observed { "Conservative interior of a generation-verified live native principal lifetime, not CPU execution/residency or the full process-tree duration. Includes sleeping and stopped time between observations. Unsampled launch/exit tails and descendants after principal exit are excluded. Only identical boot/time-namespace clock domains are comparable. Missing, short, failed or unsupported observations remain unavailable." } else { "Controller-observed host execution lifecycle for a verified owned-container measurement scope. It is not a generation-verified agent principal, CPU residency, process-tree lifetime, or proof of container-internal PID identity. Only identical boot/time-namespace clock domains are comparable." },
         }
     }
 
@@ -295,6 +331,24 @@ mod tests {
         assert_eq!(r.exit_bound_ns, Some(200));
         assert_eq!(r.start_bound_ns, Some(15));
         assert_eq!(r.end_bound_ns, Some(100));
+    }
+
+    #[test]
+    fn completed_container_phase_is_explicitly_not_a_native_principal() {
+        let w = Window {
+            phase_domain: Some("a".repeat(64)),
+            phase_begin: Some(10),
+            phase_end: Some(20),
+            completed: true,
+            ..Window::default()
+        };
+        let receipt = w.receipt();
+        assert_eq!(receipt.status, "observed");
+        assert_eq!(receipt.scope, "controller-observed-execution-phase");
+        assert!(receipt.root.is_none());
+        assert_eq!(receipt.live_observations, 0);
+        assert_eq!(receipt.start_bound_ns, Some(10));
+        assert_eq!(receipt.end_bound_ns, Some(20));
     }
     #[test]
     fn missing_short_failed_or_backwards_observations_are_not_zero_windows() {
