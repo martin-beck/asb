@@ -4,6 +4,8 @@
 //! These locks do not reserve CPUs from the operating system, noncooperating
 //! programs or users who cannot access the shared directory. The owner must
 //! hold the lease until every placed process and container has settled.
+//! Abrupt coordinator death can release the locks while descendants remain;
+//! this primitive alone is not crash recovery or proof of quiescence.
 use std::collections::BTreeSet;
 use std::path::Path;
 

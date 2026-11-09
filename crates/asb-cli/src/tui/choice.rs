@@ -28,6 +28,8 @@ pub(super) enum ChoiceKey {
         selection: String,
     },
     Concurrency(usize),
+    RuntimeNone,
+    RuntimeCpuPool,
     Trial(String),
     ExtensionValue {
         workload: String,
@@ -60,7 +62,11 @@ impl ChoiceKey {
     pub fn valid(&self) -> bool {
         let valid = |name: &str| crate::selection_names::validate(name, "selection").is_ok();
         match self {
-            Self::AllAgents | Self::AllWorkloads | Self::AllCollectors => true,
+            Self::AllAgents
+            | Self::AllWorkloads
+            | Self::AllCollectors
+            | Self::RuntimeNone
+            | Self::RuntimeCpuPool => true,
             Self::AllCollectorOptions(collector) => valid(collector),
             Self::AllExtension {
                 workload,
@@ -154,29 +160,39 @@ pub(super) enum PaneKind {
     Workloads,
     Measurements,
     Concurrency,
+    Runtime,
     Extensions,
     CollectorOptions,
 }
 
 impl PaneKind {
-    pub const ORDER: [Self; 6] = [
+    pub const ORDER: [Self; 7] = [
         Self::Agents,
         Self::Providers,
         Self::Models,
         Self::Workloads,
         Self::Measurements,
         Self::Concurrency,
+        Self::Runtime,
     ];
     pub fn index(self) -> usize {
         self as usize
     }
     #[allow(dead_code)]
     pub fn next(self) -> Option<Self> {
-        Self::ORDER.get(self.index() + 1).copied()
+        Self::ORDER
+            .iter()
+            .position(|value| *value == self)
+            .and_then(|index| Self::ORDER.get(index + 1))
+            .copied()
     }
     #[allow(dead_code)]
     pub fn previous(self) -> Option<Self> {
-        self.index().checked_sub(1).map(|index| Self::ORDER[index])
+        Self::ORDER
+            .iter()
+            .position(|value| *value == self)
+            .and_then(|index| index.checked_sub(1))
+            .map(|index| Self::ORDER[index])
     }
     pub fn installable(self) -> bool {
         matches!(self, Self::Agents | Self::Workloads | Self::Measurements)
@@ -191,12 +207,16 @@ impl PaneKind {
             Self::Concurrency => "concurrency",
             Self::Extensions => "workload options",
             Self::CollectorOptions => "collector options",
+            Self::Runtime => "runtime",
         }
     }
     pub fn description(self) -> &'static str {
         match self {
             Self::Extensions => "Choose adapter-owned options for the selected workloads.",
             Self::CollectorOptions => "Choose adapter-owned collector options.",
+            Self::Runtime => {
+                "Choose None (portable) or a CPU pool. Ctrl-P edits CPUs, Ctrl-G edits group size, Ctrl-W toggles CPU-wide perf."
+            }
             _ => DESCRIPTIONS[self.index()],
         }
     }

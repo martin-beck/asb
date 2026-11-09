@@ -42,5 +42,9 @@ been implemented and qualified.
    CPU-wide capture scope, including explicit unverified-container disclosures.
    Confirm existing native unconfigured and process-tree behavior remains intact.
 
-The first implementation increment provides only the pure allocator; it does
-not pin a process, add a user-visible setting, or enable CPU-wide sampling.
+The draft currently provides allocation, target snapshots, cooperative lease
+and affinity primitives, configuration and setup-wizard state. Run and sweep
+admission still reject nondefault runtime settings: the runner does not yet
+place agents, proxies or containers or enable CPU-wide sampling. A lease only
+coordinates campaigns using the same lock directory and is not crash recovery
+or an operating-system CPU reservation.
