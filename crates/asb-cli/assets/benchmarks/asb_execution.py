@@ -218,6 +218,23 @@ def execution_target(transport, container, namespace_pid):
     return target
 
 
+def verify_container_cpu_set(container, cpu_set):
+    """Check the effective affinity of a running container before its work starts."""
+    if cpu_set is None:
+        return
+    result = container.exec_run(["/bin/sh", "-c", 'while IFS= read -r line; do case "$line" in Cpus_allowed_list:*) printf "%s\\n" "$line"; exit 0;; esac; done </proc/self/status; exit 1'])
+    output = result.output
+    if result.exit_code != 0 or not isinstance(output, bytes) or len(output) > 65536:
+        raise ExecutionError("cannot verify effective CPU allocation inside the managed container")
+    try:
+        line = output.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise ExecutionError("container CPU allocation is not ASCII") from error
+    prefix = "Cpus_allowed_list:"
+    if not line.startswith(prefix) or _parse_cpu_list(line[len(prefix):].strip()) != _parse_cpu_list(cpu_set):
+        raise ExecutionError("managed container effective CPU allocation differs from the requested set")
+
+
 class ManagedDockerWorkspace:
     @classmethod
     def attach(cls, client, container, attempt, workdir, cpu_set=None):
@@ -321,19 +338,7 @@ class ManagedDockerWorkspace:
 
     def verify_cpu_set(self):
         """Verify effective task affinity inside the owned running container."""
-        if self.cpu_set is None:
-            return
-        result = self.container.exec_run(["/bin/sh", "-c", 'while IFS= read -r line; do case "$line" in Cpus_allowed_list:*) printf "%s\\n" "$line"; exit 0;; esac; done </proc/self/status; exit 1'])
-        output = result.output
-        if result.exit_code != 0 or not isinstance(output, bytes) or len(output) > 65536:
-            raise ExecutionError("cannot verify effective CPU allocation inside the managed container")
-        try:
-            line = output.decode("ascii").strip()
-        except UnicodeDecodeError as error:
-            raise ExecutionError("container CPU allocation is not ASCII") from error
-        prefix = "Cpus_allowed_list:"
-        if not line.startswith(prefix) or _parse_cpu_list(line[len(prefix):].strip()) != _parse_cpu_list(self.cpu_set):
-            raise ExecutionError("managed container effective CPU allocation differs from the requested set")
+        verify_container_cpu_set(self.container, self.cpu_set)
 
     def execute(self, argv, environment=None, timeout=900, output_limit=256 * 1024, before_resume=None,
                 on_output=None, cancelled=None, gate="shell", preparation_timeout=None,
