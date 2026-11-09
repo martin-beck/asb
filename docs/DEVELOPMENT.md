@@ -1,5 +1,13 @@
 # Development
 
+Comparison reports place each run's flamegraph in Charts, with its collector
+status, original SVG links, and the same result filters as the table. Each SVG
+runs in a separate sandboxed frame so its controls and element IDs do not
+interfere with other graphs. The frame scrolls deep graphs in both normal and
+enlarged views. The opt-in `generate_flamegraph_browser_fixture` test takes
+`ASB_TEST_FLAMEGRAPH` and retains a two-run report under the project target
+directory for browser validation.
+
 The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
 uses a local model fixture to record one official SWE-bench task and replay it
 in two isolated replicas. It checks the grade, cleanup and native tool-stream

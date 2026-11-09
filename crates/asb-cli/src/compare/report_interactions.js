@@ -103,3 +103,16 @@ function setChartHighlight(graph,enabled){
   for(const input of highlightControls)if(input.dataset.highlightGraph===graph)input.checked=enabled;
 }
 for(const input of highlightControls)input.addEventListener('change',()=>setChartHighlight(input.dataset.highlightGraph,input.checked));
+document.querySelectorAll('.flamegraph-chart').forEach(chart=>{
+  const expand=chart.querySelector('.flamegraph-expand');
+  const close=chart.querySelector('.flamegraph-close');
+  const setExpanded=value=>{
+    chart.classList.toggle('expanded',value);
+    document.body.classList.toggle('chart-open',value);
+    expand.hidden=value;close.hidden=!value;
+    (value?close:expand).focus();
+  };
+  expand.addEventListener('click',()=>setExpanded(true));
+  close.addEventListener('click',()=>setExpanded(false));
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&chart.classList.contains('expanded'))setExpanded(false)});
+});

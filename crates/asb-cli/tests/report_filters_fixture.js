@@ -36,18 +36,20 @@ function chart(labels) {
   };
 }
 const labels = identities.map(row => row[0]);
+const flamegraphs = labels.map(flamegraphBenchmark => element({flamegraphBenchmark}));
 const charts = [chart(labels), chart(labels), chart([labels[0], labels[2]])]; // bar, line, stacked timeline
 const count = element();
 const all = element({action: 'all'}), none = element({action: 'none'});
 const document = {
   querySelectorAll: selector => ({'input[data-group]': inputs, '#results tr': rows,
-    '.interactive-chart': charts, 'button[data-action]': [all, none]})[selector],
+    '.interactive-chart': charts, '[data-flamegraph-benchmark]': flamegraphs, 'button[data-action]': [all, none]})[selector],
   querySelector: selector => { assert.equal(selector, '#filter-count'); return count; },
 };
 vm.runInNewContext(reportScript, {document});
 function expectVisible(expected) {
   const selected = new Set(expected);
   assert.deepEqual(rows.filter(row => !row.hidden).map(row => row.dataset.dimensionBenchmark), expected);
+  assert.deepEqual(flamegraphs.filter(graph => !graph.hidden).map(graph => graph.dataset.flamegraphBenchmark), expected);
   for (const chart of charts) {
     for (const entry of chart.entries) {
       assert.equal(entry.style.display, selected.has(entry.dataset.benchmark) ? '' : 'none');

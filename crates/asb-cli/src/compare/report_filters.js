@@ -27,6 +27,9 @@ function installReportFilters(document) {
       row.hidden = !show;
       if (show) visible.add(row.dataset.dimensionBenchmark);
     }
+    for (const graph of document.querySelectorAll('[data-flamegraph-benchmark]')) {
+      graph.hidden = !visible.has(graph.dataset.flamegraphBenchmark);
+    }
     for (const chart of charts) {
       let shown = 0;
       for (const entry of chart.entries) {
