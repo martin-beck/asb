@@ -1856,3 +1856,14 @@ records each selected CPU, checks sample scope and removes its owned resources.
 The independent container is deliberately outside ASB's CPU control; the
 fixture pins one of its processes itself to demonstrate that CPU-wide perf can
 capture it. It does not establish official workload or agent correctness.
+
+For an opt-in two-replica SWE-bench placement check, run
+`crates/asb-cli/tests/cpu_pool_swe_qualification.py` with `ASB_TEST_ASB` set
+to a CPU-pool-enabled ASB binary, `ASB_TEST_SWE_SEED` set to a project with
+the installed SWE-bench SDK, catalog, Pi and Node, and `ASB_TEST_TEMP_ROOT`
+set to a filesystem with ample free space. The default trial is
+`sympy__sympy-14774`; override it with `ASB_TEST_SWE_TRIAL` when its matching
+native task image and catalog are already installed. The fixture uses an
+intentionally approximate offline cassette and allows agent/evaluation
+failures. It validates managed placement, proxy receipts and owned-container
+cleanup; it does not qualify benchmark correctness or task resolution.
