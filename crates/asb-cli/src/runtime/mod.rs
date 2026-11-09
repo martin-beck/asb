@@ -6,4 +6,5 @@
 pub mod affinity;
 pub mod cpu_lease;
 pub mod cpu_pool;
+pub mod perf_scope;
 pub mod settings;

@@ -19,24 +19,7 @@ mod stop_contract_tests;
 /// subsequently created agent threads and children without sampling siblings,
 /// collector processes or unrelated host activity.
 fn record_args(pid: u32) -> Vec<String> {
-    vec![
-        "record".into(),
-        // Do not let perf select a host-specific hardware default.  On hybrid
-        // systems that can expand to cpu_core/cycles or cpu_atom/cycles and
-        // fail after attaching to a container-owned workload even though the
-        // generic host probe succeeded.  cpu-clock is a software event and
-        // keeps the stack-sample/flamegraph contract portable.
-        "-e".into(),
-        "cpu-clock".into(),
-        "-g".into(),
-        "-F".into(),
-        // Frequency is per thread: a 19 Hz period misses most short-lived
-        // workers even when their aggregate CPU time is substantial.
-        "199".into(),
-        "--inherit".into(),
-        "-p".into(),
-        pid.to_string(),
-    ]
+    crate::runtime::perf_scope::process_tree_record_args(pid)
 }
 
 /// Build the process-scoped interval counter arguments with the same
