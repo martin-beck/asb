@@ -343,6 +343,23 @@ impl SettlementBarrier {
         Self::selected(total, &(1..=total).collect::<Vec<_>>(), timeout)
     }
 
+    #[cfg(test)]
+    pub(crate) fn wait_for_arrivals(&self, expected: usize, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.arrived.iter().filter(|arrived| **arrived).count() >= expected {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        }
+    }
+
     pub(crate) fn arrive(&self, replica: Identity) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         if !replica.valid()
@@ -366,6 +383,7 @@ impl SettlementBarrier {
             );
         }
         state.arrived[replica.index - 1] = true;
+        self.changed.notify_all();
         if state
             .arrived
             .iter()

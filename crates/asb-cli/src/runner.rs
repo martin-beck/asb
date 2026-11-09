@@ -14,6 +14,12 @@ use disposition::RunStatus;
 use disposition::{FailureKind, RunDisposition, RunFacts, RunFailure};
 mod native;
 mod phases;
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) use super::phases::entry_test_support::{
+        CampaignSettlementPhase, CampaignSettlementProbeScope,
+    };
+}
 #[cfg(target_os = "linux")]
 mod proc_executable;
 mod progress;

@@ -1254,8 +1254,18 @@ impl<'a> CompletedAttempt<'a> {
             barrier.arrive(context.options.replica)?;
         }
         if let Some(barrier) = context.options.sweep_settlement {
+            #[cfg(test)]
+            phases::entry_test_support::observe_campaign_settlement(
+                &context.project_root,
+                phases::entry_test_support::CampaignSettlementPhase::BeforeSweepBarrier,
+            );
             barrier.arrive(context.options.replica)?;
         }
+        #[cfg(test)]
+        phases::entry_test_support::observe_campaign_settlement(
+            &context.project_root,
+            phases::entry_test_support::CampaignSettlementPhase::BeforeGrading,
+        );
         let config = &context.config;
         let workspace = &metadata.workspace;
         let mut artifact_owner = settled.evidence.artifact_owner.take();

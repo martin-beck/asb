@@ -1,5 +1,6 @@
 //! Offline runner admission and owned-child stream handling.
 use super::*;
+use std::time::{Duration, Instant};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -80,6 +81,50 @@ fn admission_rejects_bad_replica_reuse_and_cohort_before_any_execution() {
         std::fs::read_dir(&root.0).unwrap().count(),
         1,
         "no workspace or artifact may be created"
+    );
+}
+
+#[test]
+fn ordinary_run_error_aborts_a_waiting_sweep_settlement_peer() {
+    let root = Fixture::new();
+    let path = root.config();
+    let config: BenchmarkConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let barrier =
+        std::sync::Arc::new(batch::SettlementBarrier::for_test(2, Duration::from_secs(3)).unwrap());
+    let failed = batch::SweepSettlement::selected(barrier.clone(), 1, 2).unwrap();
+    let waiting = batch::SweepSettlement::selected(barrier.clone(), 2, 2).unwrap();
+    let peer = std::thread::spawn(move || waiting.arrive(replica::Identity { index: 1, total: 1 }));
+    assert!(
+        barrier.wait_for_arrivals(1, Duration::from_secs(1)),
+        "peer did not enter the sweep settlement barrier"
+    );
+    let started = Instant::now();
+    let error = run_mode(
+        &path,
+        config,
+        RunOptions {
+            mode: Some(tape::Mode::Record),
+            replica: replica::Identity { index: 1, total: 1 },
+            sweep_settlement: Some(&failed),
+            ..Default::default()
+        },
+        &mut Vec::new(),
+        &Mutex::new(BTreeSet::new()),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("record dispatch lost its owned provider capture path")
+    );
+    let peer_error = peer.join().unwrap().unwrap_err().to_string();
+    assert!(
+        peer_error.contains("record dispatch lost its owned provider capture path"),
+        "{peer_error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "ordinary error waited for the policy timeout instead of waking the peer"
     );
 }
 
