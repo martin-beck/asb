@@ -5,6 +5,8 @@ ASB_TEST_SWE_SEED pointing to a project with installed swebench, pi, node and
 swe-bench catalog, and ASB_TEST_TEMP_ROOT on a filesystem with ample space.
 The selected local task image and Docker daemon must already be available.
 This checks placement and cleanup; it does not claim a resolved benchmark.
+Set ASB_TEST_FLAMEGRAPH to a directory containing the real flamegraph and
+stackcollapse-perf.pl executables to additionally qualify CPU-wide perf.
 """
 import json
 import os
@@ -33,11 +35,28 @@ def main():
         for name in ("swebench", "pi", "node"):
             shutil.copytree(seed / ".asb-tools" / name, project / ".asb-tools" / name, symlinks=True)
         shutil.copytree(seed / "workloads/swe-bench", project / "workloads/swe-bench", symlinks=True)
+        flamegraph = os.environ.get("ASB_TEST_FLAMEGRAPH")
+        if flamegraph:
+            perf = shutil.which("perf")
+            if perf is None:
+                raise RuntimeError("CPU-wide qualification requires an installed perf executable")
+            perf_bin = project / ".asb-tools/perf/bin"
+            perf_bin.mkdir(parents=True)
+            shutil.copy2(perf, perf_bin / "perf")
+            graph_bin = project / ".asb-tools/flamegraph/bin"
+            graph_bin.mkdir(parents=True)
+            for name in ("flamegraph", "stackcollapse-perf.pl"):
+                shutil.copy2(Path(flamegraph) / name, graph_bin / name)
+            environment["ASB_MEASURE_PERF"] = "1"
+        runtime_scope = '[runtime]\nperf_record_scope="cpu-wide"\n' if flamegraph else ''
+        measures = '[measurements]\nenabled=true\ndirectory="measurements"\ncollectors=["perf","flamegraph"]\n' if flamegraph else ''
         (project / "benchmark.toml").write_text(
             'agent="pi"\nworkload="swe-bench"\nprovider="openrouter"\nmodel="test-model"\n'
             f'trial={json.dumps(trial)}\nconcurrency=2\nworkspace="workspace"\nlog_file="run.log"\n'
+            + runtime_scope +
             f'[runtime.cpu_pool]\ncpus="{cpus[0]},{cpus[1]}"\nnum_cpus_per_instance=1\n'
-            '[planning.budgets]\nenvironment_preparation_seconds=600\nexecution_seconds=60\nevaluation_seconds=120\n')
+            '[planning.budgets]\nenvironment_preparation_seconds=600\nexecution_seconds=60\nevaluation_seconds=120\n'
+            + measures)
         request = json.dumps({"model": "test-model", "input": "offline", "tools": [{"type": "function"}]})
         response = json.dumps({"id": "resp_fixture", "object": "response", "output": [], "status": "completed"})
         cassette = {"request": {"method": "POST", "url": "/v1/responses", "body": request},
@@ -70,8 +89,26 @@ def main():
         outcomes = [json.loads((project / f"run-concurrency-{index}.log").read_text()) for index in (1, 2)]
         if not all(outcome.get("approximate_replay") for outcome in outcomes):
             raise AssertionError("fixture must retain its approximate replay status")
+        if flamegraph:
+            root = project / "results/benchmark-runs/run-001"
+            report = (project / "results/benchmark-comparison/report.html").read_text()
+            for index, cpu in enumerate(cpus, 1):
+                directory = root / f"measurements-concurrency-{index}"
+                scope = json.loads((directory / "perf-record-scope.json").read_text())
+                stat = json.loads((directory / "perf-stat-plan.json").read_text())
+                graph = json.loads((directory / "flamegraph.json").read_text())
+                if scope.get("scope") != "cpu-wide" or scope.get("logical_cpus") != [cpu] or stat.get("scope") != "agent-process-tree" or graph.get("status") != "completed":
+                    raise AssertionError(f"invalid perf/flamegraph scope for replica {index}")
+                if "<svg" not in (directory / "flamegraph.svg").read_text():
+                    raise AssertionError("flamegraph SVG is unavailable")
+                decoded = subprocess.run([perf, "script", "-i", str(directory / "perf.data"), "-F", "cpu"],
+                                         capture_output=True, text=True, check=True, timeout=60).stdout
+                sample_cpus = {int(line.strip().strip("[]")) for line in decoded.splitlines() if line.strip()}
+                if sample_cpus != {cpu} or f"CPU-wide perf recording on logical CPUs {cpu}." not in report:
+                    raise AssertionError(f"CPU-wide samples or report scope differ for replica {index}: {sample_cpus}")
         print(json.dumps({"trial": trial, "managed_allocations": observed,
-                          "approximate_replay": True, "benchmark_correctness": "not qualified"}, sort_keys=True))
+                          "cpu_wide_flamegraphs": bool(flamegraph), "approximate_replay": True,
+                          "benchmark_correctness": "not qualified"}, sort_keys=True))
 
 
 if __name__ == "__main__":

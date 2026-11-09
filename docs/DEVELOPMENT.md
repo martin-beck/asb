@@ -1866,4 +1866,9 @@ set to a filesystem with ample free space. The default trial is
 native task image and catalog are already installed. The fixture uses an
 intentionally approximate offline cassette and allows agent/evaluation
 failures. It validates managed placement, proxy receipts and owned-container
-cleanup; it does not qualify benchmark correctness or task resolution.
+cleanup; it does not qualify benchmark correctness or task resolution. Set
+`ASB_TEST_FLAMEGRAPH` to a directory containing the real `flamegraph` and
+`stackcollapse-perf.pl` executables to also record CPU-wide perf samples,
+validate each sampled CPU and report label, and generate both SVG flamegraphs.
+That option requires local system-wide perf permission and can be slow while
+perf resolves symbols; ordinary CI does not run it.
