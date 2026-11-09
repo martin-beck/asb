@@ -507,6 +507,26 @@ impl<'a> ActivatedSweep<'a> {
         {
             schedule_error = Some(crate::io_error(error));
         }
+        // A fully admitted sweep can keep grading outside the measured cohort:
+        // every selected replica is already runnable, so a global rendezvous
+        // cannot starve pending work. Partial-budget sweeps retain their
+        // configuration-local barrier to avoid holding scheduler permits.
+        let total_replicas = self.weights.iter().sum::<usize>();
+        let mut sweep_offsets = Vec::with_capacity(self.weights.len() + 1);
+        sweep_offsets.push(0);
+        for weight in &self.weights {
+            sweep_offsets.push(sweep_offsets.last().copied().unwrap_or(0) + weight);
+        }
+        let sweep_settlement = (total_replicas > 1
+            && self.scheduling.max_active_attempts == total_replicas)
+            .then(|| {
+                crate::runner::batch::SettlementBarrier::selected(
+                    total_replicas,
+                    &(1..=total_replicas).collect::<Vec<_>>(),
+                    crate::planning::BatchAdmissionPolicy::current().launch_timeout(),
+                )
+                .expect("scheduler-validated full sweep cohort")
+            });
         let execution = execution::Execution {
             campaigns: self.campaigns.as_ref(),
             source: &self.source,
@@ -520,6 +540,8 @@ impl<'a> ActivatedSweep<'a> {
             warnings: &self.warnings,
             checkpoint: self.mode.checkpoint(),
             reused: &self.reused,
+            sweep_settlement: sweep_settlement.as_ref(),
+            sweep_offsets: sweep_settlement.as_ref().map(|_| sweep_offsets.as_slice()),
         };
         if !output.failed() {
             schedule_error = if self.scheduling.jobs == 1 {

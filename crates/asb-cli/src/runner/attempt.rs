@@ -1253,6 +1253,12 @@ impl<'a> CompletedAttempt<'a> {
         if let Some(barrier) = context.options.settlement_barrier {
             barrier.arrive(context.options.replica)?;
         }
+        if let (Some(barrier), Some(replica)) = (
+            context.options.sweep_settlement_barrier,
+            context.options.sweep_replica,
+        ) {
+            barrier.arrive(replica)?;
+        }
         let config = &context.config;
         let workspace = &metadata.workspace;
         let mut artifact_owner = settled.evidence.artifact_owner.take();

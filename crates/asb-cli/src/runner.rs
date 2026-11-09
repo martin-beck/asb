@@ -229,6 +229,10 @@ pub(crate) struct RunOptions<'a> {
     /// Holds official grading and post-processing until every admitted peer
     /// has settled its agent execution and measurement collection.
     pub settlement_barrier: Option<&'a batch::SettlementBarrier>,
+    /// Holds grading until every globally admitted sweep replica has settled
+    /// execution and collector work. Local replica identity remains unchanged.
+    pub sweep_settlement_barrier: Option<&'a batch::SettlementBarrier>,
+    pub sweep_replica: Option<replica::Identity>,
     pub policy: Option<&'a crate::planning::ResolvedPlan>,
     pub execution_cohort: Option<&'a measurements::ExecutionCohort>,
     pub json: bool,
@@ -932,6 +936,12 @@ fn run_concurrent(
                                     index: index + 1,
                                     total: config.concurrency,
                                 },
+                                sweep_replica: options.sweep_replica.map(|global| {
+                                    replica::Identity {
+                                        index: global.index + index,
+                                        total: global.total,
+                                    }
+                                }),
                                 measurement_dir: measurement_path,
                                 mode,
                                 cassette: cassette_path,
@@ -1034,6 +1044,9 @@ fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
     if let Some(barrier) = options.settlement_barrier {
         barrier.abort(reason);
     }
+    if let Some(barrier) = options.sweep_settlement_barrier {
+        barrier.abort(reason);
+    }
 }
 
 fn run_replica_catching(
@@ -1133,6 +1146,14 @@ fn run_mode(
         barrier.abort(&format!(
             "replica {} failed before cohort grading: {error}",
             options.replica.index
+        ));
+    }
+    if let Err(error) = &result
+        && let Some(barrier) = options.sweep_settlement_barrier
+    {
+        barrier.abort(&format!(
+            "sweep replica {} failed before cohort grading: {error}",
+            options.sweep_replica.unwrap_or(options.replica).index
         ));
     }
     result

@@ -46,6 +46,8 @@ pub(super) struct Execution<'a> {
     pub warnings: &'a Mutex<BTreeSet<String>>,
     pub checkpoint: Option<&'a super::checkpoint::Inputs>,
     pub reused: &'a super::resume::State,
+    pub sweep_settlement: Option<&'a crate::runner::batch::SettlementBarrier>,
+    pub sweep_offsets: Option<&'a [usize]>,
 }
 
 impl Execution<'_> {
@@ -205,6 +207,13 @@ impl Execution<'_> {
                 ignore_tool_mismatch: self.options.ignore_tool_mismatch,
                 ignore_mcp_mismatch: self.options.ignore_mcp_mismatch,
                 ignore_compatibility: self.options.ignore_compatibility,
+                sweep_settlement_barrier: self.sweep_settlement,
+                sweep_replica: self
+                    .sweep_offsets
+                    .map(|offsets| crate::runner::replica::Identity {
+                        index: offsets[index] + 1,
+                        total: *offsets.last().expect("sweep offsets retain total"),
+                    }),
                 requirements_prepared: !self.options.resume,
                 architecture_confirmed: true,
                 on_completion: observer
@@ -317,6 +326,8 @@ mod tests {
             warnings: &warnings,
             checkpoint: None,
             reused: &reused,
+            sweep_settlement: None,
+            sweep_offsets: None,
         };
         let interrupted = vec![b'x'; 4 * 1024 * 1024 + 65_537];
         std::fs::write(execution.output_path(0), &interrupted).unwrap();
@@ -387,6 +398,8 @@ mod tests {
                 warnings: &warnings,
                 checkpoint: None,
                 reused: &reused,
+                sweep_settlement: None,
+                sweep_offsets: None,
             };
             let report = execution.run(0);
             assert!(report.result.is_err());
