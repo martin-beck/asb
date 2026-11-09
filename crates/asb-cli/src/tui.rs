@@ -188,7 +188,7 @@ impl Pane {
 struct App {
     root: PathBuf,
     project: project::ProjectConfig,
-    panes: [Pane; 8],
+    panes: [Pane; 9],
     step: PaneKind,
     extension_tab: String,
     extension_description: String,
@@ -197,12 +197,81 @@ struct App {
     configured_collectors: BTreeSet<String>,
     collector_selections: BTreeMap<String, BTreeSet<String>>,
     native_snapshot_record: bool,
+    runtime_wizard: crate::runtime::wizard::RuntimeWizard,
+    runtime_edit: Option<RuntimeEdit>,
     message: String,
     message_color: Color,
     message_until: Option<std::time::Instant>,
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeEdit {
+    Pool,
+    GroupSize,
+}
+
 impl App {
+    fn sync_runtime_choice(&mut self) {
+        use crate::runtime::wizard::AffinityChoice;
+        let previously_pooled = self.runtime_wizard.affinity == AffinityChoice::CpuPool;
+        self.runtime_wizard.affinity =
+            if self.pane(PaneKind::Runtime).selected.get(1) == Some(&true) {
+                AffinityChoice::CpuPool
+            } else {
+                AffinityChoice::None
+            };
+        if previously_pooled && self.runtime_wizard.affinity == AffinityChoice::None {
+            self.runtime_wizard.perf_record_scope =
+                crate::runtime::settings::PerfRecordScope::ProcessTree;
+            self.runtime_wizard.cpu_description = None;
+        }
+    }
+
+    fn runtime_settings(&self) -> Result<crate::runtime::settings::RuntimeSettings, Error> {
+        let mut selected = self.pane(PaneKind::Runtime).selected_choices();
+        if selected.next().is_none() || selected.next().is_some() {
+            return Err(Error::Input(
+                "select exactly one runtime affinity option".into(),
+            ));
+        }
+        let concurrency = self
+            .pane(PaneKind::Concurrency)
+            .selected_choices()
+            .find_map(|choice| choice.key.concurrency())
+            .ok_or_else(|| Error::Input("select a concurrency value".into()))?;
+        let mut settings = self
+            .runtime_wizard
+            .settings(concurrency)
+            .map_err(Error::Input)?;
+        if settings.cpu_pool.is_some() && settings.cpu_description.is_none() {
+            settings.cpu_description = Some(crate::runtime::settings::CpuDescription::current());
+        }
+        Ok(settings)
+    }
+
+    fn describe_runtime(&mut self) {
+        let concurrency = self
+            .pane(PaneKind::Concurrency)
+            .selected_choices()
+            .find_map(|choice| choice.key.concurrency())
+            .unwrap_or(1);
+        self.message = match self.runtime_wizard.preview(concurrency) {
+            Ok(None) => "None (portable): ASB will not change CPU affinity.".into(),
+            Ok(Some(preview)) => format!(
+                "CPU pool capacity {}; allocations {:?}; perf record: {}",
+                preview.capacity,
+                preview.allocations,
+                match self.runtime_wizard.perf_record_scope {
+                    crate::runtime::settings::PerfRecordScope::ProcessTree => "process tree",
+                    crate::runtime::settings::PerfRecordScope::CpuWide =>
+                        "CPU-wide (includes unrelated host and kernel activity)",
+                }
+            ),
+            Err(error) => format!("{error}. Ctrl-P edits CPUs; Ctrl-G edits CPUs per instance."),
+        };
+        self.message_color = Color::Yellow;
+        self.message_until = None;
+    }
     fn toggle_native_snapshot_record(&mut self) {
         self.native_snapshot_record = !self.native_snapshot_record;
         self.message = if self.native_snapshot_record {
@@ -236,6 +305,7 @@ impl App {
             order.push(PaneKind::CollectorOptions);
         }
         order.push(PaneKind::Concurrency);
+        order.push(PaneKind::Runtime);
         order
     }
 
@@ -347,6 +417,19 @@ impl App {
             .collect();
         let mut concurrency_pane = Pane::new(concurrency_choices);
         concurrency_pane.selected[0] = true;
+        let mut runtime_pane = Pane::new(vec![
+            Choice {
+                label: "None (portable)".into(),
+                key: ChoiceKey::RuntimeNone,
+                availability: Availability::Available,
+            },
+            Choice {
+                label: "CPU pool".into(),
+                key: ChoiceKey::RuntimeCpuPool,
+                availability: Availability::Available,
+            },
+        ]);
+        runtime_pane.selected[0] = true;
         let mut app = Self {
             root,
             project,
@@ -357,6 +440,7 @@ impl App {
                 workload_pane,
                 measure_pane,
                 concurrency_pane,
+                runtime_pane,
                 Pane::new(Vec::new()),
                 Pane::new(Vec::new()),
             ],
@@ -368,6 +452,8 @@ impl App {
             configured_collectors: BTreeSet::new(),
             collector_selections: BTreeMap::new(),
             native_snapshot_record: false,
+            runtime_wizard: crate::runtime::wizard::RuntimeWizard::default(),
+            runtime_edit: None,
             message: "Space selects; arrows move; Tab or Enter advances; Esc cancels.".into(),
             message_color: Color::Yellow,
             message_until: None,
@@ -406,6 +492,21 @@ impl App {
     /// deliberately paired configurations become editable selections.
     fn preselect(&mut self, input: &Path) -> Result<(), Error> {
         let configs = preselection_configs(input)?;
+        let runtime = &configs
+            .first()
+            .ok_or_else(|| {
+                Error::Input(format!(
+                    "{} contains no benchmark configurations",
+                    input.display()
+                ))
+            })?
+            .runtime;
+        if configs.iter().any(|config| &config.runtime != runtime) {
+            return Err(Error::Input("the setup TUI edits one shared runtime setting; this input has multiple runtime settings".into()));
+        }
+        self.runtime_wizard = crate::runtime::wizard::RuntimeWizard::from_settings(runtime);
+        let pool_selected = runtime.cpu_pool.is_some();
+        self.pane_mut(PaneKind::Runtime).selected = vec![!pool_selected, pool_selected];
         let concurrency = configs
             .first()
             .map(|config| config.concurrency)
@@ -973,6 +1074,13 @@ impl App {
     }
 
     fn advance(&mut self) -> Result<Option<Generated>, Error> {
+        if self.step == PaneKind::Runtime
+            && let Err(error) = self.runtime_settings()
+        {
+            self.message = error.to_string();
+            self.message_color = Color::Yellow;
+            return Ok(None);
+        }
         if self.step == PaneKind::CollectorOptions {
             let selected = self
                 .pane(PaneKind::Measurements)
@@ -1015,6 +1123,9 @@ impl App {
             self.message = model_warning.unwrap_or_else(|| self.step_description().into());
             self.message_color = Color::Yellow;
             self.message_until = None;
+            if next == PaneKind::Runtime {
+                self.describe_runtime();
+            }
             Ok(None)
         } else {
             generate_configs(self).map(Some)
@@ -1218,6 +1329,7 @@ fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Er
                 ChoiceKey::Collector(_) => "collector",
                 ChoiceKey::CollectorOption { .. } => "collector option",
                 ChoiceKey::Concurrency(_) => "concurrency",
+                ChoiceKey::RuntimeNone | ChoiceKey::RuntimeCpuPool => "runtime option",
                 ChoiceKey::AllAgents
                 | ChoiceKey::AllWorkloads
                 | ChoiceKey::AllCollectors
@@ -1271,6 +1383,8 @@ fn choice_key_label(key: &ChoiceKey) -> String {
         ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
         ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
         ChoiceKey::Concurrency(value) => value.to_string(),
+        ChoiceKey::RuntimeNone => "None (portable)".into(),
+        ChoiceKey::RuntimeCpuPool => "CPU pool".into(),
         ChoiceKey::AllAgents | ChoiceKey::AllWorkloads | ChoiceKey::AllCollectors => "[all]".into(),
         ChoiceKey::AllCollectorOptions(collector) => format!("{collector}: [all]"),
         ChoiceKey::AllExtension {
@@ -2009,7 +2123,88 @@ fn run_loop(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if let Some(edit) = app.runtime_edit {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Err(Error::Usage("setup TUI cancelled"));
+            }
+            let input = match edit {
+                RuntimeEdit::Pool => &mut app.runtime_wizard.cpus,
+                RuntimeEdit::GroupSize => &mut app.runtime_wizard.num_cpus_per_instance,
+            };
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc => app.runtime_edit = None,
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && (c.is_ascii_digit()
+                            || (matches!(edit, RuntimeEdit::Pool)
+                                && matches!(c, ',' | '-' | ' ')))
+                        && input.len() < 4096 =>
+                {
+                    input.push(c)
+                }
+                _ => {}
+            }
+            app.message = format!(
+                "Editing {}: {} (Enter to finish)",
+                if matches!(edit, RuntimeEdit::Pool) {
+                    "CPUs"
+                } else {
+                    "CPUs per instance"
+                },
+                match edit {
+                    RuntimeEdit::Pool => &app.runtime_wizard.cpus,
+                    RuntimeEdit::GroupSize => &app.runtime_wizard.num_cpus_per_instance,
+                }
+            );
+            if app.runtime_edit.is_none() {
+                app.describe_runtime();
+            }
+            continue;
+        }
         match key {
+            KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers,
+                ..
+            } if app.step == PaneKind::Runtime && modifiers.contains(KeyModifiers::CONTROL) => {
+                app.runtime_edit = Some(RuntimeEdit::Pool);
+                app.message = format!(
+                    "Editing CPUs: {} (Enter to finish)",
+                    app.runtime_wizard.cpus
+                );
+            }
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers,
+                ..
+            } if app.step == PaneKind::Runtime && modifiers.contains(KeyModifiers::CONTROL) => {
+                app.runtime_edit = Some(RuntimeEdit::GroupSize);
+                app.message = format!(
+                    "Editing CPUs per instance: {} (Enter to finish)",
+                    app.runtime_wizard.num_cpus_per_instance
+                );
+            }
+            KeyEvent {
+                code: KeyCode::Char('w'),
+                modifiers,
+                ..
+            } if app.step == PaneKind::Runtime && modifiers.contains(KeyModifiers::CONTROL) => {
+                use crate::runtime::settings::PerfRecordScope;
+                if app.runtime_wizard.affinity == crate::runtime::wizard::AffinityChoice::CpuPool {
+                    app.runtime_wizard.perf_record_scope =
+                        match app.runtime_wizard.perf_record_scope {
+                            PerfRecordScope::ProcessTree => PerfRecordScope::CpuWide,
+                            PerfRecordScope::CpuWide => PerfRecordScope::ProcessTree,
+                        };
+                    app.describe_runtime();
+                } else {
+                    app.message = "Select CPU pool before enabling CPU-wide perf recording.".into();
+                    app.message_color = Color::Yellow;
+                }
+            }
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
@@ -2058,6 +2253,12 @@ fn run_loop(
                     app.sync_collector_dependencies();
                 }
                 if app.next_step().is_none() {
+                    if app.step == PaneKind::Runtime
+                        && let Err(error) = app.runtime_settings()
+                    {
+                        app.message = error.to_string();
+                        continue;
+                    }
                     if !install_selected_provider_tools(terminal, app)? {
                         continue;
                     }
@@ -2072,6 +2273,14 @@ fn run_loop(
                 ..
             } if app.step == PaneKind::Concurrency => {
                 app.panes[PaneKind::Concurrency.index()].toggle_single()
+            }
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                ..
+            } if app.step == PaneKind::Runtime => {
+                app.panes[PaneKind::Runtime.index()].toggle_single();
+                app.sync_runtime_choice();
+                app.describe_runtime();
             }
             KeyEvent {
                 code: KeyCode::Char(' '),
@@ -2461,7 +2670,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![
-                if !app.step.installable() {
+                if app.step == PaneKind::Runtime {
+                    Span::styled(
+                        "Space select | Ctrl-P CPUs | Ctrl-G group | Ctrl-W perf scope",
+                        Style::default().fg(Color::Cyan),
+                    )
+                } else if !app.step.installable() {
                     Span::styled("Discovery only", Style::default().fg(Color::Yellow))
                 } else {
                     Span::styled("Space select/install", Style::default().fg(Color::Cyan))
@@ -3152,6 +3366,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
         return Err(Error::Input("select exactly one concurrency value".into()));
     }
     let concurrency = value.expect("checked numeric concurrency");
+    let runtime = app.runtime_settings()?;
     let valid_models = models
         .iter()
         .filter(|(provider, _)| providers.contains(provider))
@@ -3189,6 +3404,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                     for trial in trials {
                         let name = format!("asb-test-{stamp}-{index:03}.toml");
                         let config = BenchmarkConfig {
+                            runtime: runtime.clone(),
                             native_snapshot_record: app.native_snapshot_record,
                             planning: None,
                             agent: agent.clone(),
@@ -4538,7 +4754,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-tui-concurrency-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("test root");
         let app = App::new(root.clone(), ProjectConfig::default());
-        assert_eq!(app.panes.len(), 8);
+        assert_eq!(app.panes.len(), 9);
         assert_eq!(
             app.panes[PaneKind::Concurrency.index()]
                 .selected_choices()
@@ -4625,6 +4841,64 @@ mod tests {
                 .contains("unsafe configuration path")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_preselection_restores_cpu_pool_without_dropping_it() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("saved.toml");
+        let text = "agent='pi'\nprovider='local'\nmodel='m'\nworkload='bug-fix'\n[runtime.cpu_pool]\ncpus='1'\nnum_cpus_per_instance=1\n";
+        std::fs::write(&input, text).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.preselect(&input).unwrap();
+        assert_eq!(app.runtime_wizard.cpus, "1");
+        assert_eq!(app.runtime_wizard.num_cpus_per_instance, "1");
+        assert_eq!(app.pane(PaneKind::Runtime).selected, vec![false, true]);
+        assert_eq!(app.runtime_settings().unwrap().cpu_pool.unwrap().cpus, "1");
+        app.runtime_wizard.perf_record_scope = crate::runtime::settings::PerfRecordScope::CpuWide;
+        app.runtime_wizard.cpu_description =
+            Some(crate::runtime::settings::CpuDescription::current());
+        app.pane_mut(PaneKind::Runtime).selected = vec![true, false];
+        app.sync_runtime_choice();
+        assert_eq!(
+            app.runtime_settings().unwrap(),
+            crate::runtime::settings::RuntimeSettings::default()
+        );
+        assert_eq!(std::fs::read_to_string(&input).unwrap(), text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_step_defaults_portable_and_previews_bounded_pool() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.step = PaneKind::Concurrency;
+        assert_eq!(app.next_step(), Some(PaneKind::Runtime));
+        assert!(app.runtime_settings().unwrap().cpu_pool.is_none());
+        app.step = PaneKind::Runtime;
+        app.pane_mut(PaneKind::Runtime).selected = vec![false, true];
+        app.sync_runtime_choice();
+        app.runtime_wizard.cpus = "1-3,5-7".into();
+        app.runtime_wizard.num_cpus_per_instance = "3".into();
+        app.describe_runtime();
+        assert!(app.message.contains("capacity 2"));
+        assert_eq!(
+            app.runtime_settings().unwrap().cpu_pool.unwrap().cpus,
+            "1-3,5-7"
+        );
+        app.pane_mut(PaneKind::Concurrency).selected.fill(false);
+        app.pane_mut(PaneKind::Concurrency).selected[2] = true;
+        assert!(
+            app.runtime_settings()
+                .unwrap_err()
+                .to_string()
+                .contains("capacity")
+        );
+        assert!(app.advance().unwrap().is_none());
+        assert_eq!(app.step, PaneKind::Runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 /// Generic inputs for a proxy which owns LLM record/replay.
 pub(crate) struct RecordingRequest<'a> {
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
     pub mode: crate::tape::Mode,
     pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
@@ -327,6 +328,11 @@ pub(crate) fn runtime_inputs(
 /// An owned hop. Both shutdown methods must be safe to call more than once.
 pub(crate) trait ProxySession {
     fn url(&self) -> &str;
+    /// CPU set verified immediately before this hop's executable was started.
+    /// None means no verified placement is available for this hop.
+    fn launch_cpu_affinity(&self) -> Option<&[u32]> {
+        None
+    }
     /// Persistent outputs owned by this hop, not replay inputs or scratch.
     fn output_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
@@ -440,6 +446,13 @@ impl Chain {
 
     pub(crate) fn url(&self) -> &str {
         &self.url
+    }
+
+    pub(crate) fn launch_cpu_affinities(&self) -> Vec<Option<Vec<u32>>> {
+        self.hops
+            .iter()
+            .map(|hop| hop.launch_cpu_affinity().map(<[u32]>::to_vec))
+            .collect()
     }
 
     #[cfg(test)]
@@ -674,6 +687,7 @@ mod tests {
         let second = RecordingFixture("second");
         let registry: &[&dyn ProxyAdapter] = &[&first, &second];
         let request = RecordingRequest {
+            cpu_affinity: None,
             recorder: Some("second"),
             mode: crate::tape::Mode::Replay,
             cassette: std::path::Path::new("fixture"),
@@ -719,6 +733,7 @@ mod tests {
         assert_eq!(chain.url(), "second-url");
         chain.finish().result.unwrap();
         let missing = RecordingRequest {
+            cpu_affinity: None,
             recorder: Some("missing"),
             ..request
         };
@@ -812,6 +827,7 @@ mod tests {
         assert_eq!(selected.name(), "other-recorder");
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
+            cpu_affinity: None,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             recorder: None,

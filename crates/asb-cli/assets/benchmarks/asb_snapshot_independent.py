@@ -6,7 +6,7 @@ import subprocess
 import tarfile
 import time
 
-from asb_execution import ExecutionError
+from asb_execution import ExecutionError, verify_container_cpu_set
 from asb_resources import owned_resource
 from asb_staging import upload
 
@@ -69,14 +69,17 @@ class IndependentSnapshot:
             image = container.attrs.get('Image')
             if not isinstance(image, str) or not image.startswith('sha256:'):
                 raise ExecutionError('snapshot custody image identity is unavailable')
+            cpu_set = getattr(task.workspace, 'cpu_set', None)
+            placement = {'cpuset_cpus': cpu_set} if cpu_set is not None else {}
             self.sidecar = task.client.containers.create(image, name=self.name, labels=labels,
                 entrypoint='/usr/bin/nsenter', command=['-t',str(pid),'-m','-r','--','python3',
                     '/opt/asb-private/asb_snapshot_handoff.py','--role','custody','--verify-mount',*common],
-                stdin_open=True, tty=False, privileged=True, pid_mode='host', network_mode='none')
+                stdin_open=True, tty=False, privileged=True, pid_mode='host', network_mode='none', **placement)
             self.process = subprocess.Popen(self.command+['start','--attach','--interactive',self.sidecar.id],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log)
             if _line(self.process, deadline) != ('MOUNT:'+expected+'\n').encode('ascii'):
                 raise ExecutionError('snapshot custodian joined the wrong mount namespace')
+            verify_container_cpu_set(self.sidecar, cpu_set)
             container.reload()
             current = container.attrs['State']
             if current.get('Running') is not True or (current.get('Pid'),current.get('StartedAt')) != self.initial:

@@ -252,6 +252,16 @@ class SubmissionRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unsupported workload tool mode'):
             task_module.SweBenchTask(None,'catalog','fixture','artifacts',tool_mode='unexpected')
 
+    def test_session_reads_optional_validated_cpu_allocation(self):
+        with patch.dict(os.environ, {"ASB_CPU_ALLOCATION": "5,1-3"}):
+            task = task_module.SweBenchTask(None, "catalog", "fixture", "artifacts")
+            self.assertEqual(task.cpu_set, [1, 2, 3, 5])
+        with patch.dict(os.environ, {"ASB_CPU_ALLOCATION": "1,1"}):
+            with self.assertRaises(task_module.ExecutionError):
+                task_module.SweBenchTask(None, "catalog", "fixture", "artifacts")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(task_module.SweBenchTask(None, "catalog", "fixture", "artifacts").cpu_set)
+
     def test_session_entrypoint_forwards_tool_mode(self):
         for mode in ('none','record','replay'):
             with self.subTest(mode=mode), patch.dict(os.environ,{'ASB_WORKLOAD_TOOL_MODE':mode}), \

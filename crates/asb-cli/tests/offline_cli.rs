@@ -969,6 +969,96 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
 }
 
 #[test]
+fn invalid_runtime_pool_is_rejected_before_run_or_sweep_mutation() {
+    let project = Project::new();
+    project.init();
+    project.write("benchmark.toml", "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nconcurrency=1\n[runtime.cpu_pool]\ncpus='1,1'\nnum_cpus_per_instance=1\n");
+    project.write("sweep.toml", "configs=['benchmark.toml']\n");
+    project.write("sweep-results/previous", "retain result");
+    for args in [&["run", "benchmark.toml"][..], &["sweep", "sweep.toml"][..]] {
+        expect_failure(&project.command(args), "CPU pool repeats logical CPU 1");
+    }
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("sweep-results/previous")).unwrap(),
+        "retain result"
+    );
+    assert!(!project.0.join("sweep-history").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn runtime_pool_pins_offline_agent_and_records_proxy_launch() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let project = replay_project(1);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1"
+    )
+    .unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = "const fs = require('fs');\nconst affinity = fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\\s*(.*)$/m)[1];\nfs.writeFileSync(process.env.ASB_FIXTURE_CPU_LOG, affinity);";
+    assert!(script.contains("const fs = require('fs');"));
+    std::fs::write(
+        &script_path,
+        script.replacen("const fs = require('fs');", hook, 1),
+    )
+    .unwrap();
+    let cpu_log = project.0.join("cpu-log");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap())],
+    );
+    expect_success(&result);
+    assert_eq!(
+        std::fs::read_to_string(cpu_log).unwrap().trim(),
+        cpu.to_string()
+    );
+    let mut found = false;
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["effective_boundary_cpus"],
+                serde_json::json!([cpu])
+            );
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"],
+                serde_json::json!([[cpu]])
+            );
+            found = true;
+        }
+    }
+    assert!(found, "missing verified launch record");
+}
+
+#[test]
 fn sweep_rejects_nested_sweeps_before_execution_or_comparison() {
     let project = Project::new();
     project.init();
@@ -7120,4 +7210,670 @@ fn sidecar_follows_same_origin_redirects_but_refuses_cross_origin_credentials() 
             assert!(stdout(&output).contains("ok:ok"));
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires at least two allowed CPUs and ss process inspection"]
+fn isolated_cpu_pool_two_replica_replay_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(2);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        cpus[0], cpus[1]
+    )
+    .unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"const fs = require('fs');
+const {spawnSync} = require('child_process');
+const status = () => fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+const child = spawnSync('/bin/sh', ['-c', "sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status"], {encoding:'utf8'});
+if (child.status !== 0) process.exit(19);
+fs.appendFileSync(process.env.ASB_FIXTURE_CPU_LOG, status() + ':' + child.stdout.trim() + '\n');
+"#;
+    assert!(script.contains("const fs = require('fs');"));
+    let proxy_hook = r#"const endpoint = config.providers.asb.baseUrl;
+const port = new URL(endpoint).port;
+const sockets = spawnSync('ss', ['-ltnp'], {encoding:'utf8'});
+const row = sockets.stdout.split('\n').find(line => line.includes(':' + port + ' ') && line.includes('pid='));
+if (!row) { console.error('proxy socket not found', port, sockets.stdout); process.exit(20); }
+const match = row.match(/pid=(\d+)/);
+const proxyStatus = fs.readFileSync('/proc/' + match[1] + '/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
+"#;
+    let script = script.replacen("const fs = require('fs');", hook, 1);
+    assert!(script.contains("const endpoint = config.providers.asb.baseUrl;"));
+    std::fs::write(
+        &script_path,
+        script.replacen(
+            "const endpoint = config.providers.asb.baseUrl;",
+            proxy_hook,
+            1,
+        ),
+    )
+    .unwrap();
+    let proxy_log = project.0.join("proxy-log");
+    let cpu_log = project.0.join("cpu-log");
+    let barrier = project.0.join("replica-barrier");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[
+            ("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap()),
+            ("ASB_FIXTURE_PROXY_LOG", proxy_log.to_str().unwrap()),
+            ("ASB_FIXTURE_BEHAVIOR", "replica-barrier"),
+            ("ASB_FIXTURE_BARRIER", barrier.to_str().unwrap()),
+        ],
+    );
+    expect_success(&result);
+    let observed = std::fs::read_to_string(cpu_log).unwrap();
+    let rows: std::collections::BTreeSet<_> = observed.lines().map(str::to_owned).collect();
+    assert_eq!(
+        rows,
+        cpus.into_iter().map(|cpu| format!("{cpu}:{cpu}")).collect()
+    );
+    let proxies = std::fs::read_to_string(proxy_log).unwrap();
+    let observed_proxies: std::collections::BTreeSet<_> =
+        proxies.lines().map(str::to_owned).collect();
+    assert_eq!(
+        observed_proxies,
+        cpus.into_iter().map(|cpu| cpu.to_string()).collect()
+    );
+    let plans = std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap();
+    let mut recorded = std::collections::BTreeSet::new();
+    for entry in plans {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"][0],
+                value["runtime"]["effective_boundary_cpus"]
+            );
+            recorded.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap() as u32,
+            );
+        }
+    }
+    assert_eq!(recorded, cpus.into_iter().collect());
+    assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires two CPUs, ss, real flamegraph tools and system-wide perf permission"]
+fn isolated_cpu_pool_cpu_wide_perf_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let groups = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+        .expect("qualification requires two CPUs");
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(2);
+    let perf = project.0.join(".asb-tools/perf/bin/perf");
+    std::fs::create_dir_all(perf.parent().unwrap()).unwrap();
+    std::fs::copy("/usr/bin/perf", &perf).unwrap();
+    let flamegraph_bin = std::path::PathBuf::from(
+        std::env::var_os("ASB_TEST_FLAMEGRAPH")
+            .expect("set ASB_TEST_FLAMEGRAPH to the real flamegraph tools directory"),
+    );
+    let destination = project.0.join(".asb-tools/flamegraph/bin");
+    std::fs::create_dir_all(&destination).unwrap();
+    for name in ["flamegraph", "stackcollapse-perf.pl"] {
+        std::fs::copy(flamegraph_bin.join(name), destination.join(name)).unwrap();
+    }
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(config, "\n[runtime]\nperf_record_scope='cpu-wide'\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perf','flamegraph']", cpus[0], cpus[1]).unwrap();
+    drop(config);
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"const fs = require('fs');
+const {spawnSync} = require('child_process');
+const status = () => fs.readFileSync('/proc/self/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+const child = spawnSync('/bin/sh', ['-c', "sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status"], {encoding:'utf8'});
+if (child.status !== 0) process.exit(19);
+fs.appendFileSync(process.env.ASB_FIXTURE_CPU_LOG, status() + ':' + child.stdout.trim() + '\n');
+"#;
+    assert!(script.contains("const fs = require('fs');"));
+    let proxy_hook = r#"const endpoint = config.providers.asb.baseUrl;
+const port = new URL(endpoint).port;
+const sockets = spawnSync('ss', ['-ltnp'], {encoding:'utf8'});
+const row = sockets.stdout.split('\n').find(line => line.includes(':' + port + ' ') && line.includes('pid='));
+if (!row) { console.error('proxy socket not found', port, sockets.stdout); process.exit(20); }
+const match = row.match(/pid=(\d+)/);
+const proxyStatus = fs.readFileSync('/proc/' + match[1] + '/status', 'utf8').match(/^Cpus_allowed_list:\s*(.*)$/m)[1];
+fs.appendFileSync(process.env.ASB_FIXTURE_PROXY_LOG, proxyStatus + '\n');
+const until = Date.now() + 1200;
+while (Date.now() < until) { Math.sqrt(Math.random()); }
+"#;
+    let script = script.replacen("const fs = require('fs');", hook, 1);
+    assert!(script.contains("const endpoint = config.providers.asb.baseUrl;"));
+    std::fs::write(
+        &script_path,
+        script.replacen(
+            "const endpoint = config.providers.asb.baseUrl;",
+            proxy_hook,
+            1,
+        ),
+    )
+    .unwrap();
+    let proxy_log = project.0.join("proxy-log");
+    let cpu_log = project.0.join("cpu-log");
+    let barrier = project.0.join("replica-barrier");
+    let result = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+            "--measurements",
+            "measurements",
+        ],
+        &[
+            ("ASB_MEASURE_PERF", "1"),
+            ("ASB_FIXTURE_CPU_LOG", cpu_log.to_str().unwrap()),
+            ("ASB_FIXTURE_PROXY_LOG", proxy_log.to_str().unwrap()),
+            ("ASB_FIXTURE_BEHAVIOR", "replica-barrier"),
+            ("ASB_FIXTURE_BARRIER", barrier.to_str().unwrap()),
+        ],
+    );
+    expect_success(&result);
+    let observed = std::fs::read_to_string(cpu_log).unwrap();
+    let rows: std::collections::BTreeSet<_> = observed.lines().map(str::to_owned).collect();
+    assert_eq!(
+        rows,
+        cpus.into_iter().map(|cpu| format!("{cpu}:{cpu}")).collect()
+    );
+    let proxies = std::fs::read_to_string(proxy_log).unwrap();
+    let observed_proxies: std::collections::BTreeSet<_> =
+        proxies.lines().map(str::to_owned).collect();
+    assert_eq!(
+        observed_proxies,
+        cpus.into_iter().map(|cpu| cpu.to_string()).collect()
+    );
+    let plans = std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap();
+    let mut recorded = std::collections::BTreeSet::new();
+    for entry in plans {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            assert_eq!(
+                value["runtime"]["proxy_launch_cpu_affinities"][0],
+                value["runtime"]["effective_boundary_cpus"]
+            );
+            recorded.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap() as u32,
+            );
+        }
+    }
+    assert_eq!(recorded, cpus.into_iter().collect());
+    for (index, cpu) in cpus.into_iter().enumerate() {
+        let dir = project
+            .0
+            .join(format!("measurements-concurrency-{}", index + 1));
+        let scope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("perf-record-scope.json")).unwrap())
+                .unwrap();
+        assert_eq!(scope["scope"], "cpu-wide");
+        assert_eq!(scope["logical_cpus"], serde_json::json!([cpu]));
+        let stat: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("perf-stat-plan.json")).unwrap())
+                .unwrap();
+        assert_eq!(stat["scope"], "agent-process-tree");
+        let data = dir.join("perf.data");
+        assert!(data.exists());
+        let graph =
+            std::fs::read_to_string(dir.join("flamegraph.svg")).expect("real flamegraph generated");
+        assert!(graph.contains("<svg") && graph.contains("<rect"));
+        let status = std::fs::read_to_string(dir.join("flamegraph.json")).unwrap();
+        assert!(status.contains("completed"), "{status}");
+        let decoded = std::process::Command::new("/usr/bin/perf")
+            .args(["script", "-F", "cpu", "-i"])
+            .arg(&data)
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "perf script failed: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        let samples = String::from_utf8(decoded.stdout).unwrap();
+        assert!(
+            !samples.trim().is_empty(),
+            "CPU-wide capture contained no samples"
+        );
+        for line in samples.lines().filter(|line| !line.trim().is_empty()) {
+            let observed: u32 = line
+                .trim()
+                .trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace())
+                .parse()
+                .unwrap_or_else(|_| panic!("unexpected CPU-only perf sample: {line:?}"));
+            assert_eq!(observed, cpu, "sample outside replica allocation");
+        }
+    }
+    assert_eq!(std::fs::read_dir(barrier).unwrap().count(), 2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires the script utility and a local pseudo-terminal"]
+fn isolated_cpu_pool_target_change_confirmation_qualification() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let project = replay_project(1);
+    let path = project.0.join("benchmark.toml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let configure = |cpu: u32| {
+        format!(
+            "{original}\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1\n[runtime.cpu_description]\narchitecture='qualification-other-architecture'\n"
+        )
+    };
+    std::fs::write(&path, configure(cpu)).unwrap();
+    let no_terminal = replay(&project, "success", &[]);
+    expect_failure(&no_terminal, "CPU topology differs from setup");
+    assert!(!project.0.join("run.log").exists());
+    let command = format!(
+        "'{}' run benchmark.toml --llm-replay --cassette tape.jsonl",
+        env!("CARGO_BIN_EXE_asb")
+    );
+    let run_interactive = |answer: &[u8]| {
+        let mut command_process = Command::new("script");
+        command_process
+            .current_dir(&project.0)
+            .args(["-q", "-e", "-c", &command, "/dev/null"])
+            .isolated_env()
+            .env("HOME", &project.0)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command_process.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(answer).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let declined = run_interactive(b"n\n");
+    assert!(!declined.status.success(), "{}", stdout(&declined));
+    assert!(stdout(&declined).contains("CPU topology differs from setup"));
+    assert!(!project.0.join("run.log").exists());
+    let accepted = run_interactive(b"y\n");
+    assert!(
+        accepted.status.success(),
+        "stdout: {} stderr: {}",
+        stdout(&accepted),
+        stderr(&accepted)
+    );
+    assert!(stdout(&accepted).contains("Continuing with the current host CPU topology"));
+    std::fs::write(&path, configure(1048575)).unwrap();
+    let missing = replay(&project, "success", &[]);
+    expect_failure(&missing, "does not exist on the execution target");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let cpu = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(1)
+        .unwrap()[0][0];
+    let first = replay_project(1);
+    let second = replay_project(1);
+    for project in [&first, &second] {
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(project.0.join("benchmark.toml"))
+            .unwrap();
+        writeln!(
+            config,
+            "\n[runtime.cpu_pool]\ncpus='{cpu}'\nnum_cpus_per_instance=1"
+        )
+        .unwrap();
+    }
+    let script_path = first.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"if (behavior === 'lease-hold') {
+    const path = require('path');
+    const root = process.env.ASB_FIXTURE_BARRIER;
+    fs.mkdirSync(root, {recursive:true});
+    fs.writeFileSync(path.join(root, 'agent-pid'), String(process.pid));
+    const deadline = Date.now() + 30000;
+    while (!fs.existsSync(path.join(root, 'release'))) {
+      if (Date.now() > deadline) throw new Error('lease qualification timed out');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    process.exitCode = 7;
+  }
+  if (behavior === 'replica-barrier') {"#;
+    assert!(script.contains("if (behavior === 'replica-barrier') {"));
+    std::fs::write(
+        &script_path,
+        script.replacen("if (behavior === 'replica-barrier') {", hook, 1),
+    )
+    .unwrap();
+    let hold = first.0.join("hold");
+    let args = [
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+    ];
+    let mut child = first
+        .invocation(
+            &first.0,
+            &args,
+            &[
+                ("ASB_FIXTURE_BEHAVIOR", "lease-hold"),
+                ("ASB_FIXTURE_BARRIER", hold.to_str().unwrap()),
+            ],
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !hold.join("agent-pid").exists() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("agent failed to enter held phase");
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("first run ended before hold: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = std::fs::read_to_string(hold.join("agent-pid")).unwrap();
+    let home = first.0.to_str().unwrap();
+    let conflict = second.command_with_env(&args, &[("HOME", home)]);
+    let release = std::fs::write(hold.join("release"), "release");
+    let first_result = child.wait_with_output().unwrap();
+    release.unwrap();
+    expect_failure(
+        &conflict,
+        "already leased by another cooperating ASB campaign",
+    );
+    assert!(
+        !first_result.status.success(),
+        "fixture intentionally failed after release"
+    );
+    assert!(
+        !std::path::Path::new("/proc").join(pid.trim()).exists(),
+        "agent survived failed-run cleanup"
+    );
+    let retry = second.command_with_env(&args, &[("HOME", home)]);
+    expect_success(&retry);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires ASB_TEST_CROSS_HOST_CONFIG from another architecture"]
+fn cross_host_cpu_pool_configuration_qualification() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let source = std::env::var_os("ASB_TEST_CROSS_HOST_CONFIG").expect(
+        "set ASB_TEST_CROSS_HOST_CONFIG to a TUI configuration created on a different architecture",
+    );
+    let setup: toml::Value = toml::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+    let setup_arch = setup["runtime"]["cpu_description"]["architecture"]
+        .as_str()
+        .unwrap();
+    assert_ne!(setup_arch, std::env::consts::ARCH);
+    let cpu_pool = setup["runtime"]["cpu_pool"]["cpus"].as_str().unwrap();
+    let group_size = usize::try_from(
+        setup["runtime"]["cpu_pool"]["num_cpus_per_instance"]
+            .as_integer()
+            .unwrap(),
+    )
+    .unwrap();
+    let expected = asb_cli::runtime::cpu_pool::CpuPool::parse(cpu_pool, group_size)
+        .unwrap()
+        .allocate(2)
+        .unwrap();
+    let project = replay_project(2);
+    let mut root = toml::map::Map::new();
+    root.insert("runtime".into(), setup["runtime"].clone());
+    let runtime = toml::to_string(&toml::Value::Table(root)).unwrap();
+    let config = project.0.join("benchmark.toml");
+    let original = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(config, format!("{original}\n{runtime}")).unwrap();
+    let noninteractive = replay(&project, "success", &[]);
+    expect_failure(&noninteractive, "CPU topology differs from setup");
+    let command = format!(
+        "'{}' run benchmark.toml --llm-replay --cassette tape.jsonl",
+        env!("CARGO_BIN_EXE_asb")
+    );
+    let mut runner = Command::new("script");
+    runner
+        .current_dir(&project.0)
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .isolated_env()
+        .env("HOME", &project.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = runner.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {} stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(stdout(&output).contains("Continuing with the current host CPU topology"));
+    let mut cpus = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let plan: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if plan["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                plan["runtime"]["target_cpu_description"]["architecture"],
+                std::env::consts::ARCH
+            );
+            assert_eq!(
+                plan["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            cpus.insert(
+                plan["runtime"]["effective_boundary_cpus"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cpu| cpu.as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    assert_eq!(
+        cpus,
+        expected
+            .into_iter()
+            .map(|group| group.into_iter().map(u64::from).collect::<Vec<_>>())
+            .collect()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_cpu_pool_rejects_target_cpuset_restriction_before_work() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let Ok(groups) = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+    else {
+        return;
+    };
+    let cpus = [groups[0][0], groups[1][0]];
+    let project = replay_project(1);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        cpus[0], cpus[1]
+    )
+    .unwrap();
+    drop(config);
+    let mut command = project.invocation(
+        &project.0,
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[],
+    );
+    asb_cli::runtime::affinity::AffinityMask::new(&[cpus[0]])
+        .unwrap()
+        .prepare_command(&mut command)
+        .unwrap();
+    let output = command.output().unwrap();
+    expect_failure(&output, "outside the execution target's effective CPU set");
+    assert!(!project.0.join("run.log").exists());
+    assert!(!project.0.join(".asb/execution-plans").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn isolated_cpu_pool_two_replica_sweep_qualification() {
+    use std::io::Write;
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+    let allowed = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim();
+    let Ok(groups) = asb_cli::runtime::cpu_pool::CpuPool::parse(allowed, 1)
+        .unwrap()
+        .allocate(2)
+    else {
+        return;
+    };
+    let expected: std::collections::BTreeSet<u64> =
+        groups.iter().map(|group| u64::from(group[0])).collect();
+    let project = replay_project(2);
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(project.0.join("benchmark.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[runtime.cpu_pool]\ncpus='{},{}'\nnum_cpus_per_instance=1",
+        groups[0][0], groups[1][0]
+    )
+    .unwrap();
+    drop(config);
+    project.write("suite.toml", "configs=['benchmark.toml']\n");
+    let cassette = std::fs::read_to_string(project.0.join("tape.jsonl")).unwrap();
+    project.write(
+        "tapes/000-benchmark/cassettes/benchmark-pi-bug-fix-test-model.jsonl",
+        &cassette,
+    );
+    let result = project.command_with_env(
+        &[
+            "sweep",
+            "suite.toml",
+            "--llm-replay",
+            "--cassette-root",
+            "tapes",
+        ],
+        &[("ASB_FIXTURE_BEHAVIOR", "success")],
+    );
+    expect_success(&result);
+    let mut cpus = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(project.0.join(".asb/execution-plans")).unwrap() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
+        if value["runtime"]["placement_status"] == "native_launcher_verified_before_exec" {
+            assert_eq!(
+                value["runtime"]["proxy_placement_status"],
+                "verified_before_exec"
+            );
+            cpus.insert(
+                value["runtime"]["effective_boundary_cpus"][0]
+                    .as_u64()
+                    .unwrap(),
+            );
+        }
+    }
+    assert_eq!(cpus, expected);
+    assert!(
+        project
+            .0
+            .join("results/suite-comparison/report.html")
+            .exists()
+    );
 }

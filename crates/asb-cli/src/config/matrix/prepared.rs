@@ -16,6 +16,7 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
     };
     // Destructure exhaustively: adding a field requires reviewing this bound.
     let BenchmarkConfig {
+        runtime,
         planning,
         agent,
         workload,
@@ -32,6 +33,17 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         mcp_servers,
     } = config;
     let _: &usize = concurrency;
+    if let Some(pool) = &runtime.cpu_pool {
+        string(&pool.cpus)?;
+    }
+    if let Some(description) = &runtime.cpu_description {
+        for value in [&description.architecture, &description.model]
+            .into_iter()
+            .flatten()
+        {
+            string(value)?;
+        }
+    }
     let _: &bool = native_snapshot_record;
     let _: &bool = &retention.compact_completed_attempts;
     for value in [agent, workload, provider, model, workspace, log_file] {
@@ -268,6 +280,7 @@ mod tests {
 
     fn config() -> BenchmarkConfig {
         BenchmarkConfig {
+            runtime: Default::default(),
             planning: None,
             native_snapshot_record: false,
             agent: "pi".into(),

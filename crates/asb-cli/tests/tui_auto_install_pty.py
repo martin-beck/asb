@@ -94,6 +94,8 @@ try:
             os.write(master, b"\r")
             wait_for(b"Choose how many identical executions")
             os.write(master, b"\r")
+            wait_for(b"None (portable)")
+            os.write(master, b"\r")
             if process.wait(timeout=10) != 0:
                 raise AssertionError(f"setup did not complete: {process.returncode}")
 finally:

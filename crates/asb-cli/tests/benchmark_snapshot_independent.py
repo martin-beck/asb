@@ -56,6 +56,23 @@ class IndependentTests(unittest.TestCase):
         self.sidecar.remove.assert_called_once_with(force=False)
         self.journal.declare.assert_called_once_with('containers',self.task.attempt+'-snapshot-custody')
 
+    def test_cpu_allocation_is_applied_and_verified_before_start(self):
+        self.task.workspace.cpu_set = '1,3'
+        self.sidecar.exec_run.return_value = SimpleNamespace(exit_code=0, output=b'Cpus_allowed_list:\t1,3\n')
+        owner = self.start()
+        self.assertEqual(self.client.containers.create.call_args.kwargs['cpuset_cpus'], '1,3')
+        self.sidecar.exec_run.assert_called_once()
+        self.assertEqual(self.side.stdin.writes, [b'START\n'])
+        owner.close()
+
+    def test_cpu_allocation_mismatch_aborts_before_start(self):
+        self.task.workspace.cpu_set = '1,3'
+        self.sidecar.exec_run.return_value = SimpleNamespace(exit_code=0, output=b'Cpus_allowed_list:\t1\n')
+        with self.assertRaisesRegex(subject.ExecutionError, 'differs from the requested set'):
+            self.start()
+        self.assertEqual(self.side.stdin.writes, [])
+        self.assertTrue(self.side.stdin.closed and self.prep.stdin.closed)
+
     def test_wrong_mount_fails_before_start_and_closes_both_transports(self):
         subject._line.side_effect=[b'PREPARED\n',b'MOUNT:999\n']
         with self.assertRaisesRegex(subject.ExecutionError,'wrong mount namespace'):self.start()

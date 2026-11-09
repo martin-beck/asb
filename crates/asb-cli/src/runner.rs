@@ -59,6 +59,27 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration =
     Duration::from_secs(crate::planning::DEFAULT_NATIVE_EXECUTION_SECONDS);
 
+/// Validate the declarative CPU plan before execution-specific admission.
+pub(crate) fn validate_runtime_configuration(config: &BenchmarkConfig) -> Result<(), Error> {
+    config
+        .runtime
+        .plan(config.concurrency)
+        .map_err(Error::Input)?;
+    Ok(())
+}
+
+/// Check the complete requested pool on the actual execution target before
+/// installers or benchmark work can run. Applying affinity is verified again
+/// at each child and managed-container boundary.
+pub(crate) fn validate_runtime_target(config: &BenchmarkConfig) -> Result<(), Error> {
+    if let Some(pool) = &config.runtime.cpu_pool {
+        crate::runtime::cpu_pool::CpuPool::parse(&pool.cpus, pool.num_cpus_per_instance)
+            .and_then(|pool| pool.validate_current_target())
+            .map_err(Error::Input)?;
+    }
+    Ok(())
+}
+
 /// Validate static MCP configuration before public execution entry points
 /// allocate resources. Attempt admission repeats this for internal paths.
 pub(crate) fn validate_mcp_configuration(
@@ -207,6 +228,10 @@ impl RunResult<'_> {
 /// Execution choices shared by single runs, replicas, and sweeps.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RunOptions<'a> {
+    /// Prevalidated allocation for this one replica's managed processes.
+    pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
+    /// Ordered logical CPU IDs for the same replica allocation.
+    pub cpu_allocation: Option<&'a [u32]>,
     pub invocation_dir: Option<&'a Path>,
     pub track: Option<crate::cassette::Selector>,
     pub replay_seed: Option<u64>,
@@ -405,6 +430,13 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    validate_runtime_configuration(&config)?;
+    validate_runtime_target(&config)?;
+    crate::runtime::settings::confirm_topology(
+        std::iter::once(&config.runtime),
+        options.interactive && !options.json,
+        output,
+    )?;
     select_adapter_recording_transport(&mut config, options.effective_tool_mode());
     let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
@@ -788,6 +820,30 @@ fn run_dispatched(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
+    // Keep admission alive through replica settlement and managed cleanup. All
+    // cooperating campaigns for this user share the same host-local lock path.
+    let admission = if config.runtime.cpu_pool.is_some() {
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Error::Input("CPU pool needs HOME to coordinate local campaign leases".into())
+            })?;
+        let lock_directory = Path::new(&home).join(".cache/asb/cpu-leases");
+        crate::runtime::admission::Admission::acquire(
+            &config.runtime,
+            config.concurrency,
+            &lock_directory,
+        )
+        .map_err(Error::Input)?
+    } else {
+        None
+    };
+    if admission.is_some() && !options.json {
+        emit_warning(warnings, output, "CPU allocations coordinate ASB campaigns using the same user cache; they do not reserve CPUs from the operating system. Independently created Docker containers may run outside the allocation and cannot be verified by ASB.".into())?;
+        if config.runtime.perf_record_scope == crate::runtime::settings::PerfRecordScope::CpuWide {
+            emit_warning(warnings, output, "CPU-wide perf samples may include unrelated host, kernel and collector activity; perf stat remains scoped to the agent process tree.".into())?;
+        }
+    }
     // Parallel sweep configurations can share project-local tool paths.
     // Serialize readiness publication, not benchmark execution.
     static RUNTIME_PREPARATION: Mutex<()> = Mutex::new(());
@@ -842,8 +898,28 @@ fn run_dispatched(
     if config.concurrency > 1 {
         // Concurrent replicas buffer ordinary output for deterministic ordered
         // presentation. A shared one-line display would race those buffers.
-        return run_concurrent(config_path, &config, options, output, warnings);
+        return run_concurrent(
+            config_path,
+            &config,
+            options,
+            admission.as_ref(),
+            output,
+            warnings,
+        );
     }
+    let allocation = admission
+        .as_ref()
+        .map(|value| {
+            value
+                .replica(1)
+                .ok_or_else(|| Error::Run("CPU allocation missing for replica 1".into()))
+        })
+        .transpose()?;
+    let options = RunOptions {
+        cpu_allocation: allocation.map(|(cpus, _)| cpus),
+        cpu_affinity: allocation.map(|(_, mask)| mask),
+        ..options
+    };
     run_mode(config_path, config, options, output, warnings)
 }
 
@@ -855,6 +931,7 @@ fn run_concurrent(
     config_path: &Path,
     config: &BenchmarkConfig,
     options: RunOptions<'_>,
+    admission: Option<&crate::runtime::admission::Admission>,
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
@@ -935,10 +1012,22 @@ fn run_concurrent(
                             cassette.as_ref().map(|(_, path)| path.to_string_lossy());
                         let cassette_path = cassette_path.as_deref();
                         let measurement_path = measurement.as_deref().and_then(Path::to_str);
+                        let allocation = admission
+                            .map(|value| {
+                                value.replica(index + 1).ok_or_else(|| {
+                                    Error::Run(format!(
+                                        "CPU allocation missing for replica {}",
+                                        index + 1
+                                    ))
+                                })
+                            })
+                            .transpose()?;
                         run_mode(
                             config_path,
                             replica,
                             RunOptions {
+                                cpu_allocation: allocation.map(|(cpus, _)| cpus),
+                                cpu_affinity: allocation.map(|(_, mask)| mask),
                                 replica: replica::Identity {
                                     index: index + 1,
                                     total: config.concurrency,
@@ -2193,6 +2282,27 @@ mod tests {
     use crate::tape;
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn runtime_target_validation_rejects_absent_cpu_and_accepts_portable() {
+        let portable: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        super::validate_runtime_target(&portable).unwrap();
+        let mut impossible = portable;
+        impossible.runtime.cpu_pool = Some(crate::runtime::settings::CpuPoolSettings {
+            cpus: "1048575".into(),
+            num_cpus_per_instance: 1,
+        });
+        assert!(
+            super::validate_runtime_target(&impossible)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
     fn direct_mcp_recording_rejects_before_execution_preflight() {
         let root = std::env::temp_dir().join(format!(
             "asb-mcp-preflight-{}",
@@ -2346,6 +2456,7 @@ mod tests {
                 preparation_gate: Some(&gate),
                 ..Default::default()
             },
+            None,
             &mut output,
             &warnings,
         );
@@ -3659,6 +3770,7 @@ mod tests {
     #[test]
     fn cli2key_command_mappings_place_workload_once() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "openhands".into(),
@@ -3688,6 +3800,7 @@ mod tests {
     #[test]
     fn token_reporting_commands_request_machine_readable_agent_output() {
         let base = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "mini-swe".into(),
@@ -3755,6 +3868,7 @@ mod tests {
             ("continue", "cn", "--auto"),
         ] {
             let config = BenchmarkConfig {
+                runtime: Default::default(),
                 native_snapshot_record: false,
                 planning: None,
                 agent: agent.into(),
@@ -3788,6 +3902,7 @@ mod tests {
     #[test]
     fn pi_cli2key_uses_compact_print_mode_with_adapter_summary() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "pi".into(),
@@ -3909,6 +4024,7 @@ mod tests {
     #[test]
     fn opencode_command_uses_generic_provider_model_namespace() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "opencode".into(),
@@ -3941,6 +4057,7 @@ mod tests {
     #[test]
     fn unknown_agent_suggests_a_close_match() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "opencod".into(),

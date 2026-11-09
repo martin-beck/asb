@@ -20,6 +20,8 @@ pub(crate) const DEFAULT_LOG_DIRECTORY: &str = ".asb-logs";
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkConfig {
+    #[serde(default, skip_serializing_if = "runtime_is_default")]
+    pub(crate) runtime: crate::runtime::settings::RuntimeSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) planning: Option<crate::planning::PlanningConfig>,
     pub agent: String,
@@ -64,6 +66,10 @@ pub struct BenchmarkConfig {
         deserialize_with = "deserialize_mcp_servers"
     )]
     pub(crate) mcp_servers: Vec<McpServerConfig>,
+}
+
+fn runtime_is_default(value: &crate::runtime::settings::RuntimeSettings) -> bool {
+    value == &crate::runtime::settings::RuntimeSettings::default()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -208,6 +214,41 @@ fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{BenchmarkConfig, MAX_MCP_ARGUMENTS, MAX_MCP_SERVERS, default_log_path};
+
+    #[test]
+    fn runtime_settings_roundtrip_and_validate_capacity() {
+        let base = "agent='pi'\nprovider='local'\nmodel='m'\nworkload='bug-fix'\nconcurrency=2\n";
+        let default: BenchmarkConfig = toml::from_str(base).unwrap();
+        assert!(!toml::to_string(&default).unwrap().contains("[runtime]"));
+        assert!(crate::runner::validate_runtime_configuration(&default).is_ok());
+        let configured: BenchmarkConfig = toml::from_str(&format!(
+            "{base}[runtime.cpu_pool]\ncpus='1-3,5-7'\nnum_cpus_per_instance=3\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            configured.runtime.plan(2).unwrap().unwrap(),
+            vec![vec![1, 2, 3], vec![5, 6, 7]]
+        );
+        assert!(crate::runner::validate_runtime_configuration(&configured).is_ok());
+        let encoded = toml::to_string(&configured).unwrap();
+        assert_eq!(
+            toml::from_str::<BenchmarkConfig>(&encoded).unwrap(),
+            configured
+        );
+        let bad: BenchmarkConfig = toml::from_str(&format!(
+            "{base}[runtime.cpu_pool]\ncpus='1'\nnum_cpus_per_instance=1\n"
+        ))
+        .unwrap();
+        assert!(
+            crate::runner::validate_runtime_configuration(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity")
+        );
+        assert!(
+            toml::from_str::<BenchmarkConfig>(&format!("{base}[runtime]\nunknown=1\n")).is_err()
+        );
+    }
 
     #[test]
     fn concurrency_defaults_to_one_and_accepts_positive_values() {

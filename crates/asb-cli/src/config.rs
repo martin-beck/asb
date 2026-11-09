@@ -197,6 +197,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
         )));
     }
     let config = BenchmarkConfig {
+        runtime: Default::default(),
         planning: None,
         agent,
         workload: required(workload.into_iter().next())?,

@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).parents[1] / "assets/benchmarks/asb_execution.py"
@@ -102,6 +102,91 @@ class API:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_compose_cpu_allocation_applies_to_services_and_rejects_conflicts(self):
+        services = [{}, {"cpuset": "1,3"}]
+        for service in services:
+            RUNTIME.apply_compose_cpu_set(service, [1, 3])
+            self.assertEqual(service["cpuset"], "1,3")
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "conflicts"):
+            RUNTIME.apply_compose_cpu_set({"cpuset": "1"}, [1, 3])
+        unchanged = {"cpuset": "1"}
+        RUNTIME.apply_compose_cpu_set(unchanged, None)
+        self.assertEqual(unchanged, {"cpuset": "1"})
+
+    def test_compose_verifies_every_owned_container_and_rejects_missing_or_wrong(self):
+        def container(output, attempt="asb-test"):
+            item = Mock()
+            item.attrs = {"Config": {"Labels": {"asb.owner": "asb", "asb.attempt": attempt}}}
+            item.exec_run.return_value = SimpleNamespace(exit_code=0, output=output)
+            return item
+        first = container(b"Cpus_allowed_list:\t1,3\n")
+        second = container(b"Cpus_allowed_list:\t1,3\n")
+        client = Mock()
+        client.containers.list.return_value = [first, second]
+        RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        first.exec_run.assert_called_once()
+        second.exec_run.assert_called_once()
+        second.exec_run.return_value.output = b"Cpus_allowed_list:\t1\n"
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "differs"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        client.containers.list.return_value = []
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "no running"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+        client.containers.list.return_value = [container(b"Cpus_allowed_list:\t1,3\n", "other")]
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "outside this attempt"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3])
+
+    def test_compose_verification_requires_each_declared_service(self):
+        def service(name):
+            item = Mock()
+            item.attrs = {"Config": {"Labels": {"asb.owner": "asb", "asb.attempt": "asb-test", "com.docker.compose.service": name}}}
+            item.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"Cpus_allowed_list:\t1,3\n")
+            return item
+        client = Mock()
+        client.containers.list.return_value = [service("main"), service("database")]
+        RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}, "database": {}})
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "not every"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}, "database": {}, "worker": {}})
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "undeclared"):
+            RUNTIME.verify_compose_cpu_set(client, "asb-test", [1, 3], {"main": {}})
+
+    def test_cpu_list_validation_rejects_duplicates_and_unbounded_ranges(self):
+        self.assertEqual(RUNTIME._parse_cpu_list("1,3-4,5"), {1, 3, 4, 5})
+        for value in ["", "1,,2", "1-0", "1,1", "0-65536", "1048576", "1-2-3"]:
+            with self.subTest(value=value), self.assertRaises(RUNTIME.ExecutionError):
+                RUNTIME._parse_cpu_list(value)
+        workspace, _, _, _ = self.workspace()
+        for value in [[], [True], [-1], [1, 1], [1048576], "1,2"]:
+            with self.subTest(allocation=value), self.assertRaises(RUNTIME.ExecutionError):
+                RUNTIME.ManagedDockerWorkspace(workspace.client, workspace.image, workspace.attempt, workspace.workdir, cpu_set=value)
+
+    def test_managed_container_sets_and_verifies_effective_cpu_allocation(self):
+        workspace, container, _, creation = self.workspace()
+        workspace.cpu_set = "1,3,4"
+        container.exec_run = lambda argv: SimpleNamespace(exit_code=0, output=b"Cpus_allowed_list:\t1,3-4\n")
+        with workspace:
+            self.assertEqual(creation[0]["cpuset_cpus"], "1,3,4")
+            self.assertEqual(container.events, ["start"])
+        self.assertIn("remove", container.events)
+
+    def test_managed_container_refuses_incomplete_cpu_affinity_and_cleans_up(self):
+        workspace, container, _, creation = self.workspace()
+        workspace.cpu_set = "1,3"
+        container.exec_run = lambda argv: SimpleNamespace(exit_code=0, output=b"Cpus_allowed_list:\t1\n")
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "differs from the requested"):
+            workspace.__enter__()
+        self.assertEqual(creation[0]["cpuset_cpus"], "1,3")
+        self.assertIn("remove", container.events)
+
+    def test_managed_container_explains_rejected_cpu_allocation(self):
+        workspace, _, _, _ = self.workspace()
+        workspace.cpu_set = "1,3"
+        def reject(**_):
+            raise RuntimeError("daemon refused cpuset")
+        workspace.client.containers.create = reject
+        with self.assertRaisesRegex(RUNTIME.ExecutionError, "CPU allocation 1,3.*daemon refused"):
+            workspace.__enter__()
+
     def test_offline_workspace_has_no_routed_network_from_creation(self):
         workspace, _container, _api, creation = self.workspace()
         workspace.offline = True

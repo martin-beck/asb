@@ -696,6 +696,7 @@ if (JSON.stringify(secondDate('Monday, Nov 10, 2026')) === JSON.stringify(second
     #[test]
     fn adapter_pins_the_documented_compaction_ceiling_for_replay_stability() {
         let config = crate::benchmark::BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "workbuddy".into(),

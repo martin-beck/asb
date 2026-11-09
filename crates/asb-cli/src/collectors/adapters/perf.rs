@@ -19,24 +19,7 @@ mod stop_contract_tests;
 /// subsequently created agent threads and children without sampling siblings,
 /// collector processes or unrelated host activity.
 fn record_args(pid: u32) -> Vec<String> {
-    vec![
-        "record".into(),
-        // Do not let perf select a host-specific hardware default.  On hybrid
-        // systems that can expand to cpu_core/cycles or cpu_atom/cycles and
-        // fail after attaching to a container-owned workload even though the
-        // generic host probe succeeded.  cpu-clock is a software event and
-        // keeps the stack-sample/flamegraph contract portable.
-        "-e".into(),
-        "cpu-clock".into(),
-        "-g".into(),
-        "-F".into(),
-        // Frequency is per thread: a 19 Hz period misses most short-lived
-        // workers even when their aggregate CPU time is substantial.
-        "199".into(),
-        "--inherit".into(),
-        "-p".into(),
-        pid.to_string(),
-    ]
+    crate::runtime::perf_scope::process_tree_record_args(pid)
 }
 
 /// Build the process-scoped interval counter arguments with the same
@@ -108,7 +91,7 @@ impl CollectorAdapter for PerfCollector {
         3072
     }
     fn description(&self) -> &'static str {
-        "process-tree performance counter samples"
+        "performance samples and process-tree counters"
     }
     fn id(&self) -> &'static str {
         "perf"
@@ -122,7 +105,7 @@ impl CollectorAdapter for PerfCollector {
     fn prioritizes_artifact(&self, name: &str) -> bool {
         matches!(
             name,
-            "perf-symbol-quality.json" | "perf-symbol-custody.json"
+            "perf-symbol-quality.json" | "perf-symbol-custody.json" | "perf-record-scope.json"
         )
     }
     fn display_artifact(&self, name: &str) -> Option<ArtifactDisplay> {
@@ -136,6 +119,11 @@ impl CollectorAdapter for PerfCollector {
                 class: "perf-symbol-custody",
                 label: "Perf symbol custody",
                 suffix: "See the helper output for recorded images and unavailable debug files.",
+            }),
+            "perf-record-scope.json" => Some(ArtifactDisplay::Status {
+                class: "perf-record-scope",
+                label: "Perf recording scope",
+                suffix: "CPU-wide samples can include unrelated host, kernel and collector activity; perf stat remains agent-process-tree scoped. CPU leases do not reserve CPUs from other host activity.",
             }),
             _ => None,
         }
@@ -397,7 +385,7 @@ fn validate_record(
             "kernel_symbols": summary.get("kernel_symbols"),
             "partial_symbol_tree": symfs.as_ref().is_some_and(|(_, partial)| *partial),
             "inline_frames_omitted": symfs.as_ref().is_some_and(|(_, partial)| *partial),
-        "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
+        "reason": "Unknown frames can reflect missing agent, other sampled process or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Symbol custody follows the agent tree and may not include unrelated CPU-wide samples. Zero unknown frames alone does not prove complete debug information."
         }),
     )?;
     for capture in &captures {
@@ -640,6 +628,14 @@ use std::io::{BufRead, Read};
 #[derive(Default)]
 struct PerfState {
     enabled: bool,
+    cpu_wide: Option<Vec<u32>>,
+}
+
+fn selected_record_args(pid: u32, cpu_wide: Option<&[u32]>) -> Result<Vec<String>, String> {
+    match cpu_wide {
+        Some(cpus) => crate::runtime::perf_scope::cpu_wide_record_args(cpus),
+        None => Ok(record_args(pid)),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -659,6 +655,13 @@ pub(super) fn validate_agent_target(
 }
 
 impl measurements::Session {
+    pub(crate) fn configure_perf_cpu_scope(&mut self, cpus: &[u32]) -> Result<(), String> {
+        // Validate the full allocation before retaining it for collector startup.
+        crate::runtime::perf_scope::cpu_wide_record_args(cpus)?;
+        self.state::<PerfState>().borrow_mut().cpu_wide = Some(cpus.to_vec());
+        Ok(())
+    }
+
     pub(crate) fn start_perf(&mut self, pid: u32) -> Result<(), String> {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
@@ -686,15 +689,15 @@ impl measurements::Session {
             crate::evidence::Capture::create(&stdout_path)?,
             crate::evidence::Capture::create(&stderr_path)?,
         ];
-        // Attach to the verified agent root and inherit counters into every child.
-        // Unlike a one-time comma-separated PID snapshot, perf's inheritance
-        // follows helpers forked after attachment as well as descendants of
-        // those helpers, while remaining scoped to this benchmark tree.
-        let record_args = record_args(pid);
+        // The default recording attaches to the verified agent root and
+        // inherits into descendants. The optional CPU-wide mode instead
+        // samples every task running on this replica's allocated CPUs.
+        let cpu_wide = self.state::<PerfState>().borrow().cpu_wide.clone();
+        let record_args = selected_record_args(pid, cpu_wide.as_deref())?;
         let (mut command, route) = self.collector_command("perf")?;
         command
             // Keep perf data bounded enough for the offline flamegraph
-            // renderer while retaining process-scoped call samples.
+            // renderer while retaining call samples in the selected scope.
             .args(&record_args)
             .args(["-o"])
             .arg(&data);
@@ -728,6 +731,18 @@ impl measurements::Session {
         }
         self.set_artifact(SharedArtifact::StackSamples, data);
         self.collectors.push(collector);
+        if let Some(cpus) = cpu_wide {
+            measurements::write_json(
+                &self.dir.join("perf-record-scope.json"),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "scope": "cpu-wide",
+                    "logical_cpus": cpus,
+                    "perf_stat_scope": "agent-process-tree",
+                    "warning": "CPU-wide samples can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
+                }),
+            )?;
+        }
         let stat_stdout_path = self.dir.join("perf-stat.stdout");
         let stat_stderr_path = self.dir.join("perf-stat.stderr");
         let captures = [
@@ -1070,6 +1085,18 @@ pub(crate) fn perf_permission_error() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn selected_record_scope_switches_without_changing_the_default() {
+        assert_eq!(
+            super::selected_record_args(42, None).unwrap(),
+            super::record_args(42)
+        );
+        let args = super::selected_record_args(42, Some(&[3, 5])).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["-C", "3,5"]));
+        assert!(args.iter().any(|arg| arg == "-a"));
+        assert!(!args.iter().any(|arg| arg == "-p"));
+        assert!(super::selected_record_args(42, Some(&[])).is_err());
+    }
+    #[test]
     fn symfs_marker_distinguishes_partial_complete_and_invalid_trees() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
         std::fs::create_dir_all(root.join("symfs")).unwrap();
@@ -1275,6 +1302,12 @@ mod tests {
     fn symbol_quality_is_visible_in_reports() {
         use crate::collectors::CollectorAdapter;
         assert!(super::ADAPTER.prioritizes_artifact("perf-symbol-quality.json"));
+        assert!(super::ADAPTER.prioritizes_artifact("perf-record-scope.json"));
+        assert!(
+            super::ADAPTER
+                .display_artifact("perf-record-scope.json")
+                .is_some()
+        );
         assert!(
             super::ADAPTER
                 .display_artifact("perf-symbol-quality.json")

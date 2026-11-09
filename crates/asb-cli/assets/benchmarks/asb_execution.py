@@ -7,6 +7,7 @@ claimed to be local-host PIDs: the caller must establish that separately.
 """
 import json
 import math
+import os
 import platform
 from pathlib import Path
 import re
@@ -16,6 +17,66 @@ import time
 
 class ExecutionError(RuntimeError):
     pass
+
+
+def _parse_cpu_list(value):
+    """Decode a bounded Linux cpulist without inventing or reordering IDs."""
+    if not isinstance(value, str) or not value or len(value) > 65536:
+        raise ExecutionError("invalid container CPU allocation")
+    seen = set()
+    for item in value.split(","):
+        if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?", item):
+            raise ExecutionError("invalid container CPU allocation")
+        bounds = item.split("-")
+        first, last = int(bounds[0]), int(bounds[-1])
+        if first > last or last > 1048575 or last - first + 1 > 65536 - len(seen):
+            raise ExecutionError("container CPU allocation exceeds its bounds")
+        for cpu in range(first, last + 1):
+            if cpu in seen:
+                raise ExecutionError("container CPU allocation contains a duplicate")
+            seen.add(cpu)
+    return seen
+
+
+def requested_cpu_set():
+    """Read a validated allocation passed by the ASB workload controller."""
+    value = os.environ.get("ASB_CPU_ALLOCATION")
+    return None if value is None else sorted(_parse_cpu_list(value))
+
+
+def apply_compose_cpu_set(service, cpus):
+    """Place an ASB-controlled Compose service without discarding its constraints."""
+    if cpus is None:
+        return
+    requested = ",".join(map(str, cpus))
+    expected = _parse_cpu_list(requested)
+    previous = service.get("cpuset")
+    if previous is not None and _parse_cpu_list(previous) != expected:
+        raise ExecutionError("task Compose CPU set conflicts with the selected allocation")
+    service["cpuset"] = requested
+
+
+def verify_compose_cpu_set(client, attempt, cpus, services=None):
+    """Verify every running owned service; an empty result is not evidence."""
+    if cpus is None:
+        return
+    containers = client.containers.list(filters={"label": ["asb.attempt=" + attempt]})
+    if not containers:
+        raise ExecutionError("no running owned Compose containers available for CPU verification")
+    expected = ",".join(map(str, cpus))
+    observed_services = set()
+    for container in containers:
+        labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
+        if labels.get("asb.owner") != "asb" or labels.get("asb.attempt") != attempt:
+            raise ExecutionError("Compose CPU verification found a container outside this attempt")
+        service = labels.get("com.docker.compose.service")
+        if services is not None:
+            if service not in services:
+                raise ExecutionError("Compose CPU verification found an undeclared service")
+            observed_services.add(service)
+        verify_container_cpu_set(container, expected)
+    if services is not None and observed_services != set(services):
+        raise ExecutionError("not every declared Compose service has a running verified container")
 
 
 def require_native_compose_service(service):
@@ -199,9 +260,26 @@ def execution_target(transport, container, namespace_pid):
     return target
 
 
+def verify_container_cpu_set(container, cpu_set):
+    """Check the effective affinity of a running container before its work starts."""
+    if cpu_set is None:
+        return
+    result = container.exec_run(["/bin/sh", "-c", 'while IFS= read -r line; do case "$line" in Cpus_allowed_list:*) printf "%s\\n" "$line"; exit 0;; esac; done </proc/self/status; exit 1'])
+    output = result.output
+    if result.exit_code != 0 or not isinstance(output, bytes) or len(output) > 65536:
+        raise ExecutionError("cannot verify effective CPU allocation inside the managed container")
+    try:
+        line = output.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise ExecutionError("container CPU allocation is not ASCII") from error
+    prefix = "Cpus_allowed_list:"
+    if not line.startswith(prefix) or _parse_cpu_list(line[len(prefix):].strip()) != _parse_cpu_list(cpu_set):
+        raise ExecutionError("managed container effective CPU allocation differs from the requested set")
+
+
 class ManagedDockerWorkspace:
     @classmethod
-    def attach(cls, client, container, attempt, workdir):
+    def attach(cls, client, container, attempt, workdir, cpu_set=None):
         """Use an official harness-created container with verified ASB ownership.
 
         Its owning workload session remains responsible for Compose/sidecar
@@ -210,7 +288,7 @@ class ManagedDockerWorkspace:
         labels = container.attrs.get("Config", {}).get("Labels", {}) or {}
         if labels.get("asb.owner") != "asb" or labels.get("asb.attempt") != attempt:
             raise ExecutionError("cannot attach to a task environment outside this attempt")
-        workspace = cls(client, container.image, attempt, workdir)
+        workspace = cls(client, container.image, attempt, workdir, cpu_set=cpu_set)
         host = container.attrs.get("HostConfig", {})
         if host.get("PidMode") not in [None, "", "private"]:
             raise ExecutionError("task execution requires a private container PID namespace")
@@ -218,10 +296,12 @@ class ManagedDockerWorkspace:
                             "cpus": (host.get("NanoCpus") or 0) / 10**9 or None,
                             "pids": host.get("PidsLimit") if (host.get("PidsLimit") or 0) > 0 else None}
         workspace.container, workspace.cleanup_status = container, "pending"
+        workspace.verify_cpu_set()
         return workspace
 
     def __init__(self, client, image, attempt, workdir, memory_bytes=4 * 1024**3,
-                 cpus=2, pids=512, journal=None, snapshot=False, snapshot_storage=None, offline=False):
+                 cpus=2, pids=512, journal=None, snapshot=False, snapshot_storage=None, offline=False,
+                 cpu_set=None):
         if not re.fullmatch(r"asb-[0-9a-f]{32}", attempt):
             raise ExecutionError("workspace requires a unique ASB attempt identity")
         if not isinstance(workdir, str) or not workdir.startswith("/") or "\x00" in workdir:
@@ -232,6 +312,16 @@ class ManagedDockerWorkspace:
             raise ExecutionError("workspace image must resolve to a content identity")
         self.client, self.image, self.attempt, self.workdir = client, image, attempt, workdir
         self.snapshot = snapshot
+        if cpu_set is not None:
+            if (not isinstance(cpu_set, (list, tuple)) or not cpu_set or len(cpu_set) > 65536
+                    or any(type(cpu) is not int or not 0 <= cpu <= 1048575 for cpu in cpu_set)):
+                raise ExecutionError("container CPU allocation must be a nonempty list of logical CPU IDs")
+            normalized = ",".join(map(str, cpu_set))
+            if len(_parse_cpu_list(normalized)) != len(cpu_set):
+                raise ExecutionError("invalid container CPU allocation")
+            self.cpu_set = normalized
+        else:
+            self.cpu_set = None
         self.offline = offline
         self.snapshot_storage = Path(snapshot_storage).absolute() if snapshot_storage is not None else None
         self.limits = {"memory_bytes": memory_bytes, "cpus": cpus, "pids": pids}
@@ -257,6 +347,8 @@ class ManagedDockerWorkspace:
             mem_limit=self.limits["memory_bytes"], nano_cpus=int(self.limits["cpus"] * 10**9),
             pids_limit=self.limits["pids"],
         )
+        if self.cpu_set is not None:
+            creation["cpuset_cpus"] = self.cpu_set
         if self.offline:
             creation["network_mode"] = "none"
         if self.snapshot:
@@ -269,14 +361,26 @@ class ManagedDockerWorkspace:
                             device_cgroup_rules=['b 7:* rwm','c 10:229 rwm'], security_opt=['apparmor=unconfined'])
         if self.journal is not None:
             self.journal.direct_container(creation)
-        self.container = self.client.containers.create(**creation)
+        try:
+            self.container = self.client.containers.create(**creation)
+        except Exception as error:
+            if self.cpu_set is not None:
+                raise ExecutionError(f"cannot create managed container with CPU allocation {self.cpu_set}: {error}") from error
+            raise
         self.cleanup_status = "pending"
         try:
             self.container.start()
+            self.verify_cpu_set()
             return self
-        except BaseException:
+        except BaseException as error:
             self.close()
+            if self.cpu_set is not None and isinstance(error, Exception) and not isinstance(error, ExecutionError):
+                raise ExecutionError(f"cannot start or verify managed container CPU allocation {self.cpu_set}: {error}") from error
             raise
+
+    def verify_cpu_set(self):
+        """Verify effective task affinity inside the owned running container."""
+        verify_container_cpu_set(self.container, self.cpu_set)
 
     def execute(self, argv, environment=None, timeout=900, output_limit=256 * 1024, before_resume=None,
                 on_output=None, cancelled=None, gate="shell", preparation_timeout=None,

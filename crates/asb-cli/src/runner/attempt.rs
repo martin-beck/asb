@@ -41,6 +41,12 @@ impl<'a> ConfiguredAttempt<'a> {
             project_root,
             project_config,
         } = admitted;
+        super::validate_runtime_configuration(&config)?;
+        if options.cpu_allocation.is_some() != options.cpu_affinity.is_some() {
+            return Err(Error::Run(
+                "CPU allocation and affinity mask must be admitted together".into(),
+            ));
+        }
         if options.recording.is_some() && options.mode != Some(tape::Mode::Record) {
             return Err(Error::Run(
                 "recording attempt lost its selected record mode before adapter preparation".into(),
@@ -125,7 +131,16 @@ impl<'a> ConfiguredAttempt<'a> {
         let tape_cassette = &context.tape_cassette;
         let mcp_tape_mode = context.mcp_tape_cassette.as_ref().map(|(mode, _)| *mode);
         let json = options.json;
-        let _initial_policy = crate::planning::persist(project_root, policy, None, None)?;
+        let runtime_evidence =
+            crate::runtime::evidence::planned(&config.runtime, options.cpu_allocation);
+        let _initial_policy = crate::planning::persist_with_dispatch_and_runtime(
+            project_root,
+            policy,
+            None,
+            None,
+            None,
+            runtime_evidence.as_ref(),
+        )?;
         let measurement_path = &context.measurement_path;
         let measurement_collectors: Vec<_> = policy
             .collectors
@@ -174,6 +189,17 @@ impl<'a> ConfiguredAttempt<'a> {
             measurement_session.as_mut(),
         );
         if let Some(session) = measurement_session.as_mut() {
+            if config.runtime.perf_record_scope
+                == crate::runtime::settings::PerfRecordScope::CpuWide
+            {
+                session
+                    .configure_perf_cpu_scope(options.cpu_allocation.ok_or_else(|| {
+                        Error::Run(
+                            "CPU-wide perf recording requires a verified replica allocation".into(),
+                        )
+                    })?)
+                    .map_err(Error::Run)?;
+            }
             session
                 .event(LifecycleEvent::RunStarted)
                 .map_err(Error::Run)?;
@@ -553,6 +579,7 @@ impl<'a> ReadyAttempt<'a> {
                     ))
                 })?;
                 let workload = workloads::prepare_task(&workloads::PreparationContext {
+                    cpu_allocation: options.cpu_allocation,
                     expected_material_sha256: expected_material.as_deref(),
                     retain_recorded_material: options.mode == Some(tape::Mode::Record),
                     tool_mode: options.effective_tool_mode(),
@@ -618,12 +645,15 @@ impl<'a> ReadyAttempt<'a> {
                 })
                 .transpose()?
                 .flatten();
-            let execution_plan = crate::planning::persist_with_dispatch(
+            let runtime_evidence =
+                crate::runtime::evidence::planned(&config.runtime, options.cpu_allocation);
+            let execution_plan = crate::planning::persist_with_dispatch_and_runtime(
                 project_root,
                 policy,
                 Some(effective_budgets),
                 Some(&workload_session.invocation().identity),
                 dispatch,
+                runtime_evidence.as_ref(),
             )?;
             let execution_plan_fingerprint = crate::planning::protocol_fingerprint_with_dispatch(
                 config,
@@ -874,6 +904,7 @@ impl<'a> ReadyAttempt<'a> {
                             upstream.as_deref(),
                             respect_record_timings,
                             tape::AgentContext {
+                                cpu_affinity: options.cpu_affinity,
                                 workspace: &workspace,
                                 ignore_provider_mismatch: options.ignore_provider_mismatch,
                                 ignore_provider_unconsumed: options.ignore_provider_unconsumed,
@@ -973,7 +1004,7 @@ impl<'a> ReadyAttempt<'a> {
     ) -> Result<CompletedAttempt<'a>, Error> {
         let Self {
             context,
-            metadata,
+            mut metadata,
             mut prepared,
             selected_offer,
             launch,
@@ -1104,6 +1135,7 @@ impl<'a> ReadyAttempt<'a> {
                 )
             } else {
                 let native = native::NativePlan {
+                    cpu_affinity: options.cpu_affinity,
                     config_path,
                     config,
                     project_root,
@@ -1195,6 +1227,42 @@ impl<'a> ReadyAttempt<'a> {
                 return Err(error);
             }
         };
+        if let Some(cpus) = options.cpu_allocation {
+            let proxy_affinities = prepared
+                .tape
+                .as_ref()
+                .map(tape::Session::launch_cpu_affinities);
+            let Some(runtime_evidence) = crate::runtime::evidence::launched(
+                &config.runtime,
+                cpus,
+                evidence.guest.is_some(),
+                proxy_affinities.as_deref(),
+            ) else {
+                let error = Error::Run("CPU allocation lost its runtime configuration".into());
+                if let Some(arrival) = arrival.as_mut() {
+                    arrival.abort(&error.to_string());
+                }
+                return Err(error);
+            };
+            let dispatch = options.execution_cohort.and_then(|cohort| cohort.dispatch);
+            let record = crate::planning::persist_with_dispatch_and_runtime(
+                project_root,
+                &context.policy,
+                Some(metadata.effective_budgets),
+                Some(&prepared.workload.invocation().identity),
+                dispatch,
+                Some(&runtime_evidence),
+            );
+            match record {
+                Ok(path) => metadata.execution_plan = path,
+                Err(error) => {
+                    if let Some(arrival) = arrival.as_mut() {
+                        arrival.abort(&error.to_string());
+                    }
+                    return Err(error);
+                }
+            }
+        }
         let settled = prepared
             .executed(evidence, issues)
             .settle(tape_cassette.as_ref());
@@ -2202,6 +2270,7 @@ mod tests {
 
     fn config(agent: &str) -> BenchmarkConfig {
         BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: agent.into(),

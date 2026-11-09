@@ -457,6 +457,7 @@ mod tests {
     #[test]
     fn command_uses_noninteractive_mode_and_selected_wire_provider() {
         let config = crate::benchmark::BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "hermes".into(),
@@ -724,6 +725,7 @@ assert stable(None) is None
     #[test]
     fn cli2key_command_uses_named_responses_provider() {
         let config = crate::benchmark::BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "hermes".into(),

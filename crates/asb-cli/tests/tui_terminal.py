@@ -260,7 +260,7 @@ def main():
         # below instead pass an explicit PATH of inert tool fixtures.
         # Real search/select/step/concurrency events, including backwards nav.
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \t\x1b[Z\tlocal \t \tbug-fix \t\t\x1b[B \t")
+            b"pi \t\x1b[Z\tlocal \t \tbug-fix \t\t\x1b[B \t\t")
         assert code == 0, transcript
         assert b"Generated 1 benchmark configurations" in transcript, transcript
         sweep_files = list(root.glob("asb-sweep-*.toml"))
@@ -270,13 +270,28 @@ def main():
         config = tomllib.loads((root / manifest["configs"][0]).read_text())
         assert config["agent"] == "pi" and config["provider"] == "local"
         assert config["workload"] == "bug-fix" and config["concurrency"] == 2
+        assert "runtime" not in config, "portable default should not write runtime settings"
         assert not (root / "invoked-agent").exists()
         assert not (root / ".asb/install.log").exists(), "navigation must not install dependencies"
+
+        # Select the CPU-pool option, edit both fields and opt in to CPU-wide
+        # recording through real terminal events. No benchmark is executed.
+        code, transcript = session(binary, root, ["setup", "tui"],
+            b"pi \tlocal \t \tbug-fix \t\t\x1b[B \t\x1b[B \x10" +
+            b"1-3,5-7\r\x073\r\x17\t")
+        assert code == 0, transcript[-3000:]
+        runtime_sweeps = set(root.glob("asb-sweep-*.toml")) - set(sweep_files)
+        assert len(runtime_sweeps) == 1, transcript[-3000:]
+        runtime_manifest = tomllib.loads(runtime_sweeps.pop().read_text())
+        runtime_config = tomllib.loads((root / runtime_manifest["configs"][0]).read_text())
+        assert runtime_config["runtime"]["perf_record_scope"] == "cpu-wide"
+        assert runtime_config["runtime"]["cpu_pool"] == {"cpus": "1-3,5-7", "num_cpus_per_instance": 3}
+        sweep_files = list(root.glob("asb-sweep-*.toml"))
 
         # End reaches the real public maximum; publication must retain numeric
         # 512, and single-selection must replace the default rather than add it.
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\x1b[F \t")
+            b"pi \tlocal \t \tbug-fix \t\t\x1b[F \t\t")
         assert code == 0, transcript
         next_sweeps = set(root.glob("asb-sweep-*.toml")) - set(sweep_files)
         assert len(next_sweeps) == 1, transcript
@@ -297,7 +312,7 @@ def main():
         original_project = project_file.read_text()
         project_file.write_text("tools_dir='.asb-tools'\nworkloads_dir='workloads'\nworkspace_dir='" + "x" * 70_000 + "'\n")
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\t")
+            b"pi \tlocal \t \tbug-fix \t\t\t\t")
         assert code != 0 and b"64 KiB" in transcript, transcript[-3000:]
         assert b"no setup files were written" in transcript, transcript[-3000:]
         assert set(root.iterdir()) == prior_paths
@@ -323,7 +338,7 @@ def main():
         raw_prior.write_bytes(b"prior configuration unchanged")
         raw_paths = set(raw_root.iterdir())
         code, transcript = session(binary, raw_root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\t")
+            b"pi \tlocal \t \tbug-fix \t\t\t\t")
         assert code != 0 and b"UTF-8" in transcript, transcript[-3000:]
         assert b"no setup files were written" in transcript, transcript[-3000:]
         assert set(raw_root.iterdir()) == raw_paths
@@ -357,7 +372,7 @@ def main():
         assert code != 0, transcript
         assert invoked.is_file(), "missing agent selection must attempt installation"
         assert not agent.exists(), "failed package install must not mark agent installed"
-        assert len(list(root.glob("asb-sweep-*.toml"))) == 2, "failed selection must not publish a sweep"
+        assert set(root.glob("asb-sweep-*.toml")) == set(prior_setup), "failed selection must not publish a sweep"
 
         (root / "workloads/custom.txt").unlink()
         invoked.unlink()
@@ -386,7 +401,7 @@ def main():
         assert code != 0, transcript
         assert invoked.is_file(), "missing collector dependency must attempt installation"
         assert not (root / ".asb-tools/perf/bin/perf").exists(), "failed dependency must not be marked installed"
-        assert len(list(root.glob("asb-sweep-*.toml"))) == 2
+        assert set(root.glob("asb-sweep-*.toml")) == set(prior_setup)
 
         workload_sessions(binary, root, str(fixture_bin))
         assert not (root / "invoked-agent").exists()

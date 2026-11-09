@@ -136,6 +136,15 @@ class HarborTests(unittest.TestCase):
             self.assertEqual(result["networks"]["default"]["name"], "asb-fixture-default")
             self.assertEqual(result["volumes"]["data"]["name"], "asb-fixture-data")
 
+    def test_scoped_compose_applies_cpu_pool_to_each_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {"services": {"main": {}, "database": {}}}
+            result = subject.scoped_configuration(config, "asb-fixture", root, root, [1, 3])
+            self.assertEqual([service["cpuset"] for service in result["services"].values()], ["1,3", "1,3"])
+            with self.assertRaisesRegex(ExecutionError, "conflicts"):
+                subject.scoped_configuration({"services": {"main": {"cpuset": "1"}}}, "asb-fixture", root, root, [1, 3])
+
     def test_host_exposure_and_private_build_contexts_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

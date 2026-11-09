@@ -830,6 +830,38 @@ pub(crate) fn launch(
     dataset: super::session::DatasetIdentity,
     context: &PreparationContext<'_>,
 ) -> Result<Box<dyn WorkloadSession>, String> {
+    launch_inner(
+        tool_id, helper, operation, workload, dataset, context, false,
+    )
+}
+
+/// Adapter opt-in: the workload helper must pass and verify this CPU set for
+/// every container it creates before starting task work.
+pub(crate) fn launch_with_cpu_allocation(
+    tool_id: &str,
+    helper: &str,
+    operation: Option<&str>,
+    workload: &str,
+    dataset: super::session::DatasetIdentity,
+    context: &PreparationContext<'_>,
+) -> Result<Box<dyn WorkloadSession>, String> {
+    launch_inner(tool_id, helper, operation, workload, dataset, context, true)
+}
+
+fn launch_inner(
+    tool_id: &str,
+    helper: &str,
+    operation: Option<&str>,
+    workload: &str,
+    dataset: super::session::DatasetIdentity,
+    context: &PreparationContext<'_>,
+    supports_cpu_allocation: bool,
+) -> Result<Box<dyn WorkloadSession>, String> {
+    if context.cpu_allocation.is_some() && !supports_cpu_allocation {
+        return Err(
+            "this workload does not yet support verified managed-container CPU placement".into(),
+        );
+    }
     let task = context
         .trial
         .ok_or("select an official instance ID in setup before running this benchmark")?;
@@ -874,6 +906,20 @@ pub(crate) fn launch(
         .open(artifacts.with_extension("controller.log"))
         .map_err(|error| error.to_string())?;
     let mut command = controller_command(tool.join("venv/bin/python"))?;
+    if let Some(cpus) = context.cpu_allocation {
+        let mask = crate::runtime::affinity::AffinityMask::new(cpus)?;
+        mask.prepare_command(&mut command)
+            .map_err(|error| format!("cannot prepare workload controller CPU affinity: {error}"))?;
+        command.env(
+            "ASB_CPU_ALLOCATION",
+            cpus.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    } else {
+        command.env_remove("ASB_CPU_ALLOCATION");
+    }
     command.stderr(error_log);
     if let Some(expected) = context.expected_material_sha256 {
         command.env("ASB_EXPECTED_MATERIAL_SHA256", expected);

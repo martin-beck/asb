@@ -79,6 +79,8 @@ impl<'a> PreparedSweep<'a> {
         // selection before capacity/dependency preflight or old-result
         // rotation.  Do not let a valid early entry hide a later input error.
         for entry in &plan.entries {
+            crate::runner::validate_runtime_configuration(&entry.configuration)?;
+            crate::runner::validate_runtime_target(&entry.configuration)?;
             crate::runner::validate_mcp_configuration(&entry.configuration, options.mcp_mode)?;
             crate::runner::validate_native_snapshot_record(
                 &entry.configuration,
@@ -90,6 +92,13 @@ impl<'a> PreparedSweep<'a> {
                 },
             )?;
         }
+        crate::runtime::settings::confirm_topology(
+            plan.entries
+                .iter()
+                .map(|entry| &entry.configuration.runtime),
+            options.interactive && !options.json,
+            output,
+        )?;
         plan.execution_mode = match mode {
             None => plan::SavedExecutionMode::Live,
             Some(crate::tape::Mode::Record) => plan::SavedExecutionMode::Record,

@@ -528,6 +528,7 @@ if (JSON.stringify(norm('/v1/chat/completions',one,'one')) === JSON.stringify(no
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&tape, b"{}\n").unwrap();
         let config = crate::benchmark::BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "openhands".into(),

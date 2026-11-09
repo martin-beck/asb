@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import uuid
 
-from asb_execution import ExecutionError, ManagedDockerWorkspace
+from asb_execution import ExecutionError, ManagedDockerWorkspace, _parse_cpu_list
 from asb_swebench import (CatalogError, MAX_PATCH_BYTES, agent_instruction,
                           atomic_write, encoded, evaluate_submission, read_task,
                           remove_evaluation_container, run_harness, sdk_identity)
@@ -100,6 +100,8 @@ class SweBenchTask:
             raise ValueError("unsupported workload tool mode")
         self.tool_mode = tool_mode
         self.snapshot = snapshot and tool_mode != "none"
+        requested_cpus = os.environ.get("ASB_CPU_ALLOCATION")
+        self.cpu_set = None if requested_cpus is None else sorted(_parse_cpu_list(requested_cpus))
         self.client, self.catalog_path, self.task_id = client, Path(catalog_path), task_id
         self.artifacts = Path(artifacts).absolute()
         self.workspace = None
@@ -138,7 +140,8 @@ class SweBenchTask:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
             self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
                                                     journal=self.journal, snapshot=self.snapshot,
-                                                    snapshot_storage=snapshot_storage, offline=self.tool_mode == "replay")
+                                                    snapshot_storage=snapshot_storage, offline=self.tool_mode == "replay",
+                                                    cpu_set=self.cpu_set)
             self.workspace.__enter__()
             base = self.row["base_commit"]
             self.checked(["git", "cat-file", "-e", base + "^{commit}"])

@@ -596,6 +596,7 @@ pub(crate) fn resolve_snapshot(
 
 /// Create-new, private policy evidence; never put instructions or payloads in
 /// this record. The first record precedes providers/collectors/environments.
+#[cfg(test)]
 pub(crate) fn persist(
     root: &std::path::Path,
     policy: &ResolvedPlan,
@@ -605,12 +606,24 @@ pub(crate) fn persist(
     persist_with_dispatch(root, policy, effective, task, None)
 }
 
+#[cfg(test)]
 pub(crate) fn persist_with_dispatch(
     root: &std::path::Path,
     policy: &ResolvedPlan,
     effective: Option<EffectiveBudgets>,
     task: Option<&workloads::TaskIdentity>,
     dispatch: Option<Dispatch>,
+) -> Result<std::path::PathBuf, Error> {
+    persist_with_dispatch_and_runtime(root, policy, effective, task, dispatch, None)
+}
+
+pub(crate) fn persist_with_dispatch_and_runtime(
+    root: &std::path::Path,
+    policy: &ResolvedPlan,
+    effective: Option<EffectiveBudgets>,
+    task: Option<&workloads::TaskIdentity>,
+    dispatch: Option<Dispatch>,
+    runtime: Option<&serde_json::Value>,
 ) -> Result<std::path::PathBuf, Error> {
     use std::io::Write;
     let state = root.join(".asb");
@@ -650,6 +663,9 @@ pub(crate) fn persist_with_dispatch(
     if let Some(dispatch) = dispatch {
         record["dispatch"] =
             serde_json::to_value(dispatch).map_err(|error| Error::Io(error.to_string()))?;
+    }
+    if let Some(runtime) = runtime {
+        record["runtime"] = runtime.clone();
     }
     let bytes = serde_json::to_vec(&record).map_err(|error| Error::Io(error.to_string()))?;
     file.write_all(&bytes)
@@ -1352,6 +1368,13 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&second).unwrap()).unwrap();
         assert_eq!(value["effective_controller_caps"]["execution_seconds"], 0.5);
         assert!(value["effective_controller_caps"]["agent_preparation_seconds"].is_null());
+        let runtime = serde_json::json!({"placement_status":"pending_boundary_verification", "requested_replica_cpus":[1,3]});
+        let third =
+            persist_with_dispatch_and_runtime(&root, &policy, None, None, None, Some(&runtime))
+                .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&third).unwrap()).unwrap();
+        assert_eq!(value["runtime"], runtime);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

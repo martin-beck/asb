@@ -705,6 +705,7 @@ for (const request of invalid) {
     #[test]
     fn enables_verbose_mode_for_deterministic_noninteractive_runs() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "openjiuwen".into(),
