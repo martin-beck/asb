@@ -5,6 +5,7 @@ use crate::measurements;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+mod kernel_symbols;
 #[cfg(target_os = "linux")]
 pub(super) mod readiness;
 #[cfg(target_os = "linux")]
@@ -384,6 +385,8 @@ fn validate_record(
         capture.freeze()?;
     }
     let quality = parse_validation_summary(captures[0].reader()?)?;
+    let summary: serde_json::Value = serde_json::from_reader(captures[0].reader()?)
+        .map_err(|error| format!("invalid perf decoder summary: {error}"))?;
     measurements::write_json(
         &session.dir.join("perf-symbol-quality.json"),
         &serde_json::json!({
@@ -391,6 +394,7 @@ fn validate_record(
             "status": if quality.1 > 0 || symfs.as_ref().is_some_and(|(_, partial)| *partial) { "partial" } else { "not-verified" },
             "decoded_frames": quality.0,
             "unknown_frames": quality.1,
+            "kernel_symbols": summary.get("kernel_symbols"),
             "partial_symbol_tree": symfs.as_ref().is_some_and(|(_, partial)| *partial),
             "inline_frames_omitted": symfs.as_ref().is_some_and(|(_, partial)| *partial),
         "reason": "Unknown frames can reflect missing agent or library symbols, JIT code, or restricted kernel addresses (kernel.kptr_restrict). Zero unknown frames alone does not prove complete debug information."
@@ -450,7 +454,7 @@ fn streaming_validation_service(args: &[std::ffi::OsString]) -> Result<(), Strin
         .stdout
         .take()
         .ok_or("perf decoder stdout unavailable")?;
-    let quality = match symbol_quality(output) {
+    let quality = match kernel_symbols::frames(output) {
         Ok(quality) => quality,
         Err(error) => {
             let _ = child.kill();
@@ -464,53 +468,20 @@ fn streaming_validation_service(args: &[std::ffi::OsString]) -> Result<(), Strin
     if !status.success() {
         return Err(format!("perf decoder failed: {status}"));
     }
+    let mut kernel = kernel_symbols::observation(&quality);
+    kernel_symbols::add_build_id_evidence(&mut kernel, &args[1], &args[2]);
     println!(
         "{}",
-        serde_json::json!({"schema_version": 1, "decoded_frames": quality.0, "unknown_frames": quality.1})
+        serde_json::json!({"schema_version": 1, "decoded_frames": quality.total, "unknown_frames": quality.unknown, "kernel_symbols": kernel})
     );
     Ok(())
 }
 
 /// Count decoded stack frames without retaining their symbols or paths.
-fn symbol_quality(mut input: impl std::io::Read) -> Result<(u64, u64), String> {
-    let mut buffer = [0u8; 8192];
-    let needle = b"[unknown]";
-    let (mut frame, mut unknown, mut match_at) = (false, false, 0usize);
-    let (mut start, mut total, mut missing) = (true, 0u64, 0u64);
-    loop {
-        let count = input
-            .read(&mut buffer)
-            .map_err(|error| format!("cannot inspect decoded perf symbols: {error}"))?;
-        if count == 0 {
-            break;
-        }
-        for &byte in &buffer[..count] {
-            if start {
-                frame = byte == b'\t';
-                start = false;
-            }
-            if byte == b'\n' {
-                if frame {
-                    total += 1;
-                    missing += u64::from(unknown);
-                }
-                (frame, unknown, match_at, start) = (false, false, 0, true);
-            } else if byte == needle[match_at] {
-                match_at += 1;
-                if match_at == needle.len() {
-                    unknown = true;
-                    match_at = 0;
-                }
-            } else {
-                match_at = usize::from(byte == needle[0]);
-            }
-        }
-    }
-    if !start && frame {
-        total += 1;
-        missing += u64::from(unknown);
-    }
-    Ok((total, missing))
+#[cfg(test)]
+fn symbol_quality(input: impl std::io::Read) -> Result<(u64, u64), String> {
+    let quality = kernel_symbols::frames(input)?;
+    Ok((quality.total, quality.unknown))
 }
 
 /// Keep offline decoding independent from perf configuration without clearing
@@ -531,6 +502,12 @@ pub(super) fn configure_offline_decoder_environment(command: &mut Command, home:
 fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
     if !super::super::selected_or_environment("perf", context.selected) {
         return Ok(());
+    }
+    let diagnostic = kernel_symbols::observation(&kernel_symbols::Frames::default());
+    if diagnostic["decoder_kallsyms_addresses"] == "zeroed" {
+        eprintln!(
+            "perf: kernel addresses are hidden from the current user; kernel frames may be unresolved during decoding. Inspect kernel.kptr_restrict and perf-symbol-quality.json after the run; changing host settings requires administrator consent."
+        );
     }
     let executable = measurements::resolve_executable(context.tool_dir, "perf");
     let probes = [
@@ -1153,6 +1130,8 @@ mod tests {
         .unwrap();
         let quality = std::fs::read_to_string(root.join("perf-symbol-quality.json")).unwrap();
         println!("{quality}");
+        let report: serde_json::Value = serde_json::from_str(&quality).unwrap();
+        assert!(report["kernel_symbols"]["status"].as_str().is_some());
         session.set_artifact(super::SharedArtifact::StackSamples, artifact);
         session.write_flamegraph().unwrap();
         let flamegraph: serde_json::Value =
