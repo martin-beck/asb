@@ -995,6 +995,12 @@ mod tests {
         let value = serde_json::json!({"schema_version":1,"configured":4,"admitted":2});
         let dispatch: Dispatch = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(dispatch).unwrap(), value);
+        let maximum = serde_json::json!({
+            "schema_version": 1,
+            "configured": crate::benchmark::MAX_CONCURRENCY,
+            "admitted": crate::benchmark::MAX_CONCURRENCY,
+        });
+        assert!(serde_json::from_value::<Dispatch>(maximum).is_ok());
         for field in ["schema_version", "configured", "admitted"] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(field);
@@ -1017,7 +1023,7 @@ mod tests {
             ("schema_version", 0),
             ("schema_version", 2),
             ("configured", 0),
-            ("configured", 65),
+            ("configured", crate::benchmark::MAX_CONCURRENCY + 1),
             ("admitted", 0),
             ("admitted", 5),
         ] {
