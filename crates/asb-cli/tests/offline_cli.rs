@@ -969,6 +969,26 @@ fn sweep_admission_errors_preserve_existing_outputs_and_reject_unbounded_replica
 }
 
 #[test]
+fn requested_runtime_pool_is_rejected_before_run_or_sweep_mutation() {
+    let project = Project::new();
+    project.init();
+    project.write("benchmark.toml", "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nconcurrency=1\n[runtime.cpu_pool]\ncpus='1'\nnum_cpus_per_instance=1\n");
+    project.write("sweep.toml", "configs=['benchmark.toml']\n");
+    project.write("sweep-results/previous", "retain result");
+    for args in [&["run", "benchmark.toml"][..], &["sweep", "sweep.toml"][..]] {
+        expect_failure(
+            &project.command(args),
+            "runtime CPU placement is not yet integrated",
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("sweep-results/previous")).unwrap(),
+        "retain result"
+    );
+    assert!(!project.0.join("sweep-history").exists());
+}
+
+#[test]
 fn sweep_rejects_nested_sweeps_before_execution_or_comparison() {
     let project = Project::new();
     project.init();

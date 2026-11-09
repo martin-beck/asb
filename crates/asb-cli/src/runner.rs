@@ -53,6 +53,19 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration =
     Duration::from_secs(crate::planning::DEFAULT_NATIVE_EXECUTION_SECONDS);
 
+/// Temporary admission guard until all runtime-placement boundaries are wired.
+/// Never silently run a requested CPU pool without actually enforcing it.
+pub(crate) fn validate_runtime_configuration(config: &BenchmarkConfig) -> Result<(), Error> {
+    config
+        .runtime
+        .plan(config.concurrency)
+        .map_err(Error::Input)?;
+    if config.runtime != crate::runtime::settings::RuntimeSettings::default() {
+        return Err(Error::Input("runtime CPU placement is not yet integrated; remove the runtime section before running".into()));
+    }
+    Ok(())
+}
+
 /// Validate static MCP configuration before public execution entry points
 /// allocate resources. Attempt admission repeats this for internal paths.
 pub(crate) fn validate_mcp_configuration(
@@ -395,6 +408,7 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    validate_runtime_configuration(&config)?;
     select_adapter_recording_transport(&mut config, options.effective_tool_mode());
     let runtime_anchor = project::configuration_anchor(config_path, options.invocation_dir)?;
     let cassette = options
@@ -3637,6 +3651,7 @@ mod tests {
     #[test]
     fn cli2key_command_mappings_place_workload_once() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "openhands".into(),
@@ -3666,6 +3681,7 @@ mod tests {
     #[test]
     fn token_reporting_commands_request_machine_readable_agent_output() {
         let base = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "mini-swe".into(),
@@ -3733,6 +3749,7 @@ mod tests {
             ("continue", "cn", "--auto"),
         ] {
             let config = BenchmarkConfig {
+                runtime: Default::default(),
                 native_snapshot_record: false,
                 planning: None,
                 agent: agent.into(),
@@ -3766,6 +3783,7 @@ mod tests {
     #[test]
     fn pi_cli2key_uses_compact_print_mode_with_adapter_summary() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "pi".into(),
@@ -3887,6 +3905,7 @@ mod tests {
     #[test]
     fn opencode_command_uses_generic_provider_model_namespace() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "opencode".into(),
@@ -3919,6 +3938,7 @@ mod tests {
     #[test]
     fn unknown_agent_suggests_a_close_match() {
         let config = BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: "opencod".into(),

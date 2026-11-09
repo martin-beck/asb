@@ -41,6 +41,7 @@ impl<'a> ConfiguredAttempt<'a> {
             project_root,
             project_config,
         } = admitted;
+        super::validate_runtime_configuration(&config)?;
         if options.recording.is_some() && options.mode != Some(tape::Mode::Record) {
             return Err(Error::Run(
                 "recording attempt lost its selected record mode before adapter preparation".into(),
@@ -2189,6 +2190,7 @@ mod tests {
 
     fn config(agent: &str) -> BenchmarkConfig {
         BenchmarkConfig {
+            runtime: Default::default(),
             native_snapshot_record: false,
             planning: None,
             agent: agent.into(),

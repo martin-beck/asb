@@ -406,6 +406,15 @@ impl App {
     /// deliberately paired configurations become editable selections.
     fn preselect(&mut self, input: &Path) -> Result<(), Error> {
         let configs = preselection_configs(input)?;
+        if configs
+            .iter()
+            .any(|config| config.runtime != crate::runtime::settings::RuntimeSettings::default())
+        {
+            return Err(Error::Input(
+                "the setup TUI cannot yet edit runtime settings; the existing file was not changed"
+                    .into(),
+            ));
+        }
         let concurrency = configs
             .first()
             .map(|config| config.concurrency)
@@ -3189,6 +3198,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                     for trial in trials {
                         let name = format!("asb-test-{stamp}-{index:03}.toml");
                         let config = BenchmarkConfig {
+                            runtime: Default::default(),
                             native_snapshot_record: app.native_snapshot_record,
                             planning: None,
                             agent: agent.clone(),
@@ -4625,6 +4635,24 @@ mod tests {
                 .contains("unsafe configuration path")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_preselection_is_refused_before_the_wizard_can_drop_it() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let input = root.join("saved.toml");
+        let text = "agent='pi'\nprovider='local'\nmodel='m'\nworkload='bug-fix'\n[runtime.cpu_pool]\ncpus='1'\nnum_cpus_per_instance=1\n";
+        std::fs::write(&input, text).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        assert!(
+            app.preselect(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot yet edit runtime")
+        );
+        assert_eq!(std::fs::read_to_string(&input).unwrap(), text);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
