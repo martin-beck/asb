@@ -523,6 +523,30 @@ class ExecutionTests(unittest.TestCase):
         workspace.close()
         self.assertEqual(container.events.count("remove"), 1)
 
+    def test_gate_resume_retries_one_transient_daemon_refusal(self):
+        workspace, container, api, _ = self.workspace()
+        original = container.exec_run
+        resume_attempts = 0
+
+        def exec_run(argv):
+            nonlocal resume_attempts
+            if "asb-resume" not in argv:
+                return original(argv)
+            resume_attempts += 1
+            container.events.append("resume")
+            if resume_attempts == 1:
+                return SimpleNamespace(exit_code=1, output=b"")
+            container.resumed = True
+            return SimpleNamespace(exit_code=0, output=b"")
+
+        container.exec_run = exec_run
+        with workspace:
+            result = workspace.execute(["agent"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(resume_attempts, 2)
+        self.assertEqual(container.events.count("resume"), 2)
+        self.assertTrue(api.completed)
+
     def test_gate_accepts_reordered_installer_stderr_before_readiness(self):
         workspace, _, api, _ = self.workspace()
         class StderrFirst(Stream):
