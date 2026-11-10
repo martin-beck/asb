@@ -810,7 +810,14 @@ pub(crate) fn execute_with_sweep_settlement(
             sweep_settlement,
             reused: None,
         }
-        .execute(dispatch, output, warnings)?;
+        .execute(dispatch, output, warnings)
+        .map_err(|error| {
+            if options.quiet_output {
+                append_failure_evidence(error, &root, &plan.slots, number)
+            } else {
+                error
+            }
+        })?;
         let execution::SettledBatch {
             prepared,
             failed: batch_failed,
@@ -966,6 +973,16 @@ fn failure_evidence(root: &Path, slots: &[Slot], batch: Option<u64>) -> String {
                 ""
             }
         )
+    }
+}
+
+fn append_failure_evidence(error: Error, root: &Path, slots: &[Slot], batch: u64) -> Error {
+    let evidence = failure_evidence(root, slots, Some(batch));
+    match error {
+        Error::Input(message) => Error::Input(format!("{message}; {evidence}")),
+        Error::Io(message) => Error::Io(format!("{message}; {evidence}")),
+        Error::Run(message) => Error::Run(format!("{message}; {evidence}")),
+        error @ Error::Usage(_) => error,
     }
 }
 
@@ -1226,6 +1243,9 @@ mod tests {
         let absent = failure_evidence(&root, &slots, Some(2));
         assert!(absent.contains("no run log was produced"));
         assert!(absent.contains("plan.json"));
+        let early = append_failure_evidence(Error::Io("fixture error".into()), &root, &slots, 2);
+        assert!(matches!(early, Error::Io(_)));
+        assert!(early.to_string().contains("no run log was produced"));
         for slot in slots.iter().filter(|slot| slot.batch == 2) {
             fs::write(root.join(&slot.log), "fixture").unwrap();
         }

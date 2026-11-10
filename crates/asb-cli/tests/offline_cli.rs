@@ -3495,6 +3495,15 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
         };
         expect_failure(&result, expected);
         assert!(!stderr(&result).contains("fixture-secret"));
+        let error = stderr(&result);
+        let generated = error
+            .split("retained run logs: replica 1: ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(std::path::Path::new(generated).is_file(), "{error}");
         let log: serde_json::Value =
             serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
         assert_eq!(log["status"], "failed");
