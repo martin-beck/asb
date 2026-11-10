@@ -99,9 +99,9 @@ fn svg(metric: &str, values: &[(String, f64)]) -> String {
 
 fn axis_value(value: f64) -> String {
     if value != 0.0 && (value.abs() < 0.01 || value.abs() >= 1e9) {
-        format!("{value:.3e}")
+        format!("{value:.8e}")
     } else {
-        format_tick(value)
+        value.to_string()
     }
 }
 
@@ -186,6 +186,7 @@ mod tests {
         let graph = svg("elapsed_ms", &[("one".into(), 0.0), ("two".into(), 0.0)]);
         assert_eq!(graph.matches("class=\"replica-point\"").count(), 2);
         assert!(!graph.contains("NaN"));
+        assert_ne!(axis_value(1000.1), axis_value(1000.2));
     }
 
     #[test]
