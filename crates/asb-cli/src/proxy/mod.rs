@@ -11,6 +11,7 @@ use std::collections::HashMap;
 /// Generic inputs for a proxy which owns LLM record/replay.
 pub(crate) struct RecordingRequest<'a> {
     pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
+    pub strip_proxy_v1: bool,
     pub mode: crate::tape::Mode,
     pub recorder: Option<&'a str>,
     pub cassette: &'a std::path::Path,
@@ -76,6 +77,9 @@ pub(crate) trait ProxyAdapter: Sync {
         false
     }
     fn supports_custom_normalization(&self) -> bool {
+        false
+    }
+    fn supports_upstream_path_rewrite(&self) -> bool {
         false
     }
     fn recording_settings(&self, _: &RecordingRequest<'_>) -> Result<Box<dyn Any>, Error> {
@@ -219,6 +223,12 @@ fn start_recording_chain_with(
     if request.custom_normalization.is_some() && !adapter.supports_custom_normalization() {
         return Err(Error::Input(format!(
             "recording proxy `{}` does not support project replay normalizers",
+            adapter.name()
+        )));
+    }
+    if request.strip_proxy_v1 && !adapter.supports_upstream_path_rewrite() {
+        return Err(Error::Input(format!(
+            "recording proxy `{}` cannot route this provider base path",
             adapter.name()
         )));
     }
@@ -688,6 +698,7 @@ mod tests {
         let registry: &[&dyn ProxyAdapter] = &[&first, &second];
         let request = RecordingRequest {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             recorder: Some("second"),
             mode: crate::tape::Mode::Replay,
             cassette: std::path::Path::new("fixture"),
@@ -732,10 +743,24 @@ mod tests {
                 .unwrap();
         assert_eq!(chain.url(), "second-url");
         chain.finish().result.unwrap();
+        let rewrite = RecordingRequest {
+            strip_proxy_v1: true,
+            ..request
+        };
+        let error = match start_recording_chain_with(&rewrite, None, &names, registry) {
+            Ok(_) => panic!("recorder without path rewrite support must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("cannot route this provider base path")
+        );
         let missing = RecordingRequest {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             recorder: Some("missing"),
-            ..request
+            ..rewrite
         };
         assert!(start_recording_chain_with(&missing, None, &names, registry).is_err());
     }
@@ -828,6 +853,7 @@ mod tests {
         let cassette = std::path::Path::new("fixture.jsonl");
         let request = RecordingRequest {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             recorder: None,

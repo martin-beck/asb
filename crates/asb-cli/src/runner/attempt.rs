@@ -896,15 +896,18 @@ impl<'a> ReadyAttempt<'a> {
                                 bridge_url,
                             )?)
                         } else {
-                            providers::tape_upstream(&config.provider, bridge_url)
+                            providers::tape_upstream(&config.provider, bridge_url)?
                         };
                         Ok(Some(tape::Session::start_for_agent_at(
                             *mode,
                             cassette,
-                            upstream.as_deref(),
+                            upstream.as_ref().map(|route| route.url.as_str()),
                             respect_record_timings,
                             tape::AgentContext {
                                 cpu_affinity: options.cpu_affinity,
+                                strip_proxy_v1: upstream
+                                    .as_ref()
+                                    .is_some_and(|route| route.strip_proxy_v1),
                                 workspace: &workspace,
                                 ignore_provider_mismatch: options.ignore_provider_mismatch,
                                 ignore_provider_unconsumed: options.ignore_provider_unconsumed,

@@ -217,6 +217,10 @@ fn unusable_selected_agent_never_runs_a_different_path_installation() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let project = Project::new();
     project.init();
+    project.write(
+        ".api_base_url_openai",
+        "invalid for openai but irrelevant here\n",
+    );
     project.write("benchmark.toml", "agent='codex'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture/model'\nworkspace='workspace'\nlog_file='run.log'\n");
     let marker = project.0.join("host-agent-started");
     project.write(
@@ -1415,6 +1419,308 @@ fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'applicati
         posts[0]
             .to_ascii_lowercase()
             .contains("authorization: bearer live-secret")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn openai_missing_base_url_file_uses_default_catalog_without_network() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = Project::new();
+    project.init();
+    project.write("fake-bin/curl", "#!/bin/sh\ncat > \"$HOME/curl-config\"\nprintf '%s' '{\"data\":[{\"id\":\"fixture-model\",\"supported_parameters\":[\"tools\"]}]}'\nprintf '\\nASB_HTTP_STATUS=200\\nASB_PROXY_STATUS=000\\nASB_CONTENT_TYPE=application/json\\n' >&2\n");
+    std::fs::set_permissions(
+        project.0.join("fake-bin/curl"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        project.0.join("fake-bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = project.command_with_env(
+        &["provider", "models", "openai"],
+        &[("OPENAI_API_KEY", "fixture-only"), ("PATH", &path)],
+    );
+    expect_success(&output);
+    assert!(
+        std::fs::read_to_string(project.0.join("curl-config"))
+            .unwrap()
+            .contains("https://api.openai.com/v1/models")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn openai_base_url_file_routes_discovery_live_and_recording() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let worker_stop = Arc::clone(&stop);
+    let seen = Arc::clone(&requests);
+    let worker = std::thread::spawn(move || {
+        while !worker_stop.load(Ordering::Relaxed) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("fixture server: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..end]);
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8(bytes).unwrap();
+            let first = request.lines().next().unwrap_or_default().to_owned();
+            seen.lock().unwrap().push(request);
+            let body = if first.starts_with("GET ") {
+                r#"{"data":[{"id":"fixture-model","supported_parameters":["tools"]}]}"#
+            } else {
+                r#"{"id":"resp_fixture","object":"response","output":[]}"#
+            };
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let project = Project::new();
+    project.init();
+    project.write(
+        ".api_base_url_openai",
+        &format!("http://{address}/gateway/v1\n"),
+    );
+    project.write("benchmark.toml", "agent='codex'\nworkload='bug-fix'\nprovider='openai'\nmodel='fixture-model'\nworkspace='workspace'\nlog_file='run.log'\n");
+    let agent = ".asb-tools/codex/bin/codex";
+    project.write(agent, r##"#!/usr/bin/env node
+const fs = require('fs');
+const cfg = fs.readFileSync(process.env.CODEX_HOME + '/config.toml', 'utf8');
+const endpoint = cfg.match(/base_url = "([^"]+)"/)[1];
+fs.writeFileSync('src/parser.py', "def parse_path(value: str) -> list[str]:\n    return [segment for segment in value.split('/') if segment]\n");
+fetch(endpoint + '/responses', {method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+process.env.ASB_AGENT_API_KEY},body:JSON.stringify({model:'fixture-model',input:'offline',tools:[{type:'function',name:'read_file'}]})}).then(r => {if (!r.ok) process.exit(14); console.log('fixture-agent');}).catch(() => process.exit(15));
+"##);
+    std::fs::set_permissions(
+        project.0.join(agent),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let env = [("OPENAI_API_KEY", "fixture-secret")];
+    let models = project.command_with_env(&["provider", "models", "openai"], &env);
+    let live = project.command_with_env(&["run", "benchmark.toml"], &env);
+    let record = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--cassette",
+            "tape.jsonl",
+        ],
+        &[
+            ("OPENAI_API_KEY", "fixture-secret"),
+            ("ASB_PROVIDER_BASE_URL", "http://127.0.0.1:1/wrong"),
+        ],
+    );
+    project.write(".api_base_url_openai", &format!("http://{address}/plain\n"));
+    let plain_live = project.command_with_env(&["run", "benchmark.toml"], &env);
+    let plain_record = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--cassette",
+            "plain.jsonl",
+        ],
+        &env,
+    );
+    let before_plain_replay = requests.lock().unwrap().len();
+    let plain_replay = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-replay",
+            "--cassette",
+            "plain.jsonl",
+        ],
+        &env,
+    );
+    let after_plain_replay = requests.lock().unwrap().len();
+    project.write(
+        ".api_base_url_openai",
+        &format!("http://{address}/models\n"),
+    );
+    let models_base = project.command_with_env(&["provider", "models", "openai"], &env);
+    let models_base_record = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--cassette",
+            "models-base.jsonl",
+        ],
+        &env,
+    );
+    project.write(".api_base_url_openai", "not a URL\n");
+    let before_invalid = requests.lock().unwrap().len();
+    project.write(
+        "fake-bin/curl",
+        "#!/bin/sh\ntouch \"$HOME/curl-invoked\"\nexit 99\n",
+    );
+    std::fs::set_permissions(
+        project.0.join("fake-bin/curl"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let invalid_path = format!(
+        "{}:{}",
+        project.0.join("fake-bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let invalid = project.command_with_env(
+        &["provider", "models", "openai"],
+        &[
+            ("OPENAI_API_KEY", "fixture-secret"),
+            ("PATH", &invalid_path),
+        ],
+    );
+    let invalid_invoked_curl = project.0.join("curl-invoked").exists();
+    let invalid_run = project.command_with_env(&["run", "benchmark.toml"], &env);
+    let invalid_record = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--cassette",
+            "invalid.jsonl",
+        ],
+        &env,
+    );
+    let after_invalid = requests.lock().unwrap().len();
+    let override_url = format!("http://{address}/override/v1");
+    let overridden = project.command_with_env(
+        &["provider", "models", "openai"],
+        &[
+            ("OPENAI_API_KEY", "fixture-secret"),
+            ("OPENAI_BASE_URL", &override_url),
+        ],
+    );
+    let override_env = [
+        ("OPENAI_API_KEY", "fixture-secret"),
+        ("OPENAI_BASE_URL", override_url.as_str()),
+    ];
+    let override_live = project.command_with_env(&["run", "benchmark.toml"], &override_env);
+    let override_record = project.command_with_env(
+        &[
+            "run",
+            "benchmark.toml",
+            "--llm-record",
+            "--cassette",
+            "override.jsonl",
+        ],
+        &override_env,
+    );
+    let env_models_url = format!("http://{address}/env/models");
+    let env_models = project.command_with_env(
+        &["provider", "models", "openai"],
+        &[
+            ("OPENAI_API_KEY", "fixture-secret"),
+            ("OPENAI_BASE_URL", &env_models_url),
+        ],
+    );
+    stop.store(true, Ordering::Relaxed);
+    worker.join().unwrap();
+    expect_success(&models);
+    expect_success(&live);
+    expect_success(&record);
+    expect_success(&plain_live);
+    expect_success(&plain_record);
+    expect_success(&plain_replay);
+    assert_eq!(
+        before_plain_replay, after_plain_replay,
+        "replay must remain offline"
+    );
+    expect_success(&models_base);
+    expect_success(&models_base_record);
+    expect_success(&overridden);
+    expect_success(&override_live);
+    expect_success(&override_record);
+    expect_success(&env_models);
+    assert!(!invalid.status.success());
+    assert!(
+        !invalid_invoked_curl,
+        "invalid file must fail before launching a network client"
+    );
+    assert!(!invalid_run.status.success());
+    assert!(!invalid_record.status.success());
+    assert_eq!(before_invalid, after_invalid);
+    assert!(stderr(&invalid).contains(".api_base_url_openai"));
+    assert!(!stderr(&invalid).contains("fixture-secret"));
+    let seen = requests.lock().unwrap();
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("GET /gateway/v1/models "))
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|r| r.starts_with("POST /gateway/v1/responses "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|r| r.starts_with("POST /plain/responses "))
+            .count(),
+        2
+    );
+    assert!(seen.iter().any(|r| r.starts_with("GET /models/models ")));
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("GET /env/models/models "))
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|r| r.starts_with("POST /models/responses "))
+            .count(),
+        1
+    );
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("GET /override/v1/models "))
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|r| r.starts_with("POST /override/v1/responses "))
+            .count(),
+        2
     );
 }
 

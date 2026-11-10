@@ -157,7 +157,7 @@ fn discover_for_model(
             spec.name
         )));
     }
-    let Some(url) = spec.url_for_model(selected) else {
+    let Some(url) = spec.try_url_for_model(selected)? else {
         if let Some(message) = providers::catalog_url_error(provider) {
             return Err(Error::Input(message.into()));
         }

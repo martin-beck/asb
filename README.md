@@ -695,6 +695,10 @@ request for the configured model. A listed model is not guaranteed to complete
 an agent workload.
 When an environment credential is absent, ASB also checks the bounded local
 file `$HOME/.api_key_<provider>` (for example `$HOME/.api_key_openrouter`).
+For `openai`, when `OPENAI_BASE_URL` is unset, ASB also reads one HTTP(S) base
+URL from `$HOME/.api_base_url_openai` for discovery, agent requests and
+recording. An invalid or unreadable file stops the operation; remove it to use
+the default endpoint. Keep the URL free of credentials, query and fragment.
 For `cli2key`, `asb tool install cli2key` refreshes the local bridge key, and
 `asb provider models cli2key` starts the project-local bridge and discovers its
 available Codex models without requiring `CLI2KEY_API_KEY`.

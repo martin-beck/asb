@@ -126,22 +126,39 @@ impl ModelSpec {
 
     /// Resolve the catalog endpoint for an optionally selected model.
     pub fn url_for_model(self, selected: Option<&str>) -> Option<String> {
+        self.try_url_for_model(selected).ok().flatten()
+    }
+
+    pub(crate) fn try_url_for_model(self, selected: Option<&str>) -> Result<Option<String>, Error> {
         let adapter = adapters::find(self.name);
-        let base = self
+        let environment = self
             .endpoint
             .and_then(std::env::var_os)
-            .map(|value| value.to_string_lossy().into_owned())
-            .or_else(|| match adapter {
-                Some(adapter) => adapter.catalog_base(selected, self.default_url),
-                None => self.default_url.map(str::to_owned),
-            })?;
+            .map(|value| value.to_string_lossy().into_owned());
+        let override_url = if environment.is_none() {
+            match adapter {
+                Some(adapter) => adapter.endpoint_override()?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let override_is_base = override_url.is_some()
+            || (environment.is_some()
+                && adapter.is_some_and(|adapter| adapter.catalog_environment_is_base()));
+        let Some(base) = environment.or(override_url).or_else(|| match adapter {
+            Some(adapter) => adapter.catalog_base(selected, self.default_url),
+            None => self.default_url.map(str::to_owned),
+        }) else {
+            return Ok(None);
+        };
         let base = adapter.map_or(base.clone(), |adapter| adapter.catalog_normalize(base));
         let trimmed = base.trim_end_matches('/');
-        if trimmed.ends_with("/models") || trimmed.ends_with("/tags") {
-            return Some(trimmed.to_owned());
+        if !override_is_base && (trimmed.ends_with("/models") || trimmed.ends_with("/tags")) {
+            return Ok(Some(trimmed.to_owned()));
         }
         let suffix = adapter.map_or("/models", |adapter| adapter.catalog_suffix(trimmed));
-        Some(format!("{trimmed}{suffix}"))
+        Ok(Some(format!("{trimmed}{suffix}")))
     }
 }
 
@@ -408,9 +425,19 @@ fn endpoint_address(
             suffix,
             infer_http,
         } => {
-            let mut base = environment
+            let selected = environment
                 .and_then(std::env::var_os)
-                .map(|v| v.to_string_lossy().into_owned())
+                .map(|v| v.to_string_lossy().into_owned());
+            let override_url = if selected.is_none() {
+                match adapters::find(provider) {
+                    Some(adapter) => adapter.endpoint_override()?,
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let mut base = selected
+                .or(override_url)
                 .unwrap_or_else(|| default.to_owned());
             if infer_http && !base.contains("://") {
                 base = format!("http://{base}");
@@ -432,13 +459,27 @@ fn endpoint_address(
     }
 }
 
-/// The proxy receives /v1/... paths; retain the selected API's path prefix.
+/// The proxy receives /v1/... paths; preserve the actual provider base path.
+pub(crate) struct TapeUpstream {
+    pub url: String,
+    pub strip_proxy_v1: bool,
+}
+
+fn tape_route(provider: &str, base: &str) -> TapeUpstream {
+    let strip_proxy_v1 = adapters::find(provider)
+        .is_some_and(|adapter| adapter.strip_proxy_version_for_recording(base));
+    TapeUpstream {
+        url: strip_api_version(base),
+        strip_proxy_v1,
+    }
+}
+
 pub(crate) fn selected_tape_upstream(
     provider: &str,
     offer: crate::endpoint::Offer,
     bridge: Option<&str>,
-) -> Result<String, crate::Error> {
-    endpoint_address(provider, offer.address, bridge).map(|url| strip_api_version(&url))
+) -> Result<TapeUpstream, crate::Error> {
+    endpoint_address(provider, offer.address, bridge).map(|url| tape_route(provider, &url))
 }
 
 fn read_key_file(path: PathBuf) -> Option<String> {
@@ -557,23 +598,37 @@ pub(crate) fn configure_tape(
 }
 
 /// Resolve a record-mode upstream through provider-owned metadata.
-pub(crate) fn tape_upstream(provider: &str, bridge_base_url: Option<&str>) -> Option<String> {
+pub(crate) fn tape_upstream(
+    provider: &str,
+    bridge_base_url: Option<&str>,
+) -> Result<Option<TapeUpstream>, Error> {
     if spec(provider).bridge_tool.is_some() {
-        return bridge_base_url.map(strip_api_version);
+        return Ok(bridge_base_url.map(|url| tape_route(provider, url)));
     }
-    std::env::var_os("ASB_PROVIDER_BASE_URL")
+    if let Some(adapter) = adapters::find(provider)
+        && let Some(url) = adapter.authoritative_tape_upstream()?
+    {
+        return Ok(Some(tape_route(provider, &url)));
+    }
+    let explicit = std::env::var_os("ASB_PROVIDER_BASE_URL")
         .map(|value| value.to_string_lossy().trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            model_spec(provider).and_then(|spec| spec.url()).map(|url| {
-                ["/api/tags", "/models", "/tags"]
-                    .iter()
-                    .find_map(|suffix| url.strip_suffix(suffix))
-                    .unwrap_or(&url)
-                    .to_owned()
-            })
+        .filter(|value| !value.is_empty());
+    let base = if explicit.is_some() {
+        explicit
+    } else {
+        match model_spec(provider) {
+            Some(spec) => spec.try_url_for_model(None)?,
+            None => None,
+        }
+        .map(|url| {
+            ["/api/tags", "/models", "/tags"]
+                .iter()
+                .find_map(|suffix| url.strip_suffix(suffix))
+                .unwrap_or(&url)
+                .to_owned()
         })
-        .map(|url| strip_api_version(&url))
+    };
+    Ok(base.map(|url| tape_route(provider, &url)))
 }
 
 fn strip_api_version(value: &str) -> String {
@@ -660,12 +715,16 @@ mod tests {
     #[test]
     fn tape_routing_is_owned_by_the_provider_adapter() {
         assert_eq!(
-            tape_upstream("cli2key", Some("http://127.0.0.1:3456/v1")).as_deref(),
-            Some("http://127.0.0.1:3456")
+            tape_upstream("cli2key", Some("http://127.0.0.1:3456/v1"))
+                .unwrap()
+                .map(|route| route.url),
+            Some("http://127.0.0.1:3456".into())
         );
         assert_eq!(
-            tape_upstream("openrouter", None).as_deref(),
-            Some("https://openrouter.ai/api")
+            tape_upstream("openrouter", None)
+                .unwrap()
+                .map(|route| route.url),
+            Some("https://openrouter.ai/api".into())
         );
         let mut command = std::process::Command::new("agent");
         configure_tape(
