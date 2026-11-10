@@ -713,6 +713,7 @@ fn run_loaded(
     let generated_log = config.log_file.clone();
     let concurrency = config.concurrency;
     let result = run_dispatched(config_path, config, options, output, warnings);
+    let direct = configured_log.is_some();
     if let Some(configured_log) = configured_log {
         publish_configured_logs(
             &runtime_anchor,
@@ -721,7 +722,57 @@ fn run_loaded(
             concurrency,
         )?;
     }
-    result
+    if direct {
+        result.map_err(|error| {
+            direct_failure_evidence(error, &runtime_anchor, &generated_log, concurrency)
+        })
+    } else {
+        result
+    }
+}
+
+fn direct_failure_evidence(
+    error: Error,
+    config: &Path,
+    generated: &str,
+    concurrency: usize,
+) -> Error {
+    let mut paths = (1..=concurrency).filter_map(|index| {
+        let path = if concurrency == 1 {
+            generated.to_owned()
+        } else {
+            parallel_path(generated, index)
+        };
+        let path = resolve_log_path(config, &path);
+        path.is_file()
+            .then(|| format!("replica {index}: {}", path.display()))
+    });
+    let shown = paths.by_ref().take(3).collect::<Vec<_>>();
+    let more = paths.next().is_some();
+    let root = resolve_log_path(config, generated);
+    let evidence = if shown.is_empty() {
+        format!(
+            "no run log was produced; inspect result directory {}",
+            root.parent().unwrap_or_else(|| Path::new(".")).display()
+        )
+    } else {
+        format!(
+            "retained run logs: {}{}; inspect result directory {}",
+            shown.join(", "),
+            if more {
+                " (first three existing logs)"
+            } else {
+                ""
+            },
+            root.parent().unwrap_or_else(|| Path::new(".")).display()
+        )
+    };
+    match error {
+        Error::Input(message) => Error::Input(format!("{message}; {evidence}")),
+        Error::Io(message) => Error::Io(format!("{message}; {evidence}")),
+        Error::Run(message) => Error::Run(format!("{message}; {evidence}")),
+        error @ Error::Usage(_) => error,
+    }
 }
 
 /// Keep the explicit configured log as a user-facing append-only view while
@@ -2276,6 +2327,36 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_failure_without_log_reports_directory_and_preserves_error_kind() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let error = super::direct_failure_evidence(
+            crate::Error::Io("failed".into()),
+            &root.join("benchmark.toml"),
+            "run.log",
+            1,
+        );
+        assert!(matches!(error, crate::Error::Io(_)));
+        let message = error.to_string();
+        assert!(message.contains("no run log was produced"));
+        assert!(message.contains(&root.display().to_string()));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 1..=4 {
+            std::fs::write(root.join(super::parallel_path("run.log", index)), "fixture").unwrap();
+        }
+        let message = super::direct_failure_evidence(
+            crate::Error::Run("failed".into()),
+            &root.join("benchmark.toml"),
+            "run.log",
+            4,
+        )
+        .to_string();
+        assert!(message.contains("replica 1:"));
+        assert!(message.contains("replica 3:"));
+        assert!(!message.contains("replica 4:"));
+        assert!(message.contains("first three existing logs"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::{
         ReplaySelection, ReplayToolSelection, RunDisposition, RunOptions, RunResult, RunStatus,
         command_for, isolated_direct_config, render_human, render_json, replica_cassette,

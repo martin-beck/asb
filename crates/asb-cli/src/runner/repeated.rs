@@ -749,6 +749,7 @@ pub(crate) fn execute_with_sweep_settlement(
     let mut completed_batches = 0u64;
     let mut stopped = false;
     let mut first_reason = None;
+    let mut first_failed_batch = None;
     let mut producers_quiescent = true;
     for number in 1..=repeat {
         let identity = BatchIdentity {
@@ -809,7 +810,14 @@ pub(crate) fn execute_with_sweep_settlement(
             sweep_settlement,
             reused: None,
         }
-        .execute(dispatch, output, warnings)?;
+        .execute(dispatch, output, warnings)
+        .map_err(|error| {
+            if options.quiet_output {
+                append_failure_evidence(error, &root, &plan.slots, number)
+            } else {
+                error
+            }
+        })?;
         let execution::SettledBatch {
             prepared,
             failed: batch_failed,
@@ -826,6 +834,7 @@ pub(crate) fn execute_with_sweep_settlement(
         }
         if batch_failed || stopped {
             failures += 1;
+            first_failed_batch.get_or_insert(number);
         }
         if stopped {
             break;
@@ -918,15 +927,62 @@ pub(crate) fn execute_with_sweep_settlement(
             )))
         } else {
             Err(Error::Run(format!(
-                "benchmark execution failed: {}; {} of {total} execution(s) completed; rerun with --verbose for retained evidence paths",
+                "benchmark execution failed: {}; {} of {total} execution(s) completed; {}",
                 first_reason
                     .as_deref()
                     .unwrap_or("incomplete execution evidence"),
                 completed_executions,
+                failure_evidence(&root, &plan.slots, first_failed_batch),
             )))
         }
     } else {
         Ok(())
+    }
+}
+
+fn failure_evidence(root: &Path, slots: &[Slot], batch: Option<u64>) -> String {
+    let plan = root.join("plan.json");
+    let mut logs = slots
+        .iter()
+        .filter(|slot| Some(slot.batch) == batch)
+        .filter_map(|slot| {
+            let path = root.join(&slot.log);
+            path.is_file()
+                .then(|| format!("replica {}: {}", slot.replica, path.display()))
+        });
+    let shown = logs.by_ref().take(3).collect::<Vec<_>>();
+    let more = logs.next().is_some();
+    if shown.is_empty() {
+        format!(
+            "no run log was produced for the first failed batch; inspect campaign plan {}",
+            plan.display()
+        )
+    } else {
+        format!(
+            "first failed batch run logs: {}{}; campaign plan: {}{}",
+            shown.join(", "),
+            if more {
+                " (first three existing logs)"
+            } else {
+                ""
+            },
+            plan.display(),
+            if more {
+                "; inspect the plan and batch directory for remaining replicas"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+fn append_failure_evidence(error: Error, root: &Path, slots: &[Slot], batch: u64) -> Error {
+    let evidence = failure_evidence(root, slots, Some(batch));
+    match error {
+        Error::Input(message) => Error::Input(format!("{message}; {evidence}")),
+        Error::Io(message) => Error::Io(format!("{message}; {evidence}")),
+        Error::Run(message) => Error::Run(format!("{message}; {evidence}")),
+        error @ Error::Usage(_) => error,
     }
 }
 
@@ -1171,6 +1227,36 @@ fn publish_stream_after_link(
 mod tests {
     use super::super::replica::CompletionObserver;
     use super::*;
+
+    #[test]
+    fn failure_evidence_reports_only_existing_logs_from_first_failed_batch() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-evidence-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(root.join("batch-2")).unwrap();
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='pi'\nprovider='local'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=4\n",
+        )
+        .unwrap();
+        let slots = super::super::campaign::planned_slots(&config, 2, false).unwrap();
+        let absent = failure_evidence(&root, &slots, Some(2));
+        assert!(absent.contains("no run log was produced"));
+        assert!(absent.contains("plan.json"));
+        let early = append_failure_evidence(Error::Io("fixture error".into()), &root, &slots, 2);
+        assert!(matches!(early, Error::Io(_)));
+        assert!(early.to_string().contains("no run log was produced"));
+        for slot in slots.iter().filter(|slot| slot.batch == 2) {
+            fs::write(root.join(&slot.log), "fixture").unwrap();
+        }
+        let message = failure_evidence(&root, &slots, Some(2));
+        assert!(message.contains("replica 1:"));
+        assert!(message.contains("replica 3:"));
+        assert!(!message.contains("replica 4:"));
+        assert!(message.contains("remaining replicas"));
+        assert!(!message.contains("batch-1/run"));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn failed_stream_is_never_published() {
