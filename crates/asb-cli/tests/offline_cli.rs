@@ -3495,6 +3495,15 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
         };
         expect_failure(&result, expected);
         assert!(!stderr(&result).contains("fixture-secret"));
+        let error = stderr(&result);
+        let generated = error
+            .split("retained run logs: replica 1: ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(std::path::Path::new(generated).is_file(), "{error}");
         let log: serde_json::Value =
             serde_json::from_slice(&std::fs::read(project.0.join("run.log")).unwrap()).unwrap();
         assert_eq!(log["status"], "failed");
@@ -3521,6 +3530,36 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
             log["task"]["attempt_id"]
         );
         assert_tape_scratch_cleaned(&project);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_repeated_run_reports_retained_log_without_verbose() {
+    let project = replay_project(1);
+    let result = replay(&project, "exit", &["--repeat", "2"]);
+    let error = stderr(&result);
+    expect_failure(&result, "first failed batch run logs:");
+    let log = error
+        .split("replica 1: ")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let plan = error.split("campaign plan: ").nth(1).unwrap().trim();
+    assert!(std::path::Path::new(log).is_file(), "{error}");
+    assert!(std::path::Path::new(plan).is_file(), "{error}");
+    assert!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .contains("agent_failure")
+    );
+    let json_project = replay_project(1);
+    let json_result = replay(&json_project, "exit", &["--repeat", "2", "--json"]);
+    assert!(!json_result.status.success());
+    for line in stdout(&json_result).lines() {
+        serde_json::from_str::<serde_json::Value>(line).expect("structured output remains JSONL");
     }
 }
 
