@@ -50,51 +50,70 @@ fn summary(values: &[f64]) -> Option<Summary> {
     })
 }
 
-fn svg(metric: &str, values: &[(String, f64)]) -> String {
-    let nums = values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
-    let Some(s) = summary(&nums) else {
+type AgentValues = BTreeMap<String, (usize, Vec<(String, f64)>)>;
+
+fn svg_comparison(metric: &str, agents: &AgentValues) -> String {
+    let nums = agents
+        .values()
+        .flat_map(|(_, values)| values.iter().map(|(_, value)| *value))
+        .collect::<Vec<_>>();
+    if nums.is_empty() {
         return String::new();
-    };
+    }
     let min = nums.iter().copied().fold(f64::INFINITY, f64::min);
     let max = nums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let position = |v: f64| {
         if min == max {
-            260.0
+            420.0
         } else {
-            70.0 + domain_fraction(v, min, max) * 380.0
+            190.0 + domain_fraction(v, min, max) * 460.0
         }
     };
-    let spread = ((values.len().saturating_sub(1)) as f64 * 3.2).max(20.0);
-    let center = spread + 15.0;
-    let top = center - 20.0;
-    let bottom = center + 20.0;
-    let whisker_top = center - 14.0;
-    let whisker_bottom = center + 14.0;
-    let axis = center + spread + 16.0;
-    let axis_labels = axis + 17.0;
-    let unit_label = axis + 36.0;
-    let height = axis + 45.0;
+    let bands = agents
+        .values()
+        .map(|(_, values)| ((values.len().saturating_sub(1)) as f64 * 3.2).max(20.0) * 2.0 + 30.0)
+        .collect::<Vec<_>>();
+    let axis = bands.iter().sum::<f64>() + 20.0;
+    let height = axis + 50.0;
     let mut out = format!(
-        "<svg class=\"replica-boxplot\" viewBox=\"0 0 520 {height:.2}\" role=\"img\" aria-label=\"{} distribution, {} observations\"><line x1=\"{:.2}\" y1=\"{center:.2}\" x2=\"{:.2}\" y2=\"{center:.2}\" stroke=\"#274765\" stroke-width=\"2\"/><line x1=\"{:.2}\" y1=\"{whisker_top:.2}\" x2=\"{:.2}\" y2=\"{whisker_bottom:.2}\" stroke=\"#274765\"/><line x1=\"{:.2}\" y1=\"{whisker_top:.2}\" x2=\"{:.2}\" y2=\"{whisker_bottom:.2}\" stroke=\"#274765\"/><rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{:.2}\" height=\"40\" fill=\"#b5d5ed\" stroke=\"#274765\"/><line x1=\"{:.2}\" y1=\"{top:.2}\" x2=\"{:.2}\" y2=\"{bottom:.2}\" stroke=\"#142d42\" stroke-width=\"3\"/>",
-        escape(metric),
-        values.len(),
-        position(s.low),
-        position(s.high),
-        position(s.low),
-        position(s.low),
-        position(s.high),
-        position(s.high),
-        position(s.q1),
-        (position(s.q3) - position(s.q1)).max(0.5),
-        position(s.median),
-        position(s.median)
+        "<svg class=\"replica-boxplot\" viewBox=\"0 0 720 {height:.2}\" role=\"img\" aria-label=\"{} distribution by agent\">",
+        escape(metric)
     );
-    for (i, (label, value)) in values.iter().enumerate() {
-        let y = center + (i as f64 - (values.len() - 1) as f64 / 2.0) * 6.4;
-        out.push_str(&format!("<circle class=\"replica-point\" cx=\"{:.2}\" cy=\"{y:.2}\" r=\"3\" fill=\"#c44d23\" fill-opacity=\"0.8\"><title>{}: {} {}</title></circle>", position(*value), escape(label), value, escape(metric_unit(metric))));
+    let mut y = 15.0;
+    for ((agent, (planned, values)), band) in agents.iter().zip(bands) {
+        let spread = (band - 30.0) / 2.0;
+        let center = y + spread;
+        out.push_str(&format!("<g class=\"agent-distribution\" data-agent=\"{}\"><text x=\"175\" y=\"{center:.2}\" text-anchor=\"end\" font-size=\"13\">{} (n={}/{planned})</text>", escape(agent), escape(agent), values.len()));
+        if let Some(s) = summary(&values.iter().map(|(_, value)| *value).collect::<Vec<_>>()) {
+            let top = center - 20.0;
+            let bottom = center + 20.0;
+            let whisker_top = center - 14.0;
+            let whisker_bottom = center + 14.0;
+            out.push_str(&format!("<line x1=\"{:.2}\" y1=\"{center:.2}\" x2=\"{:.2}\" y2=\"{center:.2}\" stroke=\"#274765\" stroke-width=\"2\"/><line x1=\"{:.2}\" y1=\"{whisker_top:.2}\" x2=\"{:.2}\" y2=\"{whisker_bottom:.2}\" stroke=\"#274765\"/><line x1=\"{:.2}\" y1=\"{whisker_top:.2}\" x2=\"{:.2}\" y2=\"{whisker_bottom:.2}\" stroke=\"#274765\"/><rect class=\"agent-box\" x=\"{:.2}\" y=\"{top:.2}\" width=\"{:.2}\" height=\"40\" fill=\"#b5d5ed\" stroke=\"#274765\"/><line x1=\"{:.2}\" y1=\"{top:.2}\" x2=\"{:.2}\" y2=\"{bottom:.2}\" stroke=\"#142d42\" stroke-width=\"3\"/>", position(s.low), position(s.high), position(s.low), position(s.low), position(s.high), position(s.high), position(s.q1), (position(s.q3)-position(s.q1)).max(0.5), position(s.median), position(s.median)));
+            for (i, (label, value)) in values.iter().enumerate() {
+                let py = center + (i as f64 - (values.len() - 1) as f64 / 2.0) * 6.4;
+                out.push_str(&format!("<circle class=\"replica-point\" cx=\"{:.2}\" cy=\"{py:.2}\" r=\"3\" fill=\"#c44d23\"><title>{}: {} {}</title></circle>",position(*value),escape(label),value,escape(metric_unit(metric))));
+            }
+        } else {
+            out.push_str(&format!(
+                "<text x=\"190\" y=\"{center:.2}\" font-size=\"12\">No measurement</text>"
+            ));
+        }
+        out.push_str("</g>");
+        y += band;
     }
-    out.push_str(&format!("<line x1=\"70\" y1=\"{axis:.2}\" x2=\"450\" y2=\"{axis:.2}\" stroke=\"#274765\"/><text x=\"70\" y=\"{axis_labels:.2}\" font-size=\"11\">{}</text><text x=\"450\" y=\"{axis_labels:.2}\" text-anchor=\"end\" font-size=\"11\">{}</text><text x=\"260\" y=\"{unit_label:.2}\" text-anchor=\"middle\" font-size=\"11\">{}</text></svg>", axis_value(min), axis_value(max), escape(metric_unit(metric))));
+    let labels = axis + 17.0;
+    let unit = axis + 36.0;
+    out.push_str(&format!("<line x1=\"190\" y1=\"{axis:.2}\" x2=\"650\" y2=\"{axis:.2}\" stroke=\"#274765\"/><text x=\"190\" y=\"{labels:.2}\" font-size=\"11\">{}</text><text x=\"650\" y=\"{labels:.2}\" text-anchor=\"end\" font-size=\"11\">{}</text><text x=\"420\" y=\"{unit:.2}\" text-anchor=\"middle\" font-size=\"11\">{}</text></svg>",axis_value(min),axis_value(max),escape(metric_unit(metric))));
     out
+}
+
+#[cfg(test)]
+fn svg(metric: &str, values: &[(String, f64)]) -> String {
+    svg_comparison(
+        metric,
+        &BTreeMap::from([("agent".into(), (values.len(), values.to_vec()))]),
+    )
 }
 
 fn axis_value(value: f64) -> String {
@@ -119,7 +138,6 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
                     .and_then(|selection| selection.dataset.as_ref())
             });
         let key = (
-            &row.agent,
             &row.workload,
             trial_label(row),
             &row.provider,
@@ -130,13 +148,12 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         groups.entry(key).or_default().push(row);
     }
     let mut html = String::from(
-        "<section id=\"replica-distributions\"><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Matching agent, trial, provider, model, dataset and workload module observations are grouped across configurations and batches. Filters show or hide entire distributions and do not recalculate their statistics.</p><nav aria-label=\"Agent and trial distributions\"><ul>",
+        "<section id=\"replica-distributions\"><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Each graph compares agents for the same trial, provider, model, dataset and workload module, across configurations and batches. Filters show or hide agent distributions and do not recalculate their statistics.</p><nav aria-label=\"Trial distributions\"><ul>",
     );
     for (config, group) in groups.values().enumerate() {
         let first = group[0];
         html.push_str(&format!(
-            "<li><a href=\"#distribution-{config}\">{} · {} · {} · {} / {}</a></li>",
-            escape(&first.agent),
+            "<li><a href=\"#distribution-{config}\">{} · {} · {} / {}</a></li>",
             escape(&first.workload),
             escape(trial_label(first)),
             escape(&first.provider),
@@ -146,13 +163,20 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
     html.push_str("</ul></nav></section>");
     for (config, group) in groups.into_values().enumerate() {
         let first = group[0];
-        let mut measurements: BTreeMap<(String, bool), Vec<(String, f64)>> = BTreeMap::new();
+        let mut measurements: BTreeMap<(String, bool), AgentValues> = BTreeMap::new();
+        let mut totals: BTreeMap<String, usize> = BTreeMap::new();
+        for row in &group {
+            *totals.entry(row.agent.clone()).or_default() += 1;
+        }
         for row in &group {
             for (name, value) in &row.metrics {
                 if planning::graphable_metric(name) && value.is_finite() {
                     measurements
                         .entry((name.clone(), false))
                         .or_default()
+                        .entry(row.agent.clone())
+                        .or_default()
+                        .1
                         .push((attempt_label(row), *value));
                 }
             }
@@ -167,6 +191,9 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
                     measurements
                         .entry((name.clone(), true))
                         .or_default()
+                        .entry(row.agent.clone())
+                        .or_default()
+                        .1
                         .push((attempt_label(row), mean));
                 }
             }
@@ -181,12 +208,24 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             .into_iter()
             .collect::<Vec<_>>()
             .join(", ");
-        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.agent), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), concurrencies));
+        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), concurrencies));
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }
-        for ((metric, series), values) in measurements {
-            html.push_str(&format!("<figure class=\"distribution-chart\"><figcaption>{}{} · n={} of {}</figcaption>{}</figure>", escape(&metric), if series { " (per-replica series mean)" } else { "" }, values.len(), group.len(), svg(&metric, &values)));
+        for ((metric, series), mut values) in measurements {
+            for (agent, total) in &totals {
+                values.entry(agent.clone()).or_default().0 = *total;
+            }
+            html.push_str(&format!(
+                "<figure class=\"distribution-chart\"><figcaption>{}{}</figcaption>{}</figure>",
+                escape(&metric),
+                if series {
+                    " (per-replica series mean)"
+                } else {
+                    ""
+                },
+                svg_comparison(&metric, &values)
+            ));
         }
         html.push_str("</div></section>");
     }
@@ -196,6 +235,25 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn same_graph_compares_agents_on_one_scale_with_missing_samples() {
+        let agents = BTreeMap::from([
+            (
+                "opencode".into(),
+                (2, vec![("a".into(), 0.0), ("b".into(), 10.0)]),
+            ),
+            ("pi".into(), (2, vec![("c".into(), 5.0)])),
+            ("workbuddy".into(), (2, vec![])),
+        ]);
+        let graph = svg_comparison("elapsed_ms", &agents);
+        assert_eq!(graph.matches("class=\"agent-box\"").count(), 2);
+        assert_eq!(graph.matches("class=\"replica-point\"").count(), 3);
+        assert!(graph.contains("opencode (n=2/2)"));
+        assert!(graph.contains("pi (n=1/2)"));
+        assert!(graph.contains("workbuddy (n=0/2)"));
+        assert!(graph.contains("cx=\"420.00\""));
+        assert!(graph.contains("No measurement"));
+    }
     #[test]
     fn tukey_whiskers_leave_outliers_as_points() {
         let s = summary(&[1.0, 2.0, 3.0, 4.0, 100.0]).unwrap();

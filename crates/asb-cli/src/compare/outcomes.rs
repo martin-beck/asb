@@ -800,7 +800,7 @@ mod tests {
             fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
         assert!(html.contains("Concurrency distributions"));
         assert!(html.contains("original-task"));
-        assert!(html.contains("success_rate · n=2 of 3"));
+        assert!(html.contains("pi (n=2/3)"));
         assert!(html.contains(": 1 ratio</title>"));
         assert!(html.contains(": 0 ratio</title>"));
         assert!(!html.contains("class=\"bar\""));
@@ -840,7 +840,59 @@ mod tests {
         let html =
             fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
         assert_eq!(html.matches("class=\"distribution-group\"").count(), 1);
-        assert!(html.contains("success_rate · n=4 of 4"));
+        assert!(html.contains("pi (n=4/4)"));
+    }
+
+    #[test]
+    fn report_compares_three_agents_for_one_trial_in_same_graph() {
+        let fixture = Fixture::new("swe-bench", 2);
+        for slot in 1..=2 {
+            fixture.publish(slot, &fixture.record(slot, json!(true), true, true));
+        }
+        let original = fs::read_to_string(fixture.root.join("one.toml")).unwrap();
+        let plan_path = fixture.root.join("sweep-results/plan.json");
+        let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+        for (index, agent) in ["opencode", "workbuddy"].into_iter().enumerate() {
+            let name = format!("agent-{index}.toml");
+            fs::write(
+                fixture.root.join(&name),
+                original.replace("agent='pi'", &format!("agent='{agent}'")),
+            )
+            .unwrap();
+            let mut entry = plan["entries"][0].clone();
+            entry["reference"] = json!(name);
+            entry["configuration"]["agent"] = json!(agent);
+            plan["entries"].as_array_mut().unwrap().push(entry);
+            let completions = fixture.root.join(format!(
+                "sweep-results/{:03}-agent-{index}/.asb-completions",
+                index + 1
+            ));
+            fs::create_dir_all(&completions).unwrap();
+            for slot in 1..=2 {
+                let mut record = fixture.record(slot, json!(true), true, true);
+                record["summary"]["agent"] = json!(agent);
+                record["summary"]["task"]["attempt_id"] = json!(format!("{agent}-{slot}"));
+                record["summary"]["execution_cohort"]["id"] = json!(format!("abc{}", index + 4));
+                fs::write(
+                    completions.join(format!("{slot:03}.json")),
+                    record.to_string(),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(plan_path, plan.to_string()).unwrap();
+        fs::write(
+            fixture.root.join("sweep.toml"),
+            "configs=['one.toml','agent-0.toml','agent-1.toml']\n",
+        )
+        .unwrap();
+        fixture.compare().unwrap();
+        let html =
+            fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
+        assert_eq!(html.matches("class=\"distribution-group\"").count(), 1);
+        assert!(html.contains("opencode (n=2/2)"));
+        assert!(html.contains("pi (n=2/2)"));
+        assert!(html.contains("workbuddy (n=2/2)"));
     }
 
     #[test]

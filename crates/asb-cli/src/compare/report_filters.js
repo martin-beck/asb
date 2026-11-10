@@ -7,6 +7,7 @@ function installReportFilters(document) {
   // absent provider/model/workload controls as empty selections.
   const dimensions = [...new Set(inputs.map(input => input.dataset.group))];
   const rows = [...document.querySelectorAll('#results tr')];
+  const agentByBenchmark = new Map(rows.map(row => [row.dataset.dimensionBenchmark, row.dataset.dimensionAgent]));
   const count = document.querySelector('#filter-count');
   const charts = [...document.querySelectorAll('.interactive-chart')].map(chart => ({
     entries: [...chart.querySelectorAll('svg [data-benchmark]')],
@@ -31,7 +32,12 @@ function installReportFilters(document) {
       graph.hidden = !visible.has(graph.dataset.flamegraphBenchmark);
     }
     for (const group of document.querySelectorAll('.distribution-group')) {
-      group.hidden = !JSON.parse(group.dataset.members).some(label => visible.has(label));
+      const members = JSON.parse(group.dataset.members);
+      const agents = new Set(members.filter(label => visible.has(label)).map(label => agentByBenchmark.get(label)));
+      group.hidden = agents.size === 0;
+      for (const item of group.querySelectorAll('.agent-distribution')) {
+        item.style.display = agents.has(item.dataset.agent) ? '' : 'none';
+      }
     }
     for (const chart of charts) {
       let shown = 0;
