@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 pub(crate) mod operation;
 pub(crate) mod process;
@@ -364,6 +365,13 @@ fn guest_bootstrap_in(
         .ok_or_else(|| Error::Input("selected agent has no installation adapter".into()))?;
     let recipe = adapter.recipe();
     fs::create_dir_all(tools_root).map_err(|error| Error::Io(error.to_string()))?;
+    let needs_primary_asset_lock = matches!(
+        recipe,
+        Recipe::Custom {
+            guest_assets: Some(_),
+            ..
+        }
+    );
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -371,8 +379,28 @@ fn guest_bootstrap_in(
         .write(true)
         .open(tools_root.join(".asb-guest-bootstrap.lock"))
         .map_err(|error| Error::Io(format!("cannot reserve guest bootstrap: {error}")))?;
-    lock.lock()
-        .map_err(|error| Error::Io(format!("cannot lock project bootstrap cache: {error}")))?;
+    // Concurrent replay replicas share this cache.  A blocking flock here
+    // used to leave every later replica without an observable deadline when a
+    // bootstrap owner became wedged before agent dispatch.
+    let deadline = Instant::now() + Duration::from_secs(600);
+    if needs_primary_asset_lock {
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(Error::Io("guest bootstrap cache lock did not become available within 600 seconds; inspect the retained owner attempt before retrying".into()).into());
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(
+                        Error::Io(format!("cannot lock project bootstrap cache: {error}")).into(),
+                    );
+                }
+            }
+        }
+    }
     let mut progress = |_percent: u8, _stage: crate::install::ProgressStage| {};
     let mut plan = GuestBootstrap {
         runtime_tools: recipe.guest_runtimes().to_vec(),
