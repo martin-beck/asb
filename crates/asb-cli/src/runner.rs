@@ -2340,6 +2340,22 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("no run log was produced"));
         assert!(message.contains(&root.display().to_string()));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 1..=4 {
+            std::fs::write(root.join(super::parallel_path("run.log", index)), "fixture").unwrap();
+        }
+        let message = super::direct_failure_evidence(
+            crate::Error::Run("failed".into()),
+            &root.join("benchmark.toml"),
+            "run.log",
+            4,
+        )
+        .to_string();
+        assert!(message.contains("replica 1:"));
+        assert!(message.contains("replica 3:"));
+        assert!(!message.contains("replica 4:"));
+        assert!(message.contains("first three existing logs"));
+        std::fs::remove_dir_all(root).unwrap();
     }
     use super::{
         ReplaySelection, ReplayToolSelection, RunDisposition, RunOptions, RunResult, RunStatus,
