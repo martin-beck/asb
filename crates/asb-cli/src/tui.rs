@@ -419,12 +419,12 @@ impl App {
         concurrency_pane.selected[0] = true;
         let mut runtime_pane = Pane::new(vec![
             Choice {
-                label: "None (portable)".into(),
+                label: "CPU affinity: None (portable)".into(),
                 key: ChoiceKey::RuntimeNone,
                 availability: Availability::Available,
             },
             Choice {
-                label: "CPU pool".into(),
+                label: "CPU affinity: pool".into(),
                 key: ChoiceKey::RuntimeCpuPool,
                 availability: Availability::Available,
             },
@@ -1383,8 +1383,8 @@ fn choice_key_label(key: &ChoiceKey) -> String {
         ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
         ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
         ChoiceKey::Concurrency(value) => value.to_string(),
-        ChoiceKey::RuntimeNone => "None (portable)".into(),
-        ChoiceKey::RuntimeCpuPool => "CPU pool".into(),
+        ChoiceKey::RuntimeNone => "CPU affinity: None (portable)".into(),
+        ChoiceKey::RuntimeCpuPool => "CPU affinity: pool".into(),
         ChoiceKey::AllAgents | ChoiceKey::AllWorkloads | ChoiceKey::AllCollectors => "[all]".into(),
         ChoiceKey::AllCollectorOptions(collector) => format!("{collector}: [all]"),
         ChoiceKey::AllExtension {
@@ -1877,7 +1877,7 @@ fn draw_workload(frame: &mut ratatui::Frame<'_>, app: &WorkloadApp) {
         WorkloadStep::Editing { trials, .. } => trials,
         _ => &app.workloads,
     };
-    render_choice_pane(frame, vertical[2], pane, true);
+    render_choice_pane(frame, vertical[2], pane, true, None);
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![
@@ -2666,7 +2666,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         vertical[1],
     );
     let pane = app.pane(app.step);
-    render_choice_pane(frame, vertical[2], pane, app.step.installable());
+    render_choice_pane(
+        frame,
+        vertical[2],
+        pane,
+        app.step.installable(),
+        (app.step == PaneKind::Runtime).then_some(&app.runtime_wizard),
+    );
     frame.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![
@@ -2751,6 +2757,7 @@ fn render_choice_pane(
     area: ratatui::layout::Rect,
     pane: &Pane,
     show_info: bool,
+    runtime: Option<&crate::runtime::wizard::RuntimeWizard>,
 ) {
     let body = Layout::default()
         .direction(Direction::Vertical)
@@ -2799,7 +2806,26 @@ fn render_choice_pane(
             row.push(Span::raw("  ".to_owned()));
         }
         row.push(Span::raw(choice.label.clone()));
-        items.push(ListItem::new(Line::from(row)).style(choice_row_style(is_selected)));
+        let mut lines = vec![Line::from(row)];
+        if matches!(choice.key, ChoiceKey::RuntimeCpuPool)
+            && let Some(runtime) = runtime
+        {
+            fn value(text: &str) -> &str {
+                if text.is_empty() {
+                    "not configured"
+                } else {
+                    text
+                }
+            }
+            lines.push(Line::from("    CPUs (Ctrl-P):"));
+            lines.push(Line::from(format!("      {}", value(&runtime.cpus))));
+            lines.push(Line::from("    CPUs per instance (Ctrl-G):"));
+            lines.push(Line::from(format!(
+                "      {}",
+                value(&runtime.num_cpus_per_instance)
+            )));
+        }
+        items.push(ListItem::new(Text::from(lines)).style(choice_row_style(is_selected)));
         previous_section = section;
     }
     let mut state = ListState::default();
@@ -3776,7 +3802,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
         let draw = |terminal: &mut Terminal<TestBackend>, pane: &Pane| {
             terminal
-                .draw(|frame| super::render_choice_pane(frame, frame.area(), pane, false))
+                .draw(|frame| super::render_choice_pane(frame, frame.area(), pane, false, None))
                 .unwrap();
             (2..6)
                 .map(|y| {
@@ -3848,7 +3874,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
         let draw = |terminal: &mut Terminal<TestBackend>, pane: &Pane| {
             terminal
-                .draw(|frame| super::render_choice_pane(frame, frame.area(), pane, false))
+                .draw(|frame| super::render_choice_pane(frame, frame.area(), pane, false, None))
                 .unwrap();
         };
         for _ in 0..6 {
@@ -4844,6 +4870,46 @@ mod tests {
     }
 
     #[test]
+    fn runtime_pool_shows_missing_and_edited_values_at_narrow_width() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 14)).unwrap();
+        let draw = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>, app: &App| {
+            terminal
+                .draw(|frame| {
+                    super::render_choice_pane(
+                        frame,
+                        frame.area(),
+                        app.pane(PaneKind::Runtime),
+                        false,
+                        Some(&app.runtime_wizard),
+                    )
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let missing = draw(&mut terminal, &app);
+        assert!(missing.contains("CPU affinity: None (portable)"));
+        assert!(missing.contains("CPUs (Ctrl-P):"));
+        assert!(missing.contains("CPUs per instance (Ctrl-G):"));
+        assert_eq!(missing.matches("not configured").count(), 2);
+        app.runtime_wizard.cpus = "1-3,5-7".into();
+        app.runtime_wizard.num_cpus_per_instance = "3".into();
+        let edited = draw(&mut terminal, &app);
+        assert!(edited.contains("1-3,5-7"));
+        assert!(!edited.contains("not configured"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn runtime_preselection_restores_cpu_pool_without_dropping_it() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
         std::fs::create_dir_all(&root).unwrap();
@@ -4855,6 +4921,32 @@ mod tests {
         assert_eq!(app.runtime_wizard.cpus, "1");
         assert_eq!(app.runtime_wizard.num_cpus_per_instance, "1");
         assert_eq!(app.pane(PaneKind::Runtime).selected, vec![false, true]);
+        for width in [40, 80] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 14)).unwrap();
+            terminal
+                .draw(|frame| {
+                    super::render_choice_pane(
+                        frame,
+                        frame.area(),
+                        app.pane(PaneKind::Runtime),
+                        false,
+                        Some(&app.runtime_wizard),
+                    )
+                })
+                .unwrap();
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("CPU affinity: pool"));
+            assert!(rendered.contains("CPUs (Ctrl-P):"));
+            assert!(rendered.contains("CPUs per instance (Ctrl-G):"));
+            assert!(rendered.contains("1"));
+        }
         assert_eq!(app.runtime_settings().unwrap().cpu_pool.unwrap().cpus, "1");
         app.runtime_wizard.perf_record_scope = crate::runtime::settings::PerfRecordScope::CpuWide;
         app.runtime_wizard.cpu_description =

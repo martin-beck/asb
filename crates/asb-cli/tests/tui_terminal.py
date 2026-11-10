@@ -280,6 +280,10 @@ def main():
             b"pi \tlocal \t \tbug-fix \t\t\x1b[B \t\x1b[B \x10" +
             b"1-3,5-7\r\x073\r\x17\t")
         assert code == 0, transcript[-3000:]
+        assert b"CPU affinity: pool" in transcript
+        assert b"CPUs (Ctrl-P):" in transcript
+        assert b"CPUs per instance (Ctrl-G):" in transcript
+        assert b"not configured" in transcript
         runtime_sweeps = set(root.glob("asb-sweep-*.toml")) - set(sweep_files)
         assert len(runtime_sweeps) == 1, transcript[-3000:]
         runtime_manifest = tomllib.loads(runtime_sweeps.pop().read_text())
