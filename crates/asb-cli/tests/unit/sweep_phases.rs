@@ -174,6 +174,11 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     std::fs::create_dir_all(&root).unwrap();
     let fixture = Fixture(root.canonicalize().unwrap());
     let root = &fixture.0;
+    // Each case runs in its own libtest subprocess.  Keep project discovery
+    // inside that owned fixture: otherwise an ancestor project's mutable
+    // `.asb` state becomes an input-seal root and unrelated tests can make a
+    // continuation fixture fail spuriously.
+    std::env::set_current_dir(root).unwrap();
     std::fs::create_dir(root.join(".asb")).unwrap();
     let project = crate::project::ProjectConfig {
         tools_dir: "tools".into(),
@@ -186,6 +191,15 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         toml::to_string(&project).unwrap(),
     )
     .unwrap();
+    let python = crate::tools::host_executable(Path::new("python3.12")).unwrap();
+    assert!(
+        Command::new(python)
+            .args(["-m", "venv", "--without-pip"])
+            .arg(root.join(".asb/python/venv"))
+            .status()
+            .unwrap()
+            .success()
+    );
     std::fs::create_dir(root.join("workloads")).unwrap();
     crate::workloads::populate(&root.join("workloads")).unwrap();
     let node = crate::tools::host_executable(Path::new("node")).unwrap();
