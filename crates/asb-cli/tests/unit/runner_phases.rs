@@ -2343,6 +2343,14 @@ fn full_entry_child(case: &str) {
     let termination_case = case.starts_with("termination-");
     let fixture = Fixture::new();
     let root = fixture.0.canonicalize().unwrap();
+    if phase_continuation {
+        // Project discovery happens while installing the fixture's owned
+        // runtime dependencies. Bind the child to its fixture before that
+        // work starts: changing directory only immediately before the sweep
+        // is too late because a parent project's cached configuration may
+        // already have been selected as a declared input.
+        std::env::set_current_dir(&root).unwrap();
+    }
     let project = project::ProjectConfig {
         tools_dir: "tools".into(),
         workloads_dir: "workloads".into(),
@@ -2655,12 +2663,6 @@ fn full_entry_child(case: &str) {
         lifetime: case.contains("owner-lifetime").then(|| calls.clone()),
     };
     if phase_case && (case.contains("-repeat-") || case.contains("-sweep-")) {
-        // This test is already in its own libtest subprocess.  Sweep input
-        // discovery is deliberately relative to the invocation directory;
-        // without this, an ancestor project's mutable `.asb` state is sealed
-        // instead of this fixture's project and unrelated test activity makes
-        // the continuation evidence appear to change.
-        std::env::set_current_dir(&root).unwrap();
         std::mem::forget(fixture);
         check_phase_continuation(
             case,
@@ -3605,6 +3607,22 @@ fn check_phase_continuation(
             results.join(".checkpoint/completed/000000.json").is_file(),
             "sweep continuation evidence: {}",
             String::from_utf8_lossy(output.observed_bytes())
+        );
+        let inputs: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(results.join(".checkpoint/inputs.json")).unwrap(),
+        )
+        .unwrap();
+        let project_root = inputs["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "project-0-configuration")
+            .and_then(|entry| entry["path"].as_str())
+            .unwrap();
+        assert_eq!(
+            project_root,
+            root.join(".asb/project.toml").to_str().unwrap(),
+            "continuation must seal the fixture project rather than an ancestor project"
         );
         let mut reused_output = Vec::new();
         let historical_failure = crate::sweep::run_with_options(
