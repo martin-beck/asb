@@ -470,11 +470,12 @@ selected data show an empty-state message. Axes retain their original scale
 for stable comparisons; downloadable SVGs retain the complete unfiltered data.
 
 When a configuration has concurrent replicas, the HTML groups matching runs by
-agent, trial, provider, model, dataset and workload module. Each numeric metric has a box plot with median,
+trial, provider, model, dataset and workload module. Each metric chart compares
+the agents on one scale, with a box plot for each agent showing the median,
 quartiles, Tukey whiskers and one point per available replica. Counts disclose
 missing values. Series charts use one mean of the available samples per replica;
 the complete timestamped series remain in `comparison.json`. Filters show or
-hide whole distributions without recalculating their statistics.
+hide agent distributions without recalculating their statistics.
 Original per-run SVGs remain available as linked analysis artifacts.
 
 Add `--parquet` to export `observations.parquet` alongside the report. It contains
