@@ -4,6 +4,10 @@ Measured attempts publish `bottlenecks.json` through the offline
 `measurements::analysis` engine after collector settlement. Its typed component
 observations distinguish elapsed wall time from accumulated thread time,
 preserve accounting scope/source, and mark missing/invalid values unavailable.
+Validated collector self-observations are published separately from workload
+findings: a kernel-pressure report retains sampler cost, cadence quality and
+its exact agent-tree or owned-container scope without claiming that timing is
+total ASB overhead or a workload bottleneck.
 Stateless registered rules report observed scheduler waiting, block-I/O delay
 and system CPU symptoms without inferring a cause or critical-path duration.
 The additive artifact leaves existing component metrics and grades unchanged.
