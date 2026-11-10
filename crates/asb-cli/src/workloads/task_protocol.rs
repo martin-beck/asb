@@ -68,6 +68,10 @@ pub(super) struct AgentRequest<'a> {
     pub project_root: &'a Path,
     pub preparation_seconds: Option<f64>,
     pub timeout: f64,
+    /// Upper bound for a quiet controller after this agent finishes.  A sweep
+    /// settlement barrier may legitimately delay capture and grading until
+    /// slower selected peers complete execution.
+    pub idle_timeout_seconds: u64,
     pub tools_root: &'a Path,
     pub bootstrap: &'a crate::install::GuestBootstrap,
     pub measure_target: bool,

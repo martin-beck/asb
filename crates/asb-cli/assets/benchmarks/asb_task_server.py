@@ -18,6 +18,7 @@ from asb_execution import ExecutionError
 
 MAX_REQUEST = 1024 * 1024
 DEFAULT_IDLE_TIMEOUT = 900
+MAX_IDLE_TIMEOUT = 4 * 60 * 60
 ATTACHMENT_TIMEOUT = 60
 REQUEST_POLL_INTERVAL = 0.05
 REQUEST_QUEUE_TIMEOUT = 1
@@ -48,6 +49,16 @@ class Event(str, Enum):
     CLOSED = "closed"
     INITIAL_MATERIAL = "initial-material"
     PREPARATION_FAILED = "preparation_failed"
+
+
+def idle_timeout_seconds(request, fallback):
+    """Validate the controller's bounded post-agent cohort wait window."""
+    value = request.get("idle_timeout_seconds", fallback)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ExecutionError("workload controller supplied an invalid idle timeout")
+    if value < fallback or value > MAX_IDLE_TIMEOUT:
+        raise ExecutionError("workload controller supplied an out-of-range idle timeout")
+    return value
 
 
 def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
@@ -133,6 +144,12 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
                         raise ExecutionError("unknown task protocol operation") from None
                     if operation in [Operation.EXECUTE, Operation.AGENT]:
                         if operation == Operation.AGENT:
+                            # Once an agent has completed, the owning ASB
+                            # cohort may deliberately defer capture/grading
+                            # until every selected peer has settled execution.
+                            # Retain this task only for the explicitly bounded
+                            # preparation-plus-execution window it supplied.
+                            idle_timeout = idle_timeout_seconds(request, idle_timeout)
                             from asb_guest import execute_agent, PreparationBudget
                             seconds = request.get("preparation_seconds")
                             budget = PreparationBudget(seconds) if seconds is not None else None
