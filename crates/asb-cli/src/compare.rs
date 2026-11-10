@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 mod coverage;
+mod distributions;
 mod metric_identity;
 use metric_identity::{GraphNames, flatten_numbers, insert_unique, path_key};
 mod analysis;
@@ -488,6 +489,7 @@ fn collect_artifacts(path: &Path, depth: usize, output: &mut Vec<PathBuf>) {
 fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Error> {
     let benchmarks = &prepared.data.rows;
     let graphs = prepared.graph_names();
+    let aggregate = benchmarks.iter().any(|row| row.configured_concurrency > 1);
     let selection_mode = prepared
         .data
         .request
@@ -525,6 +527,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str(&format!("<p class=\"scheduling\">Sweep scheduling: up to {} distinct configurations; {} active attempt slots, including replicas. Concurrent tasks share host resources.</p>", scheduling.jobs, scheduling.max_active_attempts));
     }
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB BENCHMARK REPORT</p><h1>Benchmark comparison</h1><p>Explore recorded benchmark results and measurements. Use the filters to focus the report without rerunning anything.</p></header>");
+    if aggregate {
+        html.push_str("<section><a href=\"#replica-distributions\">Jump to concurrency distributions by agent and trial</a></section>");
+    }
     html.push_str(&analysis::cohort_html(&prepared.cohort_analysis));
     html.push_str("<section class=\"explain\"><strong>Agent aggregate reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>.</p></section>");
     if let Some(intent) = prepared
@@ -555,12 +560,14 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str("</fieldset>");
     }
     html.push_str("</div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
-    html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar to keep it visually marked while comparing results.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
-    for graph in &graphs {
-        let label = graph.strip_suffix(".svg").unwrap_or(graph);
-        html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(label), escape(graph)));
+    if !aggregate {
+        html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar to keep it visually marked while comparing results.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
+        for graph in &graphs {
+            let label = graph.strip_suffix(".svg").unwrap_or(graph);
+            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(label), escape(graph)));
+        }
+        html.push_str("</tbody></table></div></section>");
     }
-    html.push_str("</tbody></table></div></section>");
     html.push_str("<section><div class=\"section-title\"><h2>Benchmark results</h2><a class=\"text-link\" href=\"comparison.json\">Download comparison.json</a></div><div class=\"table-wrap\"><table><thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Workload</th><th>Trial</th><th>Attempt</th><th>Runtime</th><th>Success</th><th>Tokens</th><th>Details</th></tr></thead><tbody id=\"results\">");
     for benchmark in benchmarks {
         let runtime = benchmark
@@ -799,33 +806,50 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             ));
     }
     html.push_str("</tbody></table></div></section>");
-    let mut sections = std::collections::BTreeMap::<(&str, &str), Vec<&String>>::new();
-    for graph in &graphs {
-        if let Some(section) = analysis::graph_section(graph) {
-            sections
-                .entry((section.title, section.description))
-                .or_default()
-                .push(graph);
+    if aggregate {
+        html.push_str(&distributions::html(benchmarks));
+        html.push_str("<section><h2>Other analysis artifacts</h2><p>Original per-run charts and cohort analyses remain available as files.</p><a href=\"cohort-analysis.json\">Cohort analysis data</a><ul>");
+        for graph in &graphs {
+            let label =
+                analysis::graph_section(graph).map_or(graph.as_str(), |section| section.title);
+            html.push_str(&format!(
+                "<li><a href=\"{}\">{} ({})</a></li>",
+                escape(graph),
+                escape(label),
+                escape(graph)
+            ));
         }
-    }
-    for ((title, description), section_graphs) in sections {
-        html.push_str(&format!("<section><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">{}</p></div><div class=\"charts\">", escape(title), escape(description)));
-        for graph in section_graphs {
+        html.push_str("</ul></section>");
+    } else {
+        let mut sections = std::collections::BTreeMap::<(&str, &str), Vec<&String>>::new();
+        for graph in &graphs {
+            if let Some(section) = analysis::graph_section(graph) {
+                sections
+                    .entry((section.title, section.description))
+                    .or_default()
+                    .push(graph);
+            }
+        }
+        for ((title, description), section_graphs) in sections {
+            html.push_str(&format!("<section><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">{}</p></div><div class=\"charts\">", escape(title), escape(description)));
+            for graph in section_graphs {
+                html.push_str(&chart_figure(stage, graph)?);
+            }
+            html.push_str("</div></section>");
+        }
+        html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div><div class=\"charts\">");
+        for graph in graphs
+            .iter()
+            .filter(|graph| analysis::graph_section(graph).is_none())
+        {
             html.push_str(&chart_figure(stage, graph)?);
+        }
+        for benchmark in benchmarks {
+            html.push_str(&flamegraph_figure(benchmark, &prepared.data.previews));
         }
         html.push_str("</div></section>");
     }
-    html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div><div class=\"charts\">");
-    for graph in graphs
-        .iter()
-        .filter(|graph| analysis::graph_section(graph).is_none())
-    {
-        html.push_str(&chart_figure(stage, graph)?);
-    }
-    for benchmark in benchmarks {
-        html.push_str(&flamegraph_figure(benchmark, &prepared.data.previews));
-    }
-    html.push_str("</div></section><footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
+    html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
     html.push_str(INTERACTIVE_SCRIPT);
     html.push_str(HTML_SCRIPT);
     fs::write(stage.join("report.html"), html)
@@ -941,7 +965,7 @@ const MODAL_STYLE: &str = r#"body.chart-open{overflow:hidden}.chart-backdrop{dis
 
 const INLINE_SVG_STYLE: &str = r#".embedded-svg{display:block;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;margin:8px 0}.embedded-svg svg{display:block;width:100%;height:auto}.embedded-svg.perfetto-metric{width:min(760px,100%);max-height:260px}.embedded-svg.bpftrace-profile{width:min(760px,100%);max-height:300px}.embedded-svg.flamegraph{width:100%;max-height:520px}.embedded-svg.flamegraph svg{min-width:900px}"#;
 
-const JSON_DETAILS_STYLE: &str = ".json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.flamegraph-chart{grid-column:1/-1;min-width:0}.flamegraph-chart[hidden]{display:none}.flamegraph-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.flamegraph-toolbar strong{flex:1;overflow-wrap:anywhere}.flamegraph-chart iframe{display:block;width:100%;height:500px;border:1px solid var(--line);margin:8px 0}.flamegraph-chart.expanded{position:fixed;z-index:40;inset:5vh 5vw;width:90vw;height:90vh;overflow:auto;box-shadow:0 0 0 100vmax #081522c9;background:white}.flamegraph-chart.expanded iframe{height:calc(100% - 100px);min-height:180px}";
+const JSON_DETAILS_STYLE: &str = ".distribution-group .charts{grid-template-columns:repeat(auto-fit,minmax(min(100%,500px),1fr))}.replica-boxplot{display:block;width:100%;height:auto}.json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.flamegraph-chart{grid-column:1/-1;min-width:0}.flamegraph-chart[hidden]{display:none}.flamegraph-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.flamegraph-toolbar strong{flex:1;overflow-wrap:anywhere}.flamegraph-chart iframe{display:block;width:100%;height:500px;border:1px solid var(--line);margin:8px 0}.flamegraph-chart.expanded{position:fixed;z-index:40;inset:5vh 5vw;width:90vw;height:90vh;overflow:auto;box-shadow:0 0 0 100vmax #081522c9;background:white}.flamegraph-chart.expanded iframe{height:calc(100% - 100px);min-height:180px}";
 
 const INTERACTIVE_SCRIPT: &str = concat!(
     "<script>\n",

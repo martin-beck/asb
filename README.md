@@ -199,8 +199,8 @@ Select `agent-memory` and `agent-workers` in the setup wizard's measurement
 pane, or add them to `measurements.collectors`. Linux needs no extra tool or
 privilege for these collectors. For an existing configuration, enable them with
 `ASB_MEASURE_AGENT_MEMORY=1 ASB_MEASURE_AGENT_WORKERS=1 asb run CONFIG --measurements DIR`.
-Then `asb compare SWEEP.toml` writes one all-agent bar-chart SVG per metric and
-embeds those charts in `report.html`.
+Then `asb compare SWEEP.toml` writes one all-agent bar-chart SVG per metric.
+For concurrent configurations the HTML instead shows replica distributions.
 
 Memory is the sampled peak aggregate resident memory (RSS, MiB) of processes
 running the selected agent executable or script entry point. It is **not**
@@ -468,6 +468,14 @@ The same filters hide/show graph bars, complete time-series and their legends,
 and execution-composition rows, including labels and values. Graphs with no
 selected data show an empty-state message. Axes retain their original scale
 for stable comparisons; downloadable SVGs retain the complete unfiltered data.
+
+When a configuration has concurrent replicas, the HTML groups matching runs by
+agent, trial, provider, model, dataset and workload module. Each numeric metric has a box plot with median,
+quartiles, Tukey whiskers and one point per available replica. Counts disclose
+missing values. Series charts use one mean of the available samples per replica;
+the complete timestamped series remain in `comparison.json`. Filters show or
+hide whole distributions without recalculating their statistics.
+Original per-run SVGs remain available as linked analysis artifacts.
 
 Add `--parquet` to export `observations.parquet` alongside the report. It contains
 long-form measurements, full retained series, regenerated diagnostics, exact

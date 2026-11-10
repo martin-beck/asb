@@ -30,6 +30,9 @@ function installReportFilters(document) {
     for (const graph of document.querySelectorAll('[data-flamegraph-benchmark]')) {
       graph.hidden = !visible.has(graph.dataset.flamegraphBenchmark);
     }
+    for (const group of document.querySelectorAll('.distribution-group')) {
+      group.hidden = !JSON.parse(group.dataset.members).some(label => visible.has(label));
+    }
     for (const chart of charts) {
       let shown = 0;
       for (const entry of chart.entries) {
