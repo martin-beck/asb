@@ -63,6 +63,19 @@ def prepared_baseline_labels(source_image, task_id, base_commit, material_sha256
     return tag, labels
 
 
+def verified_replay_material(source, expected_material):
+    """Return the cassette-bound material only after offline cache authentication."""
+    if expected_material is None:
+        return None
+    if (not isinstance(source, dict)
+            or source.get("source") != "verified-local-material-cache"
+            or source.get("cache_material_sha256") != expected_material
+            or not isinstance(expected_material, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_material)):
+        raise CatalogError("offline replay did not resolve the expected verified material identity")
+    return expected_material
+
+
 def _validated_prepared_baseline(image, source_image, task_id, base_commit, material_sha256=None):
     tag, expected = prepared_baseline_labels(source_image, task_id, base_commit, material_sha256)
     attrs = getattr(image, "attrs", {})
@@ -232,6 +245,7 @@ class SweBenchTask:
         self.source_image_tag = None
         self.material_source_image = None
         self.material_source_image_id = None
+        self.verified_replay_material = None
         self.journal = None
 
     def submission_git_dir(self):
@@ -259,12 +273,9 @@ class SweBenchTask:
             if self.snapshot:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
             base = self.row["base_commit"]
-            material_identity = None
-            if self.tool_mode == "replay" and expected_material is not None:
-                material_identity = source.get("cache_material_sha256")
-                if (source.get("source") != "verified-local-material-cache"
-                        or material_identity != expected_material):
-                    raise CatalogError("offline replay did not resolve the expected verified material identity")
+            material_identity = (verified_replay_material(source, expected_material)
+                                 if self.tool_mode == "replay" else None)
+            self.verified_replay_material = material_identity
             cache_tag, _cache_labels = prepared_baseline_labels(
                 image, self.task_id, base, material_identity)
             cache_lock = (prepared_baseline_lock(self.catalog_path, cache_tag, self.cancelled)
@@ -442,6 +453,14 @@ class SweBenchTask:
         from asb_material import canonical_digest
         if self.invocation is None:
             raise ExecutionError("official task must be prepared before material capture")
+        if self.verified_replay_material is not None:
+            # __enter__ already proved this writable workspace is clean at the
+            # official base commit. The offline source tag and the prepared
+            # baseline label are both bound to this cassette material, so
+            # repeating full Git/reflog scans once per concurrent replica adds
+            # no new identity coverage and can dominate ARM setup time.
+            return {"schema_version": 1, "scope": "prepared-workload-material-v1",
+                    "sha256": self.verified_replay_material}
         deadline = time.monotonic() + 420
         def checked(arguments, limit=256*1024):
             if time.monotonic() >= deadline or (self.cancelled is not None and self.cancelled.is_set()):

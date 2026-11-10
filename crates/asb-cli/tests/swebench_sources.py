@@ -146,8 +146,9 @@ class SourceContracts(unittest.TestCase):
                 load_prepared_baseline(client, source, task, base)
 
     def test_prepared_baseline_cache_reuses_verified_material_across_daemon_image_ids(self):
-        from asb_swebench_task import (load_prepared_baseline, prepared_baseline_cache_tag,
-                                       prepared_baseline_labels, retain_prepared_baseline)
+        from asb_swebench_task import (SweBenchTask, load_prepared_baseline,
+                                       prepared_baseline_cache_tag, prepared_baseline_labels,
+                                       retain_prepared_baseline, verified_replay_material)
         from asb_execution import ExecutionError
         class ImageNotFound(Exception): pass
         docker, errors = ModuleType('docker'), ModuleType('docker.errors')
@@ -168,6 +169,18 @@ class SourceContracts(unittest.TestCase):
         self.assertEqual(labels['asb.cache'], 'swebench-prepared-baseline-v2')
         self.assertEqual(labels['asb.material-sha256'], material)
         self.assertNotIn('asb.source-image', labels)
+        source_receipt = {'source':'verified-local-material-cache',
+                          'cache_material_sha256':material}
+        self.assertEqual(verified_replay_material(source_receipt, material), material)
+        self.assertIsNone(verified_replay_material(source_receipt, None))
+        with self.assertRaisesRegex(sources.CatalogError, 'expected verified material identity'):
+            verified_replay_material(source_receipt, 'C' * 64)
+        with self.assertRaisesRegex(sources.CatalogError, 'expected verified material identity'):
+            verified_replay_material({'source':'untrusted'}, material)
+        task_instance = object.__new__(SweBenchTask)
+        task_instance.invocation = {'already':'verified'}
+        task_instance.verified_replay_material = material
+        self.assertEqual(task_instance.initial_material()['sha256'], material)
         images = {}
         def get(name):
             if name not in images:
