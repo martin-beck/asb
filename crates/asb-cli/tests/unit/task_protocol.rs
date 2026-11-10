@@ -487,7 +487,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             "-S",
             "-B",
             "-c",
-            "import json,sys;sys.path.insert(0,sys.argv[1]);from asb_execution import ExecutionError;from asb_task_server import idle_timeout_seconds; cases=[]\nfor request in ({'idle_timeout_seconds':11040},{'idle_timeout_seconds':899},{'idle_timeout_seconds':14401},{'idle_timeout_seconds':True}):\n try: cases.append(idle_timeout_seconds(request,900))\n except ExecutionError: cases.append('rejected')\nprint(json.dumps(cases))",
+            "import json,sys;sys.path.insert(0,sys.argv[1]);from asb_execution import ExecutionError;from asb_task_server import idle_timeout_seconds; cases=[]\nfor request in ({'idle_timeout_seconds':43440},{'idle_timeout_seconds':899},{'idle_timeout_seconds':43501},{'idle_timeout_seconds':True}):\n try: cases.append(idle_timeout_seconds(request,900))\n except ExecutionError: cases.append('rejected')\nprint(json.dumps(cases))",
         ])
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/benchmarks"))
         .output()
@@ -499,7 +499,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
     );
     assert_eq!(
         serde_json::from_slice::<Value>(&idle_timeout.stdout).unwrap(),
-        json!([11040, "rejected", "rejected", "rejected"])
+        json!([43440, "rejected", "rejected", "rejected"])
     );
     for name in events {
         let value = json!({"event":name});

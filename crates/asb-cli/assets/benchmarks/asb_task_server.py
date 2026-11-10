@@ -18,7 +18,9 @@ from asb_execution import ExecutionError
 
 MAX_REQUEST = 1024 * 1024
 DEFAULT_IDLE_TIMEOUT = 900
-MAX_IDLE_TIMEOUT = 4 * 60 * 60
+# Covers the documented 10-hour execution budget, the largest official
+# environment-preparation default (2h2m), and the bounded cohort allowance.
+MAX_IDLE_TIMEOUT = 12 * 60 * 60 + 5 * 60
 ATTACHMENT_TIMEOUT = 60
 REQUEST_POLL_INTERVAL = 0.05
 REQUEST_QUEUE_TIMEOUT = 1
