@@ -469,12 +469,12 @@ and execution-composition rows, including labels and values. Graphs with no
 selected data show an empty-state message. Axes retain their original scale
 for stable comparisons; downloadable SVGs retain the complete unfiltered data.
 
-When a configuration has concurrent replicas, the HTML groups charts by
-configuration, agent and trial. Each numeric metric has a box plot with median,
+When a configuration has concurrent replicas, the HTML groups matching runs by
+agent, trial, provider, model, dataset and workload module. Each numeric metric has a box plot with median,
 quartiles, Tukey whiskers and one point per available replica. Counts disclose
 missing values. Series charts use one mean of the available samples per replica;
 the complete timestamped series remain in `comparison.json`. Filters show or
-hide whole configuration distributions without recalculating their statistics.
+hide whole distributions without recalculating their statistics.
 Original per-run SVGs remain available as linked analysis artifacts.
 
 Add `--parquet` to export `observations.parquet` alongside the report. It contains

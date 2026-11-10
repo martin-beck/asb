@@ -807,6 +807,43 @@ mod tests {
     }
 
     #[test]
+    fn matching_trial_and_agent_are_aggregated_across_configurations() {
+        let fixture = Fixture::new("swe-bench", 2);
+        for slot in 1..=2 {
+            fixture.publish(slot, &fixture.record(slot, json!(true), true, true));
+        }
+        fs::copy(fixture.root.join("one.toml"), fixture.root.join("two.toml")).unwrap();
+        fs::write(
+            fixture.root.join("sweep.toml"),
+            "configs=['one.toml','two.toml']\n",
+        )
+        .unwrap();
+        let plan_path = fixture.root.join("sweep-results/plan.json");
+        let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+        let mut second = plan["entries"][0].clone();
+        second["reference"] = json!("two.toml");
+        plan["entries"].as_array_mut().unwrap().push(second);
+        fs::write(plan_path, plan.to_string()).unwrap();
+        let completions = fixture.root.join("sweep-results/001-two/.asb-completions");
+        fs::create_dir_all(&completions).unwrap();
+        for slot in 1..=2 {
+            let mut record = fixture.record(slot, json!(true), true, true);
+            record["summary"]["task"]["attempt_id"] = json!(format!("ab124-{slot}"));
+            record["summary"]["execution_cohort"]["id"] = json!("ab124");
+            fs::write(
+                completions.join(format!("{slot:03}.json")),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+        fixture.compare().unwrap();
+        let html =
+            fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
+        assert_eq!(html.matches("class=\"distribution-group\"").count(), 1);
+        assert!(html.contains("success_rate · n=4 of 4"));
+    }
+
+    #[test]
     fn pi_native_consumption_evidence_is_reported_without_inventing_coverage() {
         let fixture = Fixture::new("swe-bench", 2);
         let mut observed = fixture.record(1, json!(true), true, true);

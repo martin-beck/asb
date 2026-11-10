@@ -105,16 +105,34 @@ fn axis_value(value: f64) -> String {
     }
 }
 
-/// Configuration identity keeps separate trials, providers, models and repeated configurations apart.
+/// Group matching trial and agent observations, preserving provider, model and dataset identity.
 pub(super) fn html(rows: &[BenchmarkData]) -> String {
-    let mut groups: BTreeMap<usize, Vec<&BenchmarkData>> = BTreeMap::new();
+    let mut groups: BTreeMap<_, Vec<&BenchmarkData>> = BTreeMap::new();
     for row in rows {
-        groups.entry(row.id.configuration).or_default().push(row);
+        let dataset = row
+            .task
+            .as_ref()
+            .and_then(|task| task.dataset.as_ref())
+            .or_else(|| {
+                row.selection
+                    .as_ref()
+                    .and_then(|selection| selection.dataset.as_ref())
+            });
+        let key = (
+            &row.agent,
+            &row.workload,
+            trial_label(row),
+            &row.provider,
+            &row.model,
+            serde_json::to_string(&dataset).expect("dataset identity serializes"),
+            serde_json::to_string(&row.module).expect("module identity serializes"),
+        );
+        groups.entry(key).or_default().push(row);
     }
     let mut html = String::from(
-        "<section id=\"replica-distributions\"><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Batches within a configuration are included together; separate configurations are not mixed. Filters show or hide entire configuration distributions and do not recalculate their statistics.</p><nav aria-label=\"Agent and trial distributions\"><ul>",
+        "<section id=\"replica-distributions\"><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Matching agent, trial, provider, model, dataset and workload module observations are grouped across configurations and batches. Filters show or hide entire distributions and do not recalculate their statistics.</p><nav aria-label=\"Agent and trial distributions\"><ul>",
     );
-    for (config, group) in &groups {
+    for (config, group) in groups.values().enumerate() {
         let first = group[0];
         html.push_str(&format!(
             "<li><a href=\"#distribution-{config}\">{} · {} · {} · {} / {}</a></li>",
@@ -126,7 +144,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         ));
     }
     html.push_str("</ul></nav></section>");
-    for (config, group) in groups {
+    for (config, group) in groups.into_values().enumerate() {
         let first = group[0];
         let mut measurements: BTreeMap<(String, bool), Vec<(String, f64)>> = BTreeMap::new();
         for row in &group {
@@ -156,7 +174,14 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         let members =
             serde_json::to_string(&group.iter().map(|row| &row.label).collect::<Vec<_>>())
                 .expect("labels serialize");
-        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\" data-configuration=\"{config}\"><h2>{} · {} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.agent), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), first.configured_concurrency));
+        let concurrencies = group
+            .iter()
+            .map(|row| row.configured_concurrency.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.agent), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), concurrencies));
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }
