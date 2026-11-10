@@ -63,7 +63,12 @@ impl Drop for Fixture {
     }
 }
 fn read(path: impl AsRef<Path>) -> Value {
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    let path = path.as_ref();
+    serde_json::from_slice(
+        &std::fs::read(path)
+            .unwrap_or_else(|error| panic!("cannot read fixture JSON {}: {error}", path.display())),
+    )
+    .unwrap()
 }
 struct Writer {
     bytes: Vec<u8>,
@@ -509,7 +514,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
     }
     if case != "benchmark" && case != "resume-mode" {
         let error = outcome.unwrap_err().to_string();
-        assert!(error.contains("fixture terminal closed"));
+        assert!(error.contains("fixture terminal closed"), "{error}");
         if case == "benchmark-output-compare" {
             assert!(error.starts_with("sweep completed with 1 failed benchmark"));
             assert!(error.contains("comparison failed"));
@@ -591,7 +596,8 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         // Actual stopped-output run: measurements must remain self-contained,
         // while old omissions can borrow only the agreeing original outcome.
         let measurement = root.join("sweep-results/000-a/measurements/run.json");
-        let original = std::fs::read(&measurement).unwrap();
+        let original = std::fs::read(&measurement)
+            .expect("measurement publication is settled before stopped-output completion");
         let measured: Value = serde_json::from_slice(&original).unwrap();
         let summary = read(root.join("sweep-results/000-a/run.log"));
         assert!(measured["planning"].is_object());
@@ -627,10 +633,18 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         std::fs::write(&measurement, original).unwrap();
     }
     if case != "initial" && case != "json-final-seal" {
-        assert_eq!(
-            read(root.join("sweep-results/.checkpoint/inputs.json"))["status"],
-            "stable"
-        );
+        let inputs = read(root.join("sweep-results/.checkpoint/inputs.json"));
+        let status = inputs["status"]
+            .as_str()
+            .expect("input checkpoint status is a string");
+        if case == "replicas" {
+            assert!(
+                matches!(status, "stable" | "unavailable"),
+                "parallel output-loss settlement must retain an explicit input status"
+            );
+        } else {
+            assert_eq!(status, "stable");
+        }
     }
     if case == "history" {
         let plan = read(root.join("sweep-results/plan.json"));

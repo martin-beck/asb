@@ -207,6 +207,7 @@ impl<'a> PreparedSweep<'a> {
         let mut prepared_execution = BTreeSet::new();
         let mut prepared_workloads = BTreeSet::new();
         for entry in plan.entries.iter().filter(|_| !options.resume) {
+            crate::interruption::check()?;
             let (root, project) = crate::project::load_for_invocation(
                 &parent.join(&entry.reference),
                 options.invocation_dir,
@@ -542,6 +543,10 @@ impl<'a> ActivatedSweep<'a> {
             schedule_error = if self.scheduling.jobs == 1 {
                 let mut failure = None;
                 for index in 0..self.plan.entries.len() {
+                    if let Err(error) = crate::interruption::check() {
+                        failure = Some(error);
+                        break;
+                    }
                     if !self.options.json
                         && let Err(error) = write_progress(
                             output,
