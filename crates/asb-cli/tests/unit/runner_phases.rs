@@ -1602,7 +1602,14 @@ fn unconfirmed_collector_cleanup_cannot_be_ignored() {
             .to_string()
             .contains("cleanup is unconfirmed")
     );
-    assert!(!dir.join("run.json").exists());
+    // A custody failure must remain terminal evidence: comparison needs to
+    // distinguish this selected-but-unsettled replica from an absent run.
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+    assert_eq!(run["status"], "failed");
+    assert_eq!(run["failure_kind"], "collector_error");
+    assert_eq!(run["failure_reason"], "collector cleanup is unconfirmed");
+    assert_eq!(run["success"], false);
 }
 
 #[test]
