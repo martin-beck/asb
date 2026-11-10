@@ -527,6 +527,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str(&format!("<p class=\"scheduling\">Sweep scheduling: up to {} distinct configurations; {} active attempt slots, including replicas. Concurrent tasks share host resources.</p>", scheduling.jobs, scheduling.max_active_attempts));
     }
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB BENCHMARK REPORT</p><h1>Benchmark comparison</h1><p>Explore recorded benchmark results and measurements. Use the filters to focus the report without rerunning anything.</p></header>");
+    if aggregate {
+        html.push_str("<section><a href=\"#replica-distributions\">Jump to concurrency distributions by agent and trial</a></section>");
+    }
     html.push_str(&analysis::cohort_html(&prepared.cohort_analysis));
     html.push_str("<section class=\"explain\"><strong>Agent aggregate reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>.</p></section>");
     if let Some(intent) = prepared
@@ -962,7 +965,7 @@ const MODAL_STYLE: &str = r#"body.chart-open{overflow:hidden}.chart-backdrop{dis
 
 const INLINE_SVG_STYLE: &str = r#".embedded-svg{display:block;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fff;margin:8px 0}.embedded-svg svg{display:block;width:100%;height:auto}.embedded-svg.perfetto-metric{width:min(760px,100%);max-height:260px}.embedded-svg.bpftrace-profile{width:min(760px,100%);max-height:300px}.embedded-svg.flamegraph{width:100%;max-height:520px}.embedded-svg.flamegraph svg{min-width:900px}"#;
 
-const JSON_DETAILS_STYLE: &str = ".replica-boxplot{display:block;width:100%;height:auto}.json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.flamegraph-chart{grid-column:1/-1;min-width:0}.flamegraph-chart[hidden]{display:none}.flamegraph-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.flamegraph-toolbar strong{flex:1;overflow-wrap:anywhere}.flamegraph-chart iframe{display:block;width:100%;height:500px;border:1px solid var(--line);margin:8px 0}.flamegraph-chart.expanded{position:fixed;z-index:40;inset:5vh 5vw;width:90vw;height:90vh;overflow:auto;box-shadow:0 0 0 100vmax #081522c9;background:white}.flamegraph-chart.expanded iframe{height:calc(100% - 100px);min-height:180px}";
+const JSON_DETAILS_STYLE: &str = ".distribution-group .charts{grid-template-columns:repeat(auto-fit,minmax(min(100%,500px),1fr))}.replica-boxplot{display:block;width:100%;height:auto}.json-details{max-height:360px;overflow:auto;background:#f4f7fa;border:1px solid var(--line);border-radius:7px;padding:10px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}.flamegraph-chart{grid-column:1/-1;min-width:0}.flamegraph-chart[hidden]{display:none}.flamegraph-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.flamegraph-toolbar strong{flex:1;overflow-wrap:anywhere}.flamegraph-chart iframe{display:block;width:100%;height:500px;border:1px solid var(--line);margin:8px 0}.flamegraph-chart.expanded{position:fixed;z-index:40;inset:5vh 5vw;width:90vw;height:90vh;overflow:auto;box-shadow:0 0 0 100vmax #081522c9;background:white}.flamegraph-chart.expanded iframe{height:calc(100% - 100px);min-height:180px}";
 
 const INTERACTIVE_SCRIPT: &str = concat!(
     "<script>\n",

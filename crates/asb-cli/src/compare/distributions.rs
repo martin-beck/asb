@@ -112,8 +112,20 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         groups.entry(row.id.configuration).or_default().push(row);
     }
     let mut html = String::from(
-        "<section><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Batches within a configuration are included together; separate configurations are not mixed. Filters show or hide entire configuration distributions and do not recalculate their statistics.</p></section>",
+        "<section id=\"replica-distributions\"><h2>Concurrency distributions</h2><p>Each point is one observed replica. Boxes show the first and third quartiles and median; whiskers extend to the most extreme observations within 1.5 × IQR. Missing measurements are omitted, not zero. Time-series plots summarize each replica by the mean of its available samples; sample timing remains available in comparison.json. Batches within a configuration are included together; separate configurations are not mixed. Filters show or hide entire configuration distributions and do not recalculate their statistics.</p><nav aria-label=\"Agent and trial distributions\"><ul>",
     );
+    for (config, group) in &groups {
+        let first = group[0];
+        html.push_str(&format!(
+            "<li><a href=\"#distribution-{config}\">{} · {} · {} · {} / {}</a></li>",
+            escape(&first.agent),
+            escape(&first.workload),
+            escape(trial_label(first)),
+            escape(&first.provider),
+            escape(&first.model)
+        ));
+    }
+    html.push_str("</ul></nav></section>");
     for (config, group) in groups {
         let first = group[0];
         let mut measurements: BTreeMap<(String, bool), Vec<(String, f64)>> = BTreeMap::new();
@@ -144,7 +156,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         let members =
             serde_json::to_string(&group.iter().map(|row| &row.label).collect::<Vec<_>>())
                 .expect("labels serialize");
-        html.push_str(&format!("<section class=\"distribution-group\" data-members=\"{}\" data-configuration=\"{config}\"><h2>{} · {} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.agent), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), first.configured_concurrency));
+        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\" data-configuration=\"{config}\"><h2>{} · {} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.agent), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), first.configured_concurrency));
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }
