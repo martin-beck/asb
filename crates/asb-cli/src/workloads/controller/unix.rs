@@ -126,6 +126,9 @@ impl Controller {
     fn write_request(&mut self, bytes: &[u8], deadline: Instant) -> Result<(), String> {
         let mut sent = 0;
         while sent < bytes.len() {
+            if crate::interruption::requested() {
+                return Err("ASB interruption requested controlled workload cleanup".into());
+            }
             if Instant::now() >= deadline {
                 return Err("workload controller exceeded its request deadline".into());
             }
@@ -241,7 +244,7 @@ impl Controller {
     /// a normal polling result here; callers that require a hard deadline use
     /// `receive` instead.
     pub(crate) fn receive_until(&mut self, deadline: Instant) -> Result<Option<Value>, String> {
-        let event = match self.receive_raw(deadline) {
+        let event = match self.receive_raw(deadline, true) {
             Ok(event) => event,
             Err(error) if error == "workload controller exceeded its response deadline" => {
                 return Ok(None);
@@ -254,8 +257,15 @@ impl Controller {
         Ok(Some(event))
     }
 
-    fn receive_raw(&mut self, deadline: Instant) -> Result<Value, String> {
+    fn receive_raw(
+        &mut self,
+        deadline: Instant,
+        observe_interruption: bool,
+    ) -> Result<Value, String> {
         loop {
+            if observe_interruption && crate::interruption::requested() {
+                return Err("ASB interruption requested controlled workload cleanup".into());
+            }
             if Instant::now() >= deadline {
                 return Err("workload controller exceeded its response deadline".into());
             }
@@ -295,7 +305,7 @@ impl Controller {
             if Instant::now() >= deadline {
                 return Err(self.handoff("workload cancellation exceeded its cleanup deadline"));
             }
-            let event = match self.receive_raw(deadline) {
+            let event = match self.receive_raw(deadline, false) {
                 Ok(event) => event,
                 Err(error) => return Err(self.cleanup_failure(error, deadline)),
             };
