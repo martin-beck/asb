@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import uuid
 
@@ -18,6 +19,102 @@ SUBMISSION_WORKTREE = "/testbed"
 # Repository setup has its own bounds; neither is an agent execution budget.
 _REPOSITORY_GATE_PREPARATION_SECONDS = 600
 _REPOSITORY_COMMAND_SECONDS = 600
+_PREPARED_BASELINE_CACHE_VERSION = "swebench-prepared-baseline-v1"
+_PREPARED_BASELINE_LOCK_SECONDS = 600
+
+
+def prepared_baseline_cache_tag(source_image_id, task_id, base_commit):
+    """Address one replay-only, clean task baseline without host-specific names."""
+    if (not isinstance(source_image_id, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_image_id)
+            or not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", task_id)
+            or not isinstance(base_commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", base_commit)):
+        raise ExecutionError("prepared baseline cache requires validated image, task and base identities")
+    digest = hashlib.sha256((source_image_id + "\0" + task_id + "\0" + base_commit).encode("ascii")).hexdigest()
+    return "asb-swebench-baseline:" + digest
+
+
+def prepared_baseline_labels(source_image, task_id, base_commit):
+    """Bind a retained baseline to the exact image and official task revision."""
+    image_id = getattr(source_image, "id", None)
+    tag = prepared_baseline_cache_tag(image_id, task_id, base_commit)
+    return tag, {"asb.owner": "asb", "asb.cache": _PREPARED_BASELINE_CACHE_VERSION,
+                 "asb.cache-key": tag.rsplit(":", 1)[1], "asb.source-image": image_id,
+                 "asb.task-id": task_id, "asb.base-commit": base_commit}
+
+
+def _validated_prepared_baseline(image, source_image, task_id, base_commit):
+    tag, expected = prepared_baseline_labels(source_image, task_id, base_commit)
+    attrs = getattr(image, "attrs", {})
+    labels = attrs.get("Config", {}).get("Labels", {}) or {}
+    source_attrs = getattr(source_image, "attrs", {})
+    if (not isinstance(getattr(image, "id", None), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image.id)
+            or any(labels.get(key) != value for key, value in expected.items())
+            or attrs.get("Os") != "linux"
+            or attrs.get("Architecture") != source_attrs.get("Architecture")
+            or source_attrs.get("Os") != "linux"):
+        raise ExecutionError("prepared baseline cache has invalid identity, ownership or architecture")
+    return tag
+
+
+def load_prepared_baseline(client, source_image, task_id, base_commit):
+    """Return an authenticated retained baseline, or None if it has not been made."""
+    import docker.errors
+    tag, _labels = prepared_baseline_labels(source_image, task_id, base_commit)
+    try:
+        image = client.images.get(tag)
+    except docker.errors.ImageNotFound:
+        return None
+    _validated_prepared_baseline(image, source_image, task_id, base_commit)
+    return image
+
+
+def retain_prepared_baseline(client, container, source_image, task_id, base_commit):
+    """Commit exactly one verified clean task container for future offline replays."""
+    tag, labels = prepared_baseline_labels(source_image, task_id, base_commit)
+    repository, version = tag.rsplit(":", 1)
+    created = container.commit(repository=repository, tag=version, conf={"Labels": labels})
+    image = client.images.get(tag)
+    if image.id != created.id:
+        raise ExecutionError("prepared baseline cache identity changed while it was published")
+    _validated_prepared_baseline(image, source_image, task_id, base_commit)
+    return image
+
+
+@contextmanager
+def prepared_baseline_lock(catalog_path, tag, cancelled=None):
+    """Serialize the one-time replay preparation without serializing execution."""
+    try:
+        import fcntl
+    except ImportError:
+        # Docker-backed SWE-bench is not supported on native Windows. Preserve
+        # correctness there even though concurrent first use may duplicate work.
+        yield
+        return
+    key = tag.rsplit(":", 1)[1]
+    directory = Path(catalog_path).parent / ".asb-prepared-baseline-locks"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    path = directory / (key + ".lock")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    started = time.monotonic()
+    try:
+        while True:
+            if cancelled is not None and cancelled.is_set():
+                raise InterruptedError("prepared baseline cache wait was cancelled")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() - started >= _PREPARED_BASELINE_LOCK_SECONDS:
+                    raise ExecutionError("prepared baseline cache wait exceeded its deadline")
+                time.sleep(0.1)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def snapshot_storage_path(artifacts, attempt, tool_mode):
@@ -113,6 +210,8 @@ class SweBenchTask:
         self.preparing_repository = False
         self.attempt = "asb-" + uuid.uuid4().hex
         self.source_image_tag = None
+        self.material_source_image = None
+        self.material_source_image_id = None
         self.journal = None
 
     def submission_git_dir(self):
@@ -138,30 +237,50 @@ class SweBenchTask:
             snapshot_storage = None
             if self.snapshot:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
-            self.workspace = ManagedDockerWorkspace(self.client, image, self.attempt, CONTAINER_WORKDIR,
-                                                    journal=self.journal, snapshot=self.snapshot,
-                                                    snapshot_storage=snapshot_storage, offline=self.tool_mode == "replay",
-                                                    cpu_set=self.cpu_set)
-            self.workspace.__enter__()
             base = self.row["base_commit"]
-            self.checked(["git", "cat-file", "-e", base + "^{commit}"])
-            # This is an ASB-owned container, never the user's host checkout.
-            self.checked(["git", "reset", "--hard", base], environment={
-                "GIT_COMMITTER_NAME":"ASB workload preparation",
-                "GIT_COMMITTER_EMAIL":"asb-workload@localhost"})
-            self.checked(["git", "clean", "-fd"])
-            observed = self.checked(["git", "rev-parse", "HEAD"]).strip().decode("ascii")
-            if observed != base:
-                raise CatalogError("prepared repository does not match the official base commit")
-            if self.checked(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
-                raise CatalogError("prepared task repository is not clean")
-            self.prepare_base_history(str(CONTAINER_WORKDIR), '/opt/'+self.attempt+'-base-history.git', base)
-            # Keep an independent copy of the verified base Git metadata for
-            # submission generation. Agents may modify or delete their own
-            # .git directory; that must not destroy the original comparison.
-            self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", self.submission_git_dir()])
-            self.checked(["git", f"--git-dir={self.submission_git_dir()}",
-                          f"--work-tree={CONTAINER_WORKDIR}", "cat-file", "-e", base + "^{commit}"])
+            cache_tag, _cache_labels = prepared_baseline_labels(image, self.task_id, base)
+            cache_lock = (prepared_baseline_lock(self.catalog_path, cache_tag, self.cancelled)
+                          if self.tool_mode == "replay" else nullcontext())
+            with cache_lock:
+                baseline = (load_prepared_baseline(self.client, image, self.task_id, base)
+                            if self.tool_mode == "replay" else None)
+                workspace_image = baseline or image
+                self.workspace = ManagedDockerWorkspace(self.client, workspace_image, self.attempt, CONTAINER_WORKDIR,
+                                                        journal=self.journal, snapshot=self.snapshot,
+                                                        snapshot_storage=snapshot_storage, offline=self.tool_mode == "replay",
+                                                        cpu_set=self.cpu_set)
+                self.workspace.__enter__()
+                self.checked(["git", "cat-file", "-e", base + "^{commit}"])
+                if baseline is None:
+                    # This is an ASB-owned container, never the user's host checkout.
+                    self.checked(["git", "reset", "--hard", base], environment={
+                        "GIT_COMMITTER_NAME":"ASB workload preparation",
+                        "GIT_COMMITTER_EMAIL":"asb-workload@localhost"})
+                    self.checked(["git", "clean", "-fd"])
+                observed = self.checked(["git", "rev-parse", "HEAD"]).strip().decode("ascii")
+                if observed != base:
+                    raise CatalogError("prepared repository does not match the official base commit")
+                if self.checked(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
+                    raise CatalogError("prepared task repository is not clean")
+                if baseline is None:
+                    self.prepare_base_history(str(CONTAINER_WORKDIR), '/opt/'+self.attempt+'-base-history.git', base)
+                    # Keep an independent copy of the verified base Git metadata for
+                    # submission generation. Agents may modify or delete their own
+                    # .git directory; that must not destroy the original comparison.
+                    self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", self.submission_git_dir()])
+                    if self.tool_mode == "replay":
+                        retain_prepared_baseline(self.client, self.workspace.container, image, self.task_id, base)
+                elif self.snapshot:
+                    # Snapshot storage is per attempt, so only its independent
+                    # submission copy is recreated from the cached clean tree.
+                    self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", self.submission_git_dir()])
+                self.checked(["git", f"--git-dir={self.submission_git_dir()}",
+                              f"--work-tree={CONTAINER_WORKDIR}", "cat-file", "-e", base + "^{commit}"])
+            # The cache image is only a transport for the verified clean tree.
+            # Replay material must remain bound to the source image that made
+            # the original recording, not the Docker commit used to share it.
+            self.material_source_image = image
+            self.material_source_image_id = image.id
             self.invocation = {
                 "identity": {"workload": self.catalog["workload"], "task_id": self.task_id,
                              "attempt_id": self.attempt, "dataset": self.catalog["dataset"]},
@@ -170,6 +289,8 @@ class SweBenchTask:
                 "image": self.workspace.image_identity, "sdk": sdk,
                 "resources": self.workspace.limits,
                 "environment_source": source,
+                "prepared_baseline": {"status": "reused" if baseline is not None else "created",
+                                      "tag": cache_tag} if self.tool_mode == "replay" else None,
             }
             # No gold patch/test script is copied into the task environment.
             atomic_write(self.artifacts / "task.json", encoded(self.invocation))
@@ -326,12 +447,14 @@ class SweBenchTask:
         # their original immutable ID. Actual image IDs remain in task evidence.
         source = self.invocation.get("environment_source")
         if isinstance(source, dict) and source.get("status") == "built":
-            image = source_image_material(self.workspace.image, image_id, source,
+            material_image = getattr(self, "material_source_image", None) or self.workspace.image
+            material_image_id = getattr(self, "material_source_image_id", None) or image_id
+            image = source_image_material(material_image, material_image_id, source,
                                           source.get("source_owner_labels", self.journal.labels))
             scope = "swe-bench-clean-git-worktree-and-source-image-v2"
             image_key = "image_material"
         else:
-            image = image_id
+            image = getattr(self, "material_source_image_id", None) or image_id
             scope = "swe-bench-clean-git-worktree-and-image-v1"
             image_key = "image_id"
         common = {"baseline":self.invocation["baseline"],
