@@ -790,6 +790,23 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_report_shows_each_observed_replica_and_missing_counts() {
+        let fixture = Fixture::new("swe-bench", 3);
+        fixture.publish(1, &fixture.record(1, json!(true), true, true));
+        fixture.publish(2, &fixture.record(2, json!(false), true, true));
+        let data = fixture.compare().unwrap();
+        assert_eq!(data["benchmarks"].as_array().unwrap().len(), 3);
+        let html =
+            fs::read_to_string(fixture.root.join("results/sweep-comparison/report.html")).unwrap();
+        assert!(html.contains("Concurrency distributions"));
+        assert!(html.contains("original-task"));
+        assert!(html.contains("success_rate · n=2 of 3"));
+        assert!(html.contains(": 1 ratio</title>"));
+        assert!(html.contains(": 0 ratio</title>"));
+        assert!(!html.contains("class=\"bar\""));
+    }
+
+    #[test]
     fn pi_native_consumption_evidence_is_reported_without_inventing_coverage() {
         let fixture = Fixture::new("swe-bench", 2);
         let mut observed = fixture.record(1, json!(true), true, true);
