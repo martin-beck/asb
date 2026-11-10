@@ -95,6 +95,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn check_reports_a_graceful_setup_shutdown_request() {
+        let _guard = Guard::install();
+        request_for_test();
+        assert!(
+            check()
+                .unwrap_err()
+                .to_string()
+                .contains("graceful setup shutdown")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn guard_observes_a_real_term_signal() {
         let _guard = Guard::install();
         let status = std::process::Command::new("kill")
