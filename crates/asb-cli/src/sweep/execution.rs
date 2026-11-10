@@ -207,6 +207,7 @@ impl Execution<'_> {
                 ignore_mcp_mismatch: self.options.ignore_mcp_mismatch,
                 ignore_compatibility: self.options.ignore_compatibility,
                 requirements_prepared: !self.options.resume,
+                sweep_owned_output: true,
                 architecture_confirmed: true,
                 on_completion: observer
                     .as_ref()
