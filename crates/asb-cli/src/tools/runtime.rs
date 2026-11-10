@@ -4,6 +4,64 @@ use crate::install::{
     InstallResult, OperationContext, ProducerDirectory, Purpose, install_source_bounded_in,
     verify_sha256_preserving as verify_sha256,
 };
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+#[derive(Clone, Eq, PartialEq)]
+struct ArchiveStamp {
+    bytes: u64,
+    modified: SystemTime,
+}
+
+fn verified_archives() -> &'static Mutex<BTreeMap<PathBuf, ArchiveStamp>> {
+    static VERIFIED: OnceLock<Mutex<BTreeMap<PathBuf, ArchiveStamp>>> = OnceLock::new();
+    VERIFIED.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn archive_stamp(path: &Path) -> Option<ArchiveStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    metadata.is_file().then_some(ArchiveStamp {
+        bytes: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
+}
+
+fn archive_was_verified(path: &Path) -> bool {
+    let Some(stamp) = archive_stamp(path) else {
+        return false;
+    };
+    verified_archives()
+        .lock()
+        .expect("runtime verification cache lock")
+        .get(path)
+        == Some(&stamp)
+}
+
+fn remember_verified_archive(path: &Path) {
+    if let Some(stamp) = archive_stamp(path) {
+        verified_archives()
+            .lock()
+            .expect("runtime verification cache lock")
+            .insert(path.to_path_buf(), stamp);
+    }
+}
+
+fn forget_verified_archive(path: &Path) {
+    verified_archives()
+        .lock()
+        .expect("runtime verification cache lock")
+        .remove(path);
+}
+
+fn verify_cached_archive(path: &Path, checksum: &str) -> Result<(), Error> {
+    #[cfg(test)]
+    VERIFY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    verify_sha256(path, checksum, "runtime archive")
+}
+
+#[cfg(test)]
+static VERIFY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,12 +123,16 @@ pub(crate) fn cached_archive_in(
             }
         }
     }
-    if !destination.is_symlink()
-        && destination.is_file()
-        && verify_sha256(destination, checksum, "runtime archive").is_ok()
-    {
-        return Ok(destination.to_path_buf());
+    if !destination.is_symlink() && destination.is_file() {
+        if archive_was_verified(destination) {
+            return Ok(destination.to_path_buf());
+        }
+        if verify_cached_archive(destination, checksum).is_ok() {
+            remember_verified_archive(destination);
+            return Ok(destination.to_path_buf());
+        }
     }
+    forget_verified_archive(destination);
     if fs::symlink_metadata(destination).is_ok() {
         fs::rename(
             destination,
@@ -87,8 +149,9 @@ pub(crate) fn cached_archive_in(
         "runtime archive",
         256 * 1024 * 1024,
     )?;
-    verify_sha256(&temporary, checksum, "runtime archive")?;
+    verify_cached_archive(&temporary, checksum)?;
     fs::rename(&temporary, destination).map_err(|error| Error::Io(error.to_string()))?;
+    remember_verified_archive(destination);
     Ok(destination.to_path_buf())
 }
 
@@ -350,5 +413,39 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fs::read(previous).unwrap(), b"damaged evidence");
+    }
+    #[test]
+    fn unchanged_cached_archive_is_verified_once_per_process() {
+        let fixture = Fixture::new();
+        let (source, checksum) = package(&fixture, "#!/bin/sh\nexit 0\n", "memoized.tar.gz");
+        let destination = fixture.0.join("cache/memoized.tar.gz");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(&source, &destination).unwrap();
+        let context =
+            OperationContext::new(&fixture.0, &crate::project::ProjectConfig::default()).unwrap();
+        let before = VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        cached_archive_in(
+            &context,
+            &destination,
+            source.to_str().unwrap(),
+            &checksum,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let after_first = VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after_first, before + 1);
+        fs::remove_file(&source).unwrap();
+        cached_archive_in(
+            &context,
+            &destination,
+            source.to_str().unwrap(),
+            &checksum,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            after_first
+        );
     }
 }
