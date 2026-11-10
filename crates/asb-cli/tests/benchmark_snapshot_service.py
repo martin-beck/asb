@@ -408,12 +408,12 @@ class SnapshotServiceTest(unittest.TestCase):
             self.assertEqual([args[i+1] for i,value in enumerate(args) if value=='--extra-root'],['/tmp','/var/tmp'])
             supervisor.log.close()
 
-    def test_replay_waits_without_tool_deadline_and_wakes_on_predecessor(self):
+    def test_replay_waits_for_predecessor_within_bounded_order_window(self):
         applied=[];waiting=threading.Event()
         service=SnapshotReplay([('first',2),('second',3)],applied.append)
         wait=service.changed.wait
         def observed_wait(timeout=None):
-            self.assertIsNone(timeout)
+            self.assertGreater(timeout,0)
             waiting.set()
             return wait(timeout)
         with patch.object(service.changed,'wait',side_effect=observed_wait):
@@ -424,6 +424,13 @@ class SnapshotServiceTest(unittest.TestCase):
                 self.assertEqual(later.result(timeout=2),3)
         service.finish()
         self.assertEqual(applied,[2,3])
+
+    def test_replay_fails_a_missing_predecessor_at_its_order_deadline(self):
+        service=SnapshotReplay([('first',2),('second',3)],lambda _:None,order_wait_seconds=.01)
+        with self.assertRaisesRegex(TimeoutError,'order did not converge'):
+            service.marker('end','second')
+        with self.assertRaisesRegex(RuntimeError,'unconsumed or failed'):
+            service.finish()
 
     def test_replay_invalidation_wakes_waiting_marker(self):
         waiting=threading.Event()

@@ -13,8 +13,15 @@ import socketserver
 import subprocess
 import sys
 import threading
+import time
 
 _MARKER = re.compile(rb'tool-(begin|end):([A-Za-z0-9_-]{1,80})(?::([0-9]+):([0-9]+))?\n')
+# A native replay callback that arrives ahead of its recorded predecessor must
+# never hold an agent execution open until the outer benchmark budget expires.
+# Tool callbacks from one response normally arrive within milliseconds; a
+# bounded wait turns a genuine ordering divergence into a repairable replay
+# failure rather than an hours-long silent timeout.
+REPLAY_ORDER_WAIT_SECONDS = 30
 
 
 class SnapshotService:
@@ -272,14 +279,18 @@ class SnapshotReplay:
     The caller owns snapshot verification, initial workspace restoration and
     the actual application mechanism. This protocol is an offline prototype.
     """
-    def __init__(self, boundaries, apply):
+    def __init__(self, boundaries, apply, order_wait_seconds=REPLAY_ORDER_WAIT_SECONDS):
         self.boundaries = list(boundaries)
         if any(not isinstance(item, tuple) or len(item) != 2 or
                not isinstance(item[0], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item[0]) or
                not isinstance(item[1], int) or isinstance(item[1], bool) or item[1] < 1
                for item in self.boundaries):
             raise ValueError('snapshot replay boundaries are malformed')
+        if (not isinstance(order_wait_seconds, (int, float)) or isinstance(order_wait_seconds, bool)
+                or order_wait_seconds <= 0):
+            raise ValueError('snapshot replay ordering wait is invalid')
         self.apply = apply
+        self.order_wait_seconds = order_wait_seconds
         self.position = 0
         self.waiting = {}
         self.failed = False
@@ -298,12 +309,18 @@ class SnapshotReplay:
                 raise ValueError('snapshot replay boundary differs from the recording')
             self.waiting[alias] = self.waiting.get(alias, 0) + 1
             try:
+                deadline = time.monotonic() + self.order_wait_seconds
                 while True:
                     if self.closed or self.failed:
                         raise RuntimeError('snapshot replay is not active')
                     if self.boundaries[self.position][0] == alias:
                         break
-                    self.changed.wait()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self.failed = True
+                        self.changed.notify_all()
+                        raise TimeoutError('snapshot replay boundary order did not converge before its deadline')
+                    self.changed.wait(remaining)
                 sequence = self.boundaries[self.position][1]
                 try:
                     self.apply(sequence)
