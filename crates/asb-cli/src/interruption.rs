@@ -49,6 +49,19 @@ pub(crate) fn requested() -> bool {
     false
 }
 
+/// Stop starting new work after a foreground interruption.  Callers that own
+/// already-admitted work must still settle it before returning.
+pub(crate) fn check() -> Result<(), crate::Error> {
+    if requested() {
+        Err(crate::Error::Run(
+            "ASB interruption requested graceful setup shutdown; waiting for owned work to settle"
+                .into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(crate) fn request_for_test() {
     REQUESTED

@@ -115,6 +115,7 @@ impl Execution<'_> {
 
     /// Sequential defaults retain immediate warnings and --show-output.
     pub(super) fn run_to(&self, index: usize, output: &mut dyn Write) -> Result<(), Error> {
+        crate::interruption::check()?;
         if let Some(campaigns) = self.campaigns {
             return campaigns.run(index, output, self.warnings);
         }
