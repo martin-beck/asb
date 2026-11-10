@@ -171,6 +171,28 @@ pub(super) fn html(documents: &BTreeMap<String, Value>) -> String {
             escape(pmu.get("limitations").and_then(Value::as_str).unwrap_or(""))
         ));
     }
+    for overhead in analysis["collector_overhead"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let text = |key| {
+            overhead
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("unavailable")
+        };
+        let number = |key| {
+            overhead
+                .get(key)
+                .and_then(Value::as_u64)
+                .map_or_else(|| "unavailable".into(), |value| value.to_string())
+        };
+        html.push_str(&format!(
+            "<details><summary>Collector overhead: {} — {}</summary><p>Scope: {} ({})</p><table><thead><tr><th>Samples</th><th>Total read time</th><th>Maximum read time</th><th>Maximum lateness</th><th>Missed intervals</th></tr></thead><tbody><tr><td>{}</td><td>{} µs</td><td>{} µs</td><td>{} µs</td><td>{}</td></tr></tbody></table><p class=\"muted\">{}</p></details>",
+            escape(text("collector")), escape(text("status")), escape(text("scope")), escape(text("scope_source")), number("sample_count"), number("sample_read_us_total"), number("sample_read_us_max"), number("schedule_lateness_us_max"), number("missed_scheduled_intervals"), escape(text("limitations"))
+        ));
+    }
     for alignment in analysis["phase_alignments"]
         .as_array()
         .into_iter()
@@ -315,6 +337,26 @@ mod tests {
         assert!(!html(&documents).contains("invented"));
         assert!(html(&documents).contains("insufficient_evidence"));
         assert!(metrics.is_empty());
+    }
+    #[test]
+    fn scoped_collector_overhead_is_regenerated_and_rendered() {
+        let mut documents = BTreeMap::from([(
+            "kernel-pressure-summary".into(),
+            json!({
+                "schema_version":1,"status":"completed",
+                "scope":"owned-container-execution","scope_source":"verified-owned-container-cgroup",
+                "collector_overhead":{"sample_count":18,"sample_read_us_total":22746,"sample_read_us_max":1378,"interval_jitter_us_max":41,"schedule_lateness_us_max":146,"missed_scheduled_intervals":0,"configured_interval_us":1000000}
+            }),
+        )]);
+        regenerate(&mut documents, &mut BTreeMap::new()).unwrap();
+        assert_eq!(
+            documents["bottlenecks"]["collector_overhead"][0]["sample_read_us_total"],
+            22746
+        );
+        let rendered = html(&documents);
+        assert!(rendered.contains("Collector overhead: kernel-pressure"));
+        assert!(rendered.contains("owned-container-execution"));
+        assert!(rendered.contains("22746 µs"));
     }
     #[test]
     fn hardware_labels_and_diagnostics_are_escaped_in_html() {

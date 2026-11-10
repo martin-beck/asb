@@ -4,6 +4,7 @@
 //! ownership of measurement semantics; the engine never inspects the host.
 
 pub(crate) mod cohort;
+mod collector_overhead;
 mod counter_groups;
 mod hardware;
 mod kernel;
@@ -50,6 +51,7 @@ struct Report {
     hardware: Vec<hardware::PmuAnalysis>,
     kernel: Vec<kernel::Diagnostic>,
     sampling: Vec<sampling::SamplingAnalysis>,
+    collector_overhead: Vec<collector_overhead::CollectorOverhead>,
     counter_groups: Vec<counter_groups::Group>,
     phase_alignments: Vec<super::phase_alignment::Alignment>,
 }
@@ -68,6 +70,7 @@ fn analyze(timing: Option<&super::ComponentTiming>) -> Report {
         hardware: Vec::new(),
         kernel: Vec::new(),
         sampling: Vec::new(),
+        collector_overhead: Vec::new(),
         counter_groups: Vec::new(),
         phase_alignments: Vec::new(),
     }
@@ -113,6 +116,7 @@ pub(super) fn publish(
     report.kernel = kernel::analyze(&documents);
     report.counter_groups = counter_groups::analyze(&documents);
     report.sampling = sampling::analyze(&documents);
+    report.collector_overhead = collector_overhead::analyze(&documents);
     report.phase_alignments = sampling::phase_alignments(&documents);
     let value = serde_json::to_value(report).map_err(|error| error.to_string())?;
     super::write_json(&dir.join("bottlenecks.json"), &value)?;
@@ -148,6 +152,7 @@ pub(crate) fn from_documents(
     report.kernel = kernel::analyze(documents);
     report.counter_groups = counter_groups::analyze(documents);
     report.sampling = sampling::analyze(documents);
+    report.collector_overhead = collector_overhead::analyze(documents);
     report.phase_alignments = sampling::phase_alignments(documents);
     serde_json::to_value(report).expect("analysis contains only finite values")
 }
