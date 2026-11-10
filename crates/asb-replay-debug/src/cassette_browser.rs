@@ -5,8 +5,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::Value;
 use std::{
@@ -93,6 +93,8 @@ struct Browser {
     events: Vec<Value>,
     event: usize,
     scroll: u16,
+    horizontal: u16,
+    wrap: bool,
     focus_tracks: bool,
 }
 
@@ -149,6 +151,8 @@ impl Browser {
             events: Vec::new(),
             event: 0,
             scroll: 0,
+            horizontal: 0,
+            wrap: true,
             focus_tracks: true,
         };
         browser.select_stream(selected, stream)?;
@@ -218,6 +222,7 @@ impl Browser {
         self.events = events;
         self.event = 0;
         self.scroll = 0;
+        self.horizontal = 0;
         Ok(())
     }
     fn event_text(&self) -> String {
@@ -241,6 +246,17 @@ impl Browser {
             suffix
         )
     }
+    fn view_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('w') => {
+                self.wrap = !self.wrap;
+                self.horizontal = 0;
+            }
+            KeyCode::Left if !self.wrap => self.horizontal = self.horizontal.saturating_sub(4),
+            KeyCode::Right if !self.wrap => self.horizontal = self.horizontal.saturating_add(4),
+            _ => {}
+        }
+    }
     fn print(&self, mut out: impl Write) -> io::Result<()> {
         writeln!(
             out,
@@ -255,6 +271,44 @@ impl Browser {
         }
         Ok(())
     }
+}
+
+/// Color only JSON string values of a `stderr` field, after safe rendering.
+fn highlight_stderr(text: &str) -> Text<'static> {
+    Text::from(
+        text.lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                let Some(value) = trimmed.strip_prefix("\"stderr\": ") else {
+                    return Line::from(line.to_owned());
+                };
+                let raw = value.strip_suffix(',').unwrap_or(value);
+                if serde_json::from_str::<String>(raw).is_ok_and(|value| !value.is_empty()) {
+                    let prefix_len = line.len() - value.len();
+                    Line::from(vec![
+                        Span::raw(line[..prefix_len].to_owned()),
+                        Span::styled(value.to_owned(), Style::default().fg(Color::Red)),
+                    ])
+                } else {
+                    Line::from(line.to_owned())
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn detail_widget(text: &str, scroll: u16, horizontal: u16, wrap: bool) -> Paragraph<'static> {
+    let mut details = Paragraph::new(highlight_stderr(text))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Selected interaction"),
+        )
+        .scroll((scroll, if wrap { 0 } else { horizontal }));
+    if wrap {
+        details = details.wrap(Wrap { trim: false });
+    }
+    details
 }
 
 pub(crate) fn open(
@@ -373,18 +427,9 @@ pub(crate) fn open(
                     right[0],
                     &mut event_state,
                 );
-                frame.render_widget(
-                    Paragraph::new(browser.event_text())
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title("Selected interaction"),
-                        )
-                        .scroll((browser.scroll, 0)),
-                    right[1],
-                );
+                frame.render_widget(detail_widget(&browser.event_text(), browser.scroll, browser.horizontal, browser.wrap), right[1]);
                 let footer = error.as_deref().unwrap_or(
-                    "Tab: tracks/entries  Up/Down: select  s: stream  m: normalizers  q: quit",
+                    "Tab: focus  Up/Down: select  s: stream  m: normalizers  w: wrap  Left/Right: scroll  PgUp/PgDn: page  q: quit",
                 );
                 frame.render_widget(
                     Paragraph::new(diff::visible(footer))
@@ -457,6 +502,7 @@ pub(crate) fn open(
             }
             KeyCode::PageUp => browser.scroll = browser.scroll.saturating_sub(10),
             KeyCode::PageDown => browser.scroll = browser.scroll.saturating_add(10),
+            KeyCode::Char('w') | KeyCode::Left | KeyCode::Right => browser.view_key(key.code),
             _ => {}
         }
     }
@@ -471,6 +517,63 @@ mod tests {
     };
     use std::{fs::File, io::Write};
     use zip::{ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn highlights_only_nonempty_string_stderr_values_including_nested_fields() {
+        let value = serde_json::json!({"stderr":"top\u{1b}[31m", "nested":{"stderr":"failure"}, "empty":{"stderr":""}, "number":{"stderr":4}, "unrelated":"failure"});
+        let safe = serde_json::to_string_pretty(&value)
+            .unwrap()
+            .lines()
+            .map(diff::visible)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let styled = highlight_stderr(&safe);
+        let red = styled
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.style.fg == Some(Color::Red))
+            .map(|span| span.content.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(red.len(), 2);
+        assert!(red.iter().any(|value| value.contains("failure")));
+        assert!(red.iter().any(|value| value.contains("top")));
+        assert!(red.iter().all(|value| !value.contains('\u{1b}')));
+    }
+
+    #[test]
+    fn narrow_detail_view_wraps_and_scrolls_without_terminal_controls() {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(16, 6)).unwrap();
+        let draw = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+                    scroll,
+                    horizontal,
+                    wrap| {
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        detail_widget("abcdefghijklmnopqrstuvwxyz", scroll, horizontal, wrap),
+                        frame.area(),
+                    )
+                })
+                .unwrap();
+            (0..6)
+                .map(|y| {
+                    (0..16)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let wrapped = draw(&mut terminal, 0, 0, true);
+        assert!(wrapped[1].contains("abcdefghijklmn"));
+        assert!(wrapped[2].contains("opqrstuvwxyz"));
+        let scrolled = draw(&mut terminal, 1, 0, true);
+        assert!(scrolled[1].contains("opqrstuvwxyz"));
+        let horizontal = draw(&mut terminal, 0, 4, false);
+        assert!(horizontal[1].contains("efghijklmnopqr"));
+        assert!(!horizontal[2].contains("stuvwxyz"));
+    }
 
     #[test]
     fn browses_multitrack_bundle_using_shared_reader_and_preserves_archive() {
@@ -550,6 +653,17 @@ mod tests {
         zip.finish().unwrap();
         let original = std::fs::read(&path).unwrap();
         let mut browser = Browser::load(&path, Some(2), Stream::Provider).unwrap();
+        assert!(browser.wrap);
+        assert_eq!(browser.horizontal, 0);
+        browser.view_key(KeyCode::Right);
+        assert_eq!(browser.horizontal, 0);
+        browser.view_key(KeyCode::Char('w'));
+        browser.view_key(KeyCode::Right);
+        assert_eq!(browser.horizontal, 4);
+        browser.view_key(KeyCode::Left);
+        assert_eq!(browser.horizontal, 0);
+        browser.view_key(KeyCode::Char('w'));
+        assert!(browser.wrap);
         assert_eq!(browser.events[0]["response"], "two");
         browser.select_track(0).unwrap();
         assert_eq!(browser.events[0]["response"], "one");
