@@ -139,7 +139,10 @@ asb-replay-debug --cassette /path/to/recording.asb.zip --track 1 --artifact loca
 
 Tab switches focus between tracks and recorded interactions. Use Up/Down or
 `j`/`k` to select, `s` to cycle through provider, native and named artifact
-streams, PageUp/PageDown to scroll the selected entry, and `q` to exit. A
+streams, PageUp/PageDown to scroll the selected entry, and `q` to exit. The
+selected JSON entry wraps by default; `w` toggles wrapping, and Left/Right
+scroll horizontally when wrapping is off. Nonempty string values of `stderr`
+are highlighted in red, including nested fields. A
 legacy tape has unknown completion and grading status. Incomplete native
 sidecars cannot be read by the shared cassette reader and are reported as an
 error rather than assumed complete. The
