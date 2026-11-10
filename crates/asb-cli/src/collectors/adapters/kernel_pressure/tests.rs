@@ -2,6 +2,14 @@ use super::*;
 use std::fs;
 
 #[test]
+fn pressure_sampler_honours_a_two_second_configured_interval() {
+    // The shared configuration parser owns the 100--60000 ms boundary.  This
+    // collector must not silently reduce a valid lower-overhead cadence.
+    assert_eq!(pressure_interval_ms(2_000), 2_000);
+    assert_eq!(pressure_interval_ms(60_001), 60_000);
+}
+
+#[test]
 fn missing_verified_scope_never_reads_host_pressure() {
     let dir =
         crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-pressure-scope-").unwrap();

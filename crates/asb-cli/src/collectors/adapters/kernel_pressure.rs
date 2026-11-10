@@ -30,6 +30,16 @@ enum PressureScope {
     OwnedContainerExecution,
 }
 
+const MAX_PRESSURE_INTERVAL_MS: u64 = 60_000;
+
+// Keep the pressure sampler on the same bounded, user-configured cadence as
+// the other time-series collectors.  A separate one-second cap made the
+// documented 100--60000 ms setting ineffective for this collector and can
+// materially perturb high-concurrency measurements.
+fn pressure_interval_ms(configured_interval_ms: u64) -> u64 {
+    configured_interval_ms.clamp(100, MAX_PRESSURE_INTERVAL_MS)
+}
+
 impl PressureScope {
     fn scope(self) -> &'static str {
         match self {
@@ -68,7 +78,7 @@ fn start_capture(session: &mut Session) {
         };
         match Sampler::start(
             path,
-            measurements::measurement_interval_ms().clamp(100, 1000),
+            pressure_interval_ms(measurements::measurement_interval_ms()),
         ) {
             Ok(sampler) => {
                 state.sampler = Some(sampler);
