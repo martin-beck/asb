@@ -453,7 +453,11 @@ class SweBenchTask:
         from asb_material import canonical_digest
         if self.invocation is None:
             raise ExecutionError("official task must be prepared before material capture")
-        if self.verified_replay_material is not None:
+        # Material capture is also exercised with a minimally constructed task
+        # in the offline contract tests.  Only a replay-entered task has this
+        # optional cache identity; direct material capture must retain the
+        # canonical full-identity path rather than assuming __init__ ran.
+        if getattr(self, "verified_replay_material", None) is not None:
             # __enter__ already proved this writable workspace is clean at the
             # official base commit. The offline source tag and the prepared
             # baseline label are both bound to this cassette material, so
