@@ -74,6 +74,10 @@ impl Queue<'_> {
     fn take(&self) -> Option<(usize, Permit<'_, '_>)> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         loop {
+            if crate::interruption::requested() {
+                state.stopped = true;
+                return None;
+            }
             if state.stopped || state.next == self.weights.len() {
                 return None;
             }
@@ -241,6 +245,15 @@ pub(super) fn run_with_resources_stopping_on<T: Send>(
         }
         drop(sender);
         for event in receiver {
+            if crate::interruption::requested() {
+                queue.stop();
+                if failure.is_none() {
+                    failure = Some(Error::Run(
+                        "ASB interruption requested graceful sweep shutdown; waiting for owned work to settle"
+                            .into(),
+                    ));
+                }
+            }
             // Even a broken terminal must not hide outcomes of admitted work.
             // Stop new admission, but deliver every finished result while
             // joining the owned workers. Never replace the first output error.
@@ -259,6 +272,12 @@ pub(super) fn run_with_resources_stopping_on<T: Send>(
                     "sweep scheduler worker failed outside execution".into(),
                 ));
             }
+        }
+        if crate::interruption::requested() && failure.is_none() {
+            failure = Some(Error::Run(
+                "ASB interruption requested graceful sweep shutdown; no new work was admitted"
+                    .into(),
+            ));
         }
         failure.map_or(Ok(()), Err)
     })

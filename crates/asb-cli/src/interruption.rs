@@ -9,6 +9,15 @@ use std::sync::{
 #[cfg(unix)]
 static REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
+/// Internal ASB helpers have their own protocol and lifecycle signals.  Only
+/// the user-facing command may install the foreground interruption observer.
+pub(crate) fn foreground(args: &[std::ffi::OsString]) -> bool {
+    !args
+        .first()
+        .and_then(|argument| argument.to_str())
+        .is_some_and(|argument| argument.starts_with("__asb-"))
+}
+
 /// Install temporary process signal handlers for one foreground ASB command.
 ///
 /// The handlers perform only an atomic store. Workload controllers observe the
@@ -49,6 +58,19 @@ pub(crate) fn requested() -> bool {
     false
 }
 
+/// Stop starting new work after a foreground interruption.  Callers that own
+/// already-admitted work must still settle it before returning.
+pub(crate) fn check() -> Result<(), crate::Error> {
+    if requested() {
+        Err(crate::Error::Run(
+            "ASB interruption requested graceful setup shutdown; waiting for owned work to settle"
+                .into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(crate) fn request_for_test() {
     REQUESTED
@@ -78,6 +100,27 @@ mod tests {
     fn guard_starts_without_an_interruption_request() {
         let _guard = Guard::install();
         assert!(!requested());
+    }
+
+    #[test]
+    fn only_user_facing_commands_install_the_foreground_guard() {
+        assert!(foreground(&["sweep".into()]));
+        assert!(foreground(&[]));
+        assert!(!foreground(&["__asb-gate".into()]));
+        assert!(!foreground(&["__asb-agent".into()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_reports_a_graceful_setup_shutdown_request() {
+        let _guard = Guard::install();
+        request_for_test();
+        assert!(
+            check()
+                .unwrap_err()
+                .to_string()
+                .contains("graceful setup shutdown")
+        );
     }
 
     #[cfg(unix)]

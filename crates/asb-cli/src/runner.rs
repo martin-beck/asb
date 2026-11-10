@@ -254,6 +254,9 @@ pub(crate) struct RunOptions<'a> {
     /// requirements for this fresh run population. Direct and resumed runs
     /// leave this false and revalidate before execution.
     pub requirements_prepared: bool,
+    /// The sweep already owns a unique result directory for this attempt.
+    /// Such an attempt must not allocate a nested direct-run generation.
+    pub sweep_owned_output: bool,
     pub architecture_confirmed: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
@@ -767,7 +770,8 @@ fn publish_configured_logs(
 /// Internal campaign, preparation, reuse, and completion paths already own
 /// their isolated directories and must remain side-effect free here.
 fn public_direct_run(options: &RunOptions<'_>) -> bool {
-    !options.verify_initial_material
+    !options.sweep_owned_output
+        && !options.verify_initial_material
         && options.reused.is_none()
         && options.execution_cohort.is_none()
         && options.preparation_gate.is_none()
@@ -2279,6 +2283,17 @@ mod tests {
     };
     use crate::benchmark::BenchmarkConfig;
     use crate::measurements::TokenUsage;
+
+    #[test]
+    fn sweep_owned_output_is_not_a_public_direct_run() {
+        let direct = RunOptions::default();
+        assert!(super::public_direct_run(&direct));
+        let sweep_owned = RunOptions {
+            sweep_owned_output: true,
+            ..Default::default()
+        };
+        assert!(!super::public_direct_run(&sweep_owned));
+    }
     use crate::tape;
 
     #[test]

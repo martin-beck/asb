@@ -96,7 +96,7 @@ use std::process::ExitCode;
 /// Run the process CLI.
 #[must_use]
 pub fn entry(args: Vec<OsString>) -> ExitCode {
-    let _interruption = interruption::Guard::install();
+    let _interruption = interruption::foreground(&args).then(interruption::Guard::install);
     #[cfg(target_os = "linux")]
     if args.first().is_some_and(|arg| arg == "__asb-proc-exe") {
         return collectors::adapters::agent_processes::proc_exe_entry(&args[1..]);
