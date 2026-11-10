@@ -414,7 +414,7 @@ for one run.
 ### CPU pools and perf recording scope
 
 The runtime step in `asb setup tui` defaults to **None (portable)**, which
-leaves CPU scheduling unchanged. Select **CPU pool** and use Ctrl-P to edit
+leaves CPU scheduling unchanged. Select **CPU affinity: pool** and use Ctrl-P to edit
 the logical CPU list and Ctrl-G to set the number assigned to each concurrent
 replica. The preview shows capacity and the ordered, disjoint allocations.
 Ctrl-W switches perf recording between the default process tree and CPU-wide
