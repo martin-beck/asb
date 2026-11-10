@@ -79,4 +79,22 @@ mod tests {
         let _guard = Guard::install();
         assert!(!requested());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_observes_a_real_term_signal() {
+        let _guard = Guard::install();
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for _ in 0..100 {
+            if requested() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("SIGTERM handler did not request controlled interruption");
+    }
 }
