@@ -109,6 +109,41 @@ class SourceContracts(unittest.TestCase):
             images[sources.material_cache_tag('a' * 64)] = SimpleNamespace(id='sha256:'+'c'*64, attrs={'Config':{'Labels':{}}})
             with self.assertRaises(ExecutionError):
                 retain_source_image(client, image, identity, {}, 'a' * 64)
+
+    def test_prepared_baseline_cache_binds_source_task_and_base_without_replacing_conflicts(self):
+        from asb_swebench_task import (load_prepared_baseline, prepared_baseline_cache_tag,
+                                       prepared_baseline_labels, retain_prepared_baseline)
+        from asb_execution import ExecutionError
+        class ImageNotFound(Exception): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        docker.errors, errors.ImageNotFound = errors, ImageNotFound
+        source_id = 'sha256:' + 'a' * 64
+        source = SimpleNamespace(id=source_id, attrs={'Architecture':'arm64', 'Os':'linux'})
+        task, base = 'owner__repo-1', 'b' * 40
+        tag, labels = prepared_baseline_labels(source, task, base)
+        self.assertEqual(tag, prepared_baseline_cache_tag(source_id, task, base))
+        self.assertNotEqual(tag, prepared_baseline_cache_tag(source_id, task, 'c' * 40))
+        images = {}
+        def get(name):
+            if name not in images:
+                raise ImageNotFound()
+            return images[name]
+        committed = SimpleNamespace(id='sha256:' + 'd' * 64,
+                                    attrs={'Architecture':'arm64', 'Os':'linux',
+                                           'Config':{'Labels':dict(labels)}})
+        def commit(repository, tag, conf):
+            self.assertEqual(repository + ':' + tag, prepared_baseline_cache_tag(source_id, task, base))
+            self.assertEqual(conf, {'Labels':labels})
+            images[repository + ':' + tag] = committed
+            return committed
+        client = SimpleNamespace(images=SimpleNamespace(get=get))
+        with patch.dict(sys.modules, {'docker':docker, 'docker.errors':errors}):
+            self.assertIsNone(load_prepared_baseline(client, source, task, base))
+            self.assertIs(retain_prepared_baseline(client, SimpleNamespace(commit=commit), source, task, base), committed)
+            self.assertIs(load_prepared_baseline(client, source, task, base), committed)
+            committed.attrs['Config']['Labels']['asb.base-commit'] = 'wrong'
+            with self.assertRaisesRegex(ExecutionError, 'identity, ownership or architecture'):
+                load_prepared_baseline(client, source, task, base)
     def test_offline_material_cache_requires_owned_native_image(self):
         class ImageNotFound(Exception): pass
         docker, errors = ModuleType('docker'), ModuleType('docker.errors')
