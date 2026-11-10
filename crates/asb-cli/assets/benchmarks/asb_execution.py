@@ -19,6 +19,15 @@ class ExecutionError(RuntimeError):
     pass
 
 
+# Docker can briefly refuse an exec request while several independently
+# prepared guest gates are resumed together.  A resume request is idempotent
+# for a stopped gate, but issuing every request to the daemon at precisely the
+# same instant is not required for a concurrent benchmark.  Keep this lock
+# process-local: it bounds only the tiny control-plane request, never agent or
+# evaluator execution.
+_GATE_RESUME_LOCK = threading.Lock()
+
+
 def _parse_cpu_list(value):
     """Decode a bounded Linux cpulist without inventing or reordering IDs."""
     if not isinstance(value, str) or not value or len(value) > 65536:
@@ -533,9 +542,33 @@ class ManagedDockerWorkspace:
                 phase_deadline[0] = execution_started + timeout + (30 if gate == "application" else 0)
             # Minimal official task images may have only the POSIX shell's
             # kill builtin, not a standalone /bin/kill executable.
-            resumed = container.exec_run(["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)])
-            if resumed.exit_code != 0:
-                raise ExecutionError("container execution gate could not be resumed")
+            resume_error = None
+            for resume_attempt in range(3):
+                # Concurrent replicas may share one Docker daemon. Serialize
+                # only this idempotent SIGCONT request, then make a bounded
+                # retry for a transient daemon-side refusal while the gate is
+                # still stopped. Agent execution remains fully concurrent.
+                try:
+                    with _GATE_RESUME_LOCK:
+                        resumed = container.exec_run(
+                            ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
+                        )
+                    if resumed.exit_code == 0:
+                        resume_error = None
+                        break
+                    resume_error = "nonzero"
+                except Exception:
+                    resume_error = "unavailable"
+                with phase_lock:
+                    expired_or_cancelled = (expired.is_set() or interrupted.is_set()
+                                            or time.monotonic() >= phase_deadline[0]
+                                            or (cancelled is not None and cancelled.is_set()))
+                if expired_or_cancelled:
+                    raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
+                if resume_attempt < 2:
+                    time.sleep(0.05 * (resume_attempt + 1))
+            if resume_error is not None:
+                raise ExecutionError("container execution gate could not be resumed after bounded retry")
             stdout, stderr = bytearray(), gate_stderr
             truncated = False
             frames = WorkloadFrames(namespace_pid, workload_owner, on_execution_end) if workload_owner else None
