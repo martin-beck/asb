@@ -20,6 +20,7 @@ pub struct Session(proxy::Chain);
 
 pub(crate) struct AgentContext<'a> {
     pub cpu_affinity: Option<&'a crate::runtime::affinity::AffinityMask>,
+    pub strip_proxy_v1: bool,
     pub workspace: &'a Path,
     pub ignore_provider_mismatch: bool,
     pub ignore_provider_unconsumed: bool,
@@ -76,6 +77,7 @@ impl Session {
             respect_record_timings,
             AgentContext {
                 cpu_affinity: None,
+                strip_proxy_v1: false,
                 workspace,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
@@ -127,6 +129,7 @@ impl Session {
         };
         let settings = proxy::RecordingRequest {
             cpu_affinity: context.cpu_affinity,
+            strip_proxy_v1: context.strip_proxy_v1,
             recorder: context.recorder,
             mode,
             cassette,

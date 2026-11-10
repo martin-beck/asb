@@ -37,6 +37,19 @@ use Interface::{
     AnthropicMessages as Messages, Gemini, OpenAiChat as Chat, OpenAiResponses as Responses,
 };
 pub(super) trait ProviderAdapter: Sync {
+    /// Provider-owned endpoint source used when no explicit endpoint is set.
+    fn endpoint_override(&self) -> Result<Option<String>, crate::Error> {
+        Ok(None)
+    }
+    fn catalog_environment_is_base(&self) -> bool {
+        false
+    }
+    fn authoritative_tape_upstream(&self) -> Result<Option<String>, crate::Error> {
+        Ok(None)
+    }
+    fn strip_proxy_version_for_recording(&self, _base: &str) -> bool {
+        false
+    }
     fn runtime_inputs(
         &self,
         _context: &crate::runtime_inputs::Context<'_>,

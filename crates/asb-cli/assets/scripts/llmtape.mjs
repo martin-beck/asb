@@ -143,6 +143,7 @@ const port = Number(option(args, "--port"));
 if (!Number.isInteger(port) || port < (readyFile ? 0 : 1) || port > 65535) usage("--port must be a valid TCP port");
 const cassette = mode === "record" ? option(args, "--out") : option(args, "--cassette");
 const upstream = mode === "record" ? option(args, "--upstream") : undefined;
+const stripUpstreamV1 = mode === "record" && args.includes("--strip-upstream-v1");
 const mismatchEvidence = process.env.ASB_TAPE_MISMATCH_EVIDENCE;
 const discoveryPath = process.env.ASB_TAPE_DISCOVERY_CATALOG;
 delete process.env.ASB_TAPE_DISCOVERY_CATALOG;
@@ -1208,7 +1209,9 @@ async function handle(request, response, recording) {
 
   // Preserve provider-specific prefixes (e.g. OpenRouter's /api) while
   // keeping the selected upstream host, even for absolute-form requests.
-  const target = new URL(`${upstream.replace(/\/+$/, "")}${requestPath(recordedRequest.url)}`);
+  const requestedPath = requestPath(recordedRequest.url);
+  const forwardedPath = stripUpstreamV1 ? requestedPath.replace(/^\/v1(?=\/|\?|$)/, "") : requestedPath;
+  const target = new URL(`${upstream.replace(/\/+$/, "")}${forwardedPath}`);
   const forwardedHeaders = { ...request.headers };
   delete forwardedHeaders.host;
   delete forwardedHeaders.connection;

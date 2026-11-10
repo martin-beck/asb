@@ -36,6 +36,7 @@ fn record_uses_one_filesystem_resolved_destination_for_producer_and_receipt() {
     ] {
         let settings = Settings {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -80,6 +81,7 @@ fn external_override_never_receives_private_capture_capability_or_invents_eviden
         let fixture = Fixture::new();
         let settings = Settings {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -276,6 +278,7 @@ fn existing_recording_destinations_are_refused_before_starting_a_proxy() {
         }
         let settings = Settings {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,
@@ -318,6 +321,7 @@ fn startup_errors_are_specific_and_remove_only_their_private_scratch() {
         let root = Fixture::new();
         let mut settings = Settings {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             mode: Mode::Record,

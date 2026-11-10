@@ -200,6 +200,7 @@ fn materialize_normalizers(
 
 struct Settings {
     cpu_affinity: Option<crate::runtime::affinity::AffinityMask>,
+    strip_proxy_v1: bool,
     mode: Mode,
     cassette: PathBuf,
     respect_record_timings: bool,
@@ -305,6 +306,9 @@ impl ProxyAdapter for LlmtapeAdapter {
     fn supports_custom_normalization(&self) -> bool {
         true
     }
+    fn supports_upstream_path_rewrite(&self) -> bool {
+        true
+    }
 
     fn recording_settings(
         &self,
@@ -312,6 +316,7 @@ impl ProxyAdapter for LlmtapeAdapter {
     ) -> Result<Box<dyn Any>, Error> {
         Ok(Box::new(Settings {
             cpu_affinity: request.cpu_affinity.cloned(),
+            strip_proxy_v1: request.strip_proxy_v1,
             mode: request.mode,
             cassette: request.cassette.to_path_buf(),
             respect_record_timings: request.respect_record_timings,
@@ -411,6 +416,9 @@ impl ProxyAdapter for LlmtapeAdapter {
         // only after listening. A released parent-selected port can be taken
         // by a different ASB process; a TCP connect does not prove ownership.
         let builtin = matches!(executable, ProxyExecutable::Builtin(_));
+        if !builtin && request.strip_proxy_v1 {
+            return Err(Error::Input("external recorder cannot route a provider base URL without /v1; use the built-in recorder".into()));
+        }
         if !builtin && (request.ignore_provider_mismatch || request.ignore_provider_unconsumed) {
             return Err(Error::Input(
                 "external tape overrides cannot establish approximate replay evidence".into(),
@@ -560,6 +568,9 @@ impl ProxyAdapter for LlmtapeAdapter {
                 })?;
                 command.args(["--upstream", upstream, "--out"]);
                 command.arg(cassette);
+                if request.strip_proxy_v1 {
+                    command.arg("--strip-upstream-v1");
+                }
             }
             Mode::Replay => {
                 command.args(["--cassette"]);
@@ -1670,6 +1681,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: None,
+                strip_proxy_v1: false,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -1704,6 +1716,7 @@ mod tests {
         use crate::proxy::ProxyAdapter;
         let request = crate::proxy::RecordingRequest {
             cpu_affinity: None,
+            strip_proxy_v1: false,
             ignore_provider_mismatch: false,
             ignore_provider_unconsumed: false,
             recorder: None,
@@ -1921,6 +1934,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: Some(&affinity),
+                strip_proxy_v1: false,
                 workspace: &root,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
@@ -1983,6 +1997,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: Some(&affinity),
+                strip_proxy_v1: false,
                 workspace: &root,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
@@ -4802,6 +4817,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: None,
+                strip_proxy_v1: false,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -4858,6 +4874,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: None,
+                strip_proxy_v1: false,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
@@ -4926,6 +4943,7 @@ mod tests {
             false,
             crate::tape::AgentContext {
                 cpu_affinity: None,
+                strip_proxy_v1: false,
                 ignore_provider_mismatch: false,
                 ignore_provider_unconsumed: false,
                 workspace: &root,
