@@ -79,6 +79,30 @@ fn prints_selected_legacy_cassette_without_modifying_it() {
 
 #[cfg(unix)]
 #[test]
+fn cassette_browser_wrap_and_scroll_keys_work_in_narrow_terminal() {
+    let fixture = Fixture::new();
+    let payload =
+        serde_json::json!({"stderr":"failure", "long":"x".repeat(500)}).to_string() + "\n";
+    let path = fixture.write("recording.jsonl", &payload);
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/cassette_tui.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_asb-replay-debug"))
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), payload);
+}
+
+#[cfg(unix)]
+#[test]
 fn terminal_manager_creates_edits_and_enables_rules_from_evidence() {
     use std::os::unix::fs::PermissionsExt;
     for mode in ["mismatch", "cassette"] {
