@@ -423,6 +423,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             project_root: Path::new("fixture-project"),
             preparation_seconds: Some(1800.0),
             timeout: 1.0,
+            idle_timeout_seconds: 3600,
             tools_root: Path::new("fixture-tools"),
             bootstrap: &bootstrap,
             measure_target: false,
@@ -439,7 +440,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
     .unwrap();
     assert_eq!(
         agent,
-        json!({"op":"agent","binary":"fixture-asb","project_root":"fixture-project","preparation_seconds":1800.0,"timeout":1.0,
+        json!({"op":"agent","binary":"fixture-asb","project_root":"fixture-project","preparation_seconds":1800.0,"timeout":1.0,"idle_timeout_seconds":3600,
         "tools_root":"fixture-tools","bootstrap":{"runtime_tools":[],"assets":[],"public_package_cache":false,"npm_package_tree":null},
         "measure_target":false,"project_configuration":"fixture","environment":{},"network":null,"artifact_output":"fixture-artifacts","private_inputs":[],"request":{"replay":true}})
     );
@@ -479,6 +480,26 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             "cancel",
             "initial-material"
         ])
+    );
+    let idle_timeout = std::process::Command::new("python3")
+        .args([
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            "import json,sys;sys.path.insert(0,sys.argv[1]);from asb_execution import ExecutionError;from asb_task_server import idle_timeout_seconds; cases=[]\nfor request in ({'idle_timeout_seconds':11040},{'idle_timeout_seconds':899},{'idle_timeout_seconds':14401},{'idle_timeout_seconds':True}):\n try: cases.append(idle_timeout_seconds(request,900))\n except ExecutionError: cases.append('rejected')\nprint(json.dumps(cases))",
+        ])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/benchmarks"))
+        .output()
+        .unwrap();
+    assert!(
+        idle_timeout.status.success(),
+        "{}",
+        String::from_utf8_lossy(&idle_timeout.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&idle_timeout.stdout).unwrap(),
+        json!([11040, "rejected", "rejected", "rejected"])
     );
     for name in events {
         let value = json!({"event":name});

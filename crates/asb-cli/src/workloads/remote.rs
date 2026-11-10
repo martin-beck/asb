@@ -24,6 +24,7 @@ const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const RETAINED_GRADING_TIMEOUT: Duration = Duration::from_secs(1980);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
 const INITIAL_MATERIAL_TIMEOUT: Duration = Duration::from_secs(600);
+const COHORT_IDLE_ALLOWANCE: Duration = Duration::from_secs(120);
 const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
@@ -1281,6 +1282,10 @@ impl Session {
                 .map(|launch| launch.remaining().map(|remaining| remaining.as_secs_f64()))
                 .transpose()?,
             timeout: self.agent_timeout.as_secs_f64(),
+            idle_timeout_seconds: self
+                .preparation_seconds
+                .saturating_add(self.agent_timeout.as_secs())
+                .saturating_add(COHORT_IDLE_ALLOWANCE.as_secs()),
             tools_root: &tools_root,
             bootstrap: &bootstrap,
             measure_target: context.measurements.is_some(),
