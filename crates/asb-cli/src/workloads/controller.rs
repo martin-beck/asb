@@ -453,6 +453,25 @@ mod tests {
         assert!(!controller.child().try_wait().unwrap().unwrap().success());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn interruption_during_setup_requests_controlled_workload_cleanup() {
+        let _guard = crate::interruption::Guard::install();
+        let mut command = ControllerCommand::new("python3").unwrap();
+        command.args(["-u", "-c", "import json,sys\nprint(json.dumps(dict(event='ready')),flush=True)\nassert sys.stdin.read()==''\nprint(json.dumps(dict(event='closed',cleanup='removed')),flush=True)\n"]);
+        let mut controller = Controller::spawn(&mut command).unwrap();
+        controller
+            .receive(Instant::now() + Duration::from_secs(3))
+            .unwrap();
+        crate::interruption::request_for_test();
+        let error = controller
+            .receive(Instant::now() + Duration::from_secs(3))
+            .unwrap_err();
+        assert!(error.contains("controlled workload cleanup"));
+        controller.cancel(Duration::from_secs(3)).unwrap();
+        assert!(controller.child().try_wait().unwrap().unwrap().success());
+    }
+
     #[test]
     fn cancelled_startup_without_a_created_resource_can_be_confirmed() {
         let mut command = ControllerCommand::new("python3").unwrap();

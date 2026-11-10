@@ -26,6 +26,7 @@ pub(crate) mod fixture_writer;
 mod helper_exchange;
 mod http_server;
 mod install;
+mod interruption;
 mod launch;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../tests/support/material_guardian.rs"]
@@ -95,6 +96,7 @@ use std::process::ExitCode;
 /// Run the process CLI.
 #[must_use]
 pub fn entry(args: Vec<OsString>) -> ExitCode {
+    let _interruption = interruption::Guard::install();
     #[cfg(target_os = "linux")]
     if args.first().is_some_and(|arg| arg == "__asb-proc-exe") {
         return collectors::adapters::agent_processes::proc_exe_entry(&args[1..]);
