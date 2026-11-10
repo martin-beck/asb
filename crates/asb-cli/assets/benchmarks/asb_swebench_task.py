@@ -19,32 +19,52 @@ SUBMISSION_WORKTREE = "/testbed"
 # Repository setup has its own bounds; neither is an agent execution budget.
 _REPOSITORY_GATE_PREPARATION_SECONDS = 600
 _REPOSITORY_COMMAND_SECONDS = 600
-_PREPARED_BASELINE_CACHE_VERSION = "swebench-prepared-baseline-v1"
+_PREPARED_BASELINE_RAW_CACHE_VERSION = "swebench-prepared-baseline-v1"
+_PREPARED_BASELINE_MATERIAL_CACHE_VERSION = "swebench-prepared-baseline-v2"
 _PREPARED_BASELINE_LOCK_SECONDS = 600
 
 
-def prepared_baseline_cache_tag(source_image_id, task_id, base_commit):
-    """Address one replay-only, clean task baseline without host-specific names."""
+def _validated_prepared_baseline_inputs(source_image_id, task_id, base_commit, material_sha256):
     if (not isinstance(source_image_id, str)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_image_id)
             or not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", task_id)
-            or not isinstance(base_commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", base_commit)):
+            or not isinstance(base_commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", base_commit)
+            or material_sha256 is not None and (not isinstance(material_sha256, str)
+                                                or not re.fullmatch(r"[0-9a-f]{64}", material_sha256))):
         raise ExecutionError("prepared baseline cache requires validated image, task and base identities")
-    digest = hashlib.sha256((source_image_id + "\0" + task_id + "\0" + base_commit).encode("ascii")).hexdigest()
+
+
+def prepared_baseline_cache_tag(source_image_id, task_id, base_commit, material_sha256=None):
+    """Address one replay-only, clean task baseline without host-specific names.
+
+    A verified retained replay material is content-addressed, whereas a Docker
+    image ID is daemon-local.  Prefer that material identity so a fresh daemon
+    or an equivalent imported image can reuse the same clean baseline.
+    """
+    _validated_prepared_baseline_inputs(source_image_id, task_id, base_commit, material_sha256)
+    identity = ("material-v1\0" + material_sha256) if material_sha256 is not None else source_image_id
+    digest = hashlib.sha256((identity + "\0" + task_id + "\0" + base_commit).encode("ascii")).hexdigest()
     return "asb-swebench-baseline:" + digest
 
 
-def prepared_baseline_labels(source_image, task_id, base_commit):
-    """Bind a retained baseline to the exact image and official task revision."""
+def prepared_baseline_labels(source_image, task_id, base_commit, material_sha256=None):
+    """Bind a retained baseline to an exact image or verified replay material."""
     image_id = getattr(source_image, "id", None)
-    tag = prepared_baseline_cache_tag(image_id, task_id, base_commit)
-    return tag, {"asb.owner": "asb", "asb.cache": _PREPARED_BASELINE_CACHE_VERSION,
-                 "asb.cache-key": tag.rsplit(":", 1)[1], "asb.source-image": image_id,
-                 "asb.task-id": task_id, "asb.base-commit": base_commit}
+    tag = prepared_baseline_cache_tag(image_id, task_id, base_commit, material_sha256)
+    labels = {"asb.owner": "asb",
+              "asb.cache": (_PREPARED_BASELINE_MATERIAL_CACHE_VERSION if material_sha256 is not None
+                            else _PREPARED_BASELINE_RAW_CACHE_VERSION),
+              "asb.cache-key": tag.rsplit(":", 1)[1],
+              "asb.task-id": task_id, "asb.base-commit": base_commit}
+    if material_sha256 is not None:
+        labels["asb.material-sha256"] = material_sha256
+    else:
+        labels["asb.source-image"] = image_id
+    return tag, labels
 
 
-def _validated_prepared_baseline(image, source_image, task_id, base_commit):
-    tag, expected = prepared_baseline_labels(source_image, task_id, base_commit)
+def _validated_prepared_baseline(image, source_image, task_id, base_commit, material_sha256=None):
+    tag, expected = prepared_baseline_labels(source_image, task_id, base_commit, material_sha256)
     attrs = getattr(image, "attrs", {})
     labels = attrs.get("Config", {}).get("Labels", {}) or {}
     source_attrs = getattr(source_image, "attrs", {})
@@ -58,27 +78,27 @@ def _validated_prepared_baseline(image, source_image, task_id, base_commit):
     return tag
 
 
-def load_prepared_baseline(client, source_image, task_id, base_commit):
+def load_prepared_baseline(client, source_image, task_id, base_commit, material_sha256=None):
     """Return an authenticated retained baseline, or None if it has not been made."""
     import docker.errors
-    tag, _labels = prepared_baseline_labels(source_image, task_id, base_commit)
+    tag, _labels = prepared_baseline_labels(source_image, task_id, base_commit, material_sha256)
     try:
         image = client.images.get(tag)
     except docker.errors.ImageNotFound:
         return None
-    _validated_prepared_baseline(image, source_image, task_id, base_commit)
+    _validated_prepared_baseline(image, source_image, task_id, base_commit, material_sha256)
     return image
 
 
-def retain_prepared_baseline(client, container, source_image, task_id, base_commit):
+def retain_prepared_baseline(client, container, source_image, task_id, base_commit, material_sha256=None):
     """Commit exactly one verified clean task container for future offline replays."""
-    tag, labels = prepared_baseline_labels(source_image, task_id, base_commit)
+    tag, labels = prepared_baseline_labels(source_image, task_id, base_commit, material_sha256)
     repository, version = tag.rsplit(":", 1)
     created = container.commit(repository=repository, tag=version, conf={"Labels": labels})
     image = client.images.get(tag)
     if image.id != created.id:
         raise ExecutionError("prepared baseline cache identity changed while it was published")
-    _validated_prepared_baseline(image, source_image, task_id, base_commit)
+    _validated_prepared_baseline(image, source_image, task_id, base_commit, material_sha256)
     return image
 
 
@@ -227,10 +247,11 @@ class SweBenchTask:
         self.preparing_repository = True
         try:
             self.journal = ResourceJournal(self.client, self.artifacts, self.attempt)
+            expected_material = os.environ.get("ASB_EXPECTED_MATERIAL_SHA256")
             image, source = resolve_image(self.client, spec.image, lambda: build_image(
                 self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,
                 cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay",
-                material_sha256=os.environ.get("ASB_EXPECTED_MATERIAL_SHA256"))
+                material_sha256=expected_material)
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
@@ -238,11 +259,18 @@ class SweBenchTask:
             if self.snapshot:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
             base = self.row["base_commit"]
-            cache_tag, _cache_labels = prepared_baseline_labels(image, self.task_id, base)
+            material_identity = None
+            if self.tool_mode == "replay" and expected_material is not None:
+                material_identity = source.get("cache_material_sha256")
+                if (source.get("source") != "verified-local-material-cache"
+                        or material_identity != expected_material):
+                    raise CatalogError("offline replay did not resolve the expected verified material identity")
+            cache_tag, _cache_labels = prepared_baseline_labels(
+                image, self.task_id, base, material_identity)
             cache_lock = (prepared_baseline_lock(self.catalog_path, cache_tag, self.cancelled)
                           if self.tool_mode == "replay" else nullcontext())
             with cache_lock:
-                baseline = (load_prepared_baseline(self.client, image, self.task_id, base)
+                baseline = (load_prepared_baseline(self.client, image, self.task_id, base, material_identity)
                             if self.tool_mode == "replay" else None)
                 workspace_image = baseline or image
                 self.workspace = ManagedDockerWorkspace(self.client, workspace_image, self.attempt, CONTAINER_WORKDIR,
@@ -269,7 +297,8 @@ class SweBenchTask:
                     # .git directory; that must not destroy the original comparison.
                     self.checked(["cp", "-a", f"{CONTAINER_WORKDIR}/.git", self.submission_git_dir()])
                     if self.tool_mode == "replay":
-                        retain_prepared_baseline(self.client, self.workspace.container, image, self.task_id, base)
+                        retain_prepared_baseline(self.client, self.workspace.container, image, self.task_id, base,
+                                                 material_identity)
                 elif self.snapshot:
                     # Snapshot storage is per attempt, so only its independent
                     # submission copy is recreated from the cached clean tree.
