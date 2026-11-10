@@ -2355,6 +2355,15 @@ fn full_entry_child(case: &str) {
         toml::to_string(&project).unwrap(),
     )
     .unwrap();
+    let python = crate::tools::host_executable(Path::new("python3.12")).unwrap();
+    assert!(
+        Command::new(python)
+            .args(["-m", "venv", "--without-pip"])
+            .arg(root.join(".asb/python/venv"))
+            .status()
+            .unwrap()
+            .success()
+    );
     std::fs::create_dir(root.join("workloads")).unwrap();
     workloads::populate(&root.join("workloads")).unwrap();
     // These lifecycle fixtures exercise runner state, not a client protocol.
@@ -2646,6 +2655,12 @@ fn full_entry_child(case: &str) {
         lifetime: case.contains("owner-lifetime").then(|| calls.clone()),
     };
     if phase_case && (case.contains("-repeat-") || case.contains("-sweep-")) {
+        // This test is already in its own libtest subprocess.  Sweep input
+        // discovery is deliberately relative to the invocation directory;
+        // without this, an ancestor project's mutable `.asb` state is sealed
+        // instead of this fixture's project and unrelated test activity makes
+        // the continuation evidence appear to change.
+        std::env::set_current_dir(&root).unwrap();
         std::mem::forget(fixture);
         check_phase_continuation(
             case,
