@@ -78,11 +78,11 @@ fn cancellation_resumes_a_stopped_owned_child_so_term_can_complete() {
 }
 
 #[test]
-fn archive_release_is_retained_for_nested_guest_gates() {
+fn archive_release_is_consumed_before_nested_guest_gates() {
     const CASE: &str = "ASB_GATE_ARCHIVE_RELEASE_CASE";
     if std::env::var_os(CASE).is_some() {
-        await_archive_gate_release().unwrap();
-        assert!(std::env::var_os(GATE_RELEASE).is_some());
+        consume_archive_gate_release().unwrap();
+        assert!(std::env::var_os(GATE_RELEASE).is_none());
         return;
     }
     // The release capability is intentionally restricted to the guest's
@@ -99,7 +99,7 @@ fn archive_release_is_retained_for_nested_guest_gates() {
     ));
     fs::write(&release, []).unwrap();
     let name = format!(
-        "{}::archive_release_is_retained_for_nested_guest_gates",
+        "{}::archive_release_is_consumed_before_nested_guest_gates",
         module_path!().split_once("::").unwrap().1
     );
     let output = Command::new(std::env::current_exe().unwrap())
