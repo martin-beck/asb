@@ -78,6 +78,39 @@ fn cancellation_resumes_a_stopped_owned_child_so_term_can_complete() {
 }
 
 #[test]
+fn namespace_resume_requires_one_stopped_non_init_target() {
+    assert_eq!(
+        resume_namespace_target(&[]),
+        std::process::ExitCode::from(2)
+    );
+    assert_eq!(
+        resume_namespace_target(&["1".into()]),
+        std::process::ExitCode::from(2)
+    );
+    let mut child = Command::new("sh")
+        .args(["-c", "kill -STOP $$; exit 9"])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let status = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        if status
+            .lines()
+            .any(|line| line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        resume_namespace_target(&[child.id().to_string().into()]),
+        std::process::ExitCode::SUCCESS
+    );
+    assert_eq!(child.wait().unwrap().code(), Some(9));
+}
+
+#[test]
 fn archive_release_is_consumed_before_nested_guest_gates() {
     const CASE: &str = "ASB_GATE_ARCHIVE_RELEASE_CASE";
     if std::env::var_os(CASE).is_some() {

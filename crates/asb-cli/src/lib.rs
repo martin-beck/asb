@@ -158,6 +158,12 @@ pub fn entry(args: Vec<OsString>) -> ExitCode {
     if args.first().is_some_and(|arg| arg == "__asb-gate") {
         return process_gate::run_gate(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "__asb-resume") {
+        #[cfg(unix)]
+        return process_gate::resume_namespace_target(&args[1..]);
+        #[cfg(not(unix))]
+        return ExitCode::from(2);
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "__asb-measure-launch")
