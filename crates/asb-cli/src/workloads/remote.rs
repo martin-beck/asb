@@ -1459,6 +1459,14 @@ impl Session {
             // collectors concurrently, still before its own Resume request.
             launch.ready()?;
         }
+        // The attachment budget begins only once every member has a verified
+        // stopped target. It does not admit a replica: `ready` below remains
+        // the final collector-success barrier before Resume. This prevents a
+        // collector that never reaches its post-attachment arrival from
+        // consuming the execution timeout indefinitely.
+        if let Some(collector_ready) = context.collector_ready {
+            collector_ready.arm()?;
+        }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
             if self.measurement_active {

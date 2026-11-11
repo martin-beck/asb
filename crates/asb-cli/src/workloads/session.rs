@@ -265,6 +265,14 @@ mod input_tests {
 
 /// The runner provides negotiated connections, never workload/agent dispatch.
 pub(crate) trait LaunchReadiness {
+    /// Begin any bounded pre-release work without admitting this replica.
+    ///
+    /// Collector readiness uses this after every target has been verified as
+    /// stopped, but before collector attachment. `ready` remains the only
+    /// operation that can contribute to the final Resume barrier.
+    fn arm(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn ready(&self) -> Result<(), String>;
     fn abort(&self);
     fn remaining(&self) -> Result<std::time::Duration, String>;
