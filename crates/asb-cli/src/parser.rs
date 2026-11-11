@@ -1266,6 +1266,30 @@ enum SetupMode {
     Tui,
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ThinkingEffortArg {
+    /// Preserve the selected agent's ordinary default.
+    Default,
+    Low,
+    Medium,
+    High,
+    #[value(name = "xhigh")]
+    XHigh,
+}
+
+impl From<ThinkingEffortArg> for Option<crate::benchmark::ThinkingEffort> {
+    fn from(value: ThinkingEffortArg) -> Self {
+        use crate::benchmark::ThinkingEffort;
+        match value {
+            ThinkingEffortArg::Default => None,
+            ThinkingEffortArg::Low => Some(ThinkingEffort::Low),
+            ThinkingEffortArg::Medium => Some(ThinkingEffort::Medium),
+            ThinkingEffortArg::High => Some(ThinkingEffort::High),
+            ThinkingEffortArg::XHigh => Some(ThinkingEffort::XHigh),
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 #[command(
     after_help = "Selection options accept the reserved keyword 'all'. Models/trials also accept PROVIDER=all or WORKLOAD=all. --model all queries the selected providers; other selectors use local catalogs. Paths and concurrency do not accept 'all'."
@@ -1300,6 +1324,9 @@ struct SetupArgs {
     /// Repeat to select models; use PROVIDER=MODEL to scope a model to one provider.
     #[arg(long)]
     model: Vec<String>,
+    /// Repeat to compare adapter-owned reasoning effort; `default` preserves the agent default.
+    #[arg(long, value_enum, conflicts_with = "preset")]
+    thinking_effort: Vec<ThinkingEffortArg>,
     /// Experimentally capture native tool and workspace effects during recording.
     #[arg(long, conflicts_with_all = ["mode", "preset"])]
     native_snapshot_record: bool,
@@ -1328,6 +1355,7 @@ impl From<SetupArgs> for config::SetupOptions {
             trial_set: value.trial_set,
             provider: value.provider,
             model: value.model,
+            thinking_effort: value.thinking_effort.into_iter().map(Into::into).collect(),
             native_snapshot_record: value.native_snapshot_record,
             measure: value.measure,
             concurrency: value.concurrency,
@@ -1832,6 +1860,34 @@ mod tests {
         assert!(rendered.contains("gpt-6.1-sol"));
         assert!(rendered.contains("benchmark.toml"));
         assert!(rendered.contains("selected.workload.toml"));
+    }
+
+    #[test]
+    fn setup_parses_typed_repeatable_thinking_effort_including_default() {
+        let cli = Cli::try_parse_from([
+            "asb",
+            "setup",
+            "--agent",
+            "pi",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-6-sol",
+            "--workload",
+            "bug-fix",
+            "--thinking-effort",
+            "default",
+            "--thinking-effort",
+            "high",
+            "--thinking-effort",
+            "xhigh",
+        ])
+        .expect("thinking effort selections parse");
+        let rendered = format!("{cli:?}");
+        assert!(rendered.contains("Default"));
+        assert!(rendered.contains("High"));
+        assert!(rendered.contains("XHigh"));
+        assert!(Cli::try_parse_from(["asb", "setup", "--thinking-effort", "maximum"]).is_err());
     }
 
     #[test]

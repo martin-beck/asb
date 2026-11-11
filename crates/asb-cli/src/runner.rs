@@ -89,6 +89,27 @@ pub(crate) fn validate_mcp_configuration(
     attempt::validate_mcp_configuration(config, mcp_tape_mode)
 }
 
+/// Reject an explicit adapter-owned thinking setting before setup work,
+/// collectors, or a provider process can start. Existing configurations that
+/// omit the field retain their selected agent's ordinary behavior.
+pub(crate) fn validate_thinking_effort_configuration(
+    config: &BenchmarkConfig,
+) -> Result<(), Error> {
+    let Some(_) = config.thinking_effort else {
+        return Ok(());
+    };
+    let adapter = agents::find(&config.agent)
+        .ok_or_else(|| Error::Input(format!("unknown agent `{}`", config.agent)))?;
+    let endpoint = crate::endpoint::choose_from(
+        adapter.id(),
+        adapter.supported_endpoints(),
+        &config.provider,
+        &config.model,
+        &providers::offered_endpoints(&config.provider, &config.model),
+    )?;
+    crate::config::validate_thinking_effort(adapter, endpoint.interface, config.thinking_effort)
+}
+
 fn emit_warning(
     warnings: &Mutex<BTreeSet<String>>,
     output: &mut dyn Write,
@@ -442,6 +463,7 @@ pub(crate) fn run_with_diagnostics(
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
     validate_runtime_configuration(&config)?;
+    validate_thinking_effort_configuration(&config)?;
     validate_runtime_target(&config)?;
     crate::runtime::settings::confirm_topology(
         std::iter::once(&config.runtime),
@@ -3946,6 +3968,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "cli2key".into(),
             model: "gpt-test".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,
@@ -3976,6 +3999,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "cli2key".into(),
             model: "gpt-test".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,
@@ -4044,6 +4068,7 @@ mod tests {
                 workload: "bug-fix".into(),
                 provider: "cli2key".into(),
                 model: "gpt-test".into(),
+                thinking_effort: None,
                 concurrency: 1,
                 trial_set: None,
                 trial: None,
@@ -4078,6 +4103,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "cli2key".into(),
             model: "gpt-6.1-sol".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,
@@ -4200,6 +4226,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "opencode-zen".into(),
             model: "mimo-v2.6-flash-free".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,
@@ -4233,6 +4260,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "local".into(),
             model: "test-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,

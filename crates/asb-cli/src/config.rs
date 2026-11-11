@@ -2,7 +2,7 @@
 
 use super::Error;
 use crate::agents;
-use crate::benchmark::{BenchmarkConfig, MeasurementConfig, RetentionConfig};
+use crate::benchmark::{BenchmarkConfig, MeasurementConfig, RetentionConfig, ThinkingEffort};
 use crate::measurements;
 use crate::project;
 use crate::providers;
@@ -18,6 +18,8 @@ pub struct SetupOptions {
     pub trial_set: Vec<String>,
     pub provider: Vec<String>,
     pub model: Vec<String>,
+    /// Optional adapter-owned thinking budgets; `None` is the agent default.
+    pub thinking_effort: Vec<Option<ThinkingEffort>>,
     pub native_snapshot_record: bool,
     pub measure: Vec<String>,
     pub concurrency: Option<usize>,
@@ -151,6 +153,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
         trial_set,
         provider,
         model,
+        thinking_effort,
         native_snapshot_record,
         measure,
         concurrency,
@@ -203,6 +206,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
         workload: required(workload.into_iter().next())?,
         provider,
         model,
+        thinking_effort: thinking_effort.into_iter().next().flatten(),
         native_snapshot_record,
         concurrency,
         trial_set: trial_set.into_iter().next(),
@@ -226,14 +230,36 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
     };
     // Reject static endpoint mismatches before publishing a configuration.
     // Live model-catalog tool support is checked before the provider/agent starts.
-    crate::endpoint::choose_from(
+    let endpoint = crate::endpoint::choose_from(
         adapter.id(),
         adapter.supported_endpoints(),
         &config.provider,
         &config.model,
         &providers::offered_endpoints(&config.provider, &config.model),
     )?;
+    validate_thinking_effort(adapter, endpoint.interface, config.thinking_effort)?;
     Ok(config)
+}
+
+/// Keep thinking-effort support owned by the selected agent adapter. Setup and
+/// execution validate it before an agent process starts.
+pub(crate) fn validate_thinking_effort(
+    adapter: &dyn crate::agents::AgentAdapter,
+    interface: crate::endpoint::Interface,
+    effort: Option<ThinkingEffort>,
+) -> Result<(), Error> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    if adapter.supports_thinking_effort(interface, effort) {
+        Ok(())
+    } else {
+        Err(Error::Input(format!(
+            "agent `{}` does not support --thinking-effort {effort} through its selected {:?} endpoint; omit --thinking-effort or choose a supported agent/provider/model combination",
+            adapter.id(),
+            interface
+        )))
+    }
 }
 
 fn validate_selection(
@@ -311,8 +337,9 @@ fn required(value: Option<String>) -> Result<String, Error> {
 mod tests {
     use super::{
         SetupOptions, default_log_name, narrow_preset_workloads, preset_sweep_path,
-        require_initialized_preset_project, run_command_message, setup,
+        require_initialized_preset_project, run_command_message, setup, validate_thinking_effort,
     };
+    use crate::benchmark::ThinkingEffort;
     use std::path::Path;
 
     mod setup_installables {
@@ -471,6 +498,7 @@ mod tests {
             trial_set: vec![],
             provider: vec![provider.into()],
             model: vec![model.into()],
+            thinking_effort: vec![],
             measure: vec![],
             concurrency: None,
             workspace: None,
@@ -497,6 +525,38 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("setup must not reject models absent from an old snapshot");
+    }
+
+    #[test]
+    fn explicit_thinking_effort_rejects_unsupported_agent_or_endpoint() {
+        let pi = crate::agents::find("pi").unwrap();
+        assert!(
+            validate_thinking_effort(
+                pi,
+                crate::endpoint::Interface::OpenAiResponses,
+                Some(ThinkingEffort::High),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_thinking_effort(
+                pi,
+                crate::endpoint::Interface::OpenAiChat,
+                Some(ThinkingEffort::High),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not support --thinking-effort high")
+        );
+        let opencode = crate::agents::find("opencode").unwrap();
+        assert!(
+            validate_thinking_effort(
+                opencode,
+                crate::endpoint::Interface::OpenAiResponses,
+                Some(ThinkingEffort::XHigh),
+            )
+            .is_err()
+        );
     }
 
     #[test]

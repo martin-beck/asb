@@ -534,6 +534,7 @@ if (JSON.stringify(norm('/v1/chat/completions',one,'one')) === JSON.stringify(no
             agent: "openhands".into(),
             provider: "cli2key".into(),
             model: "fixture".into(),
+            thinking_effort: None,
             workload: "adapter-smoke".into(),
             concurrency: 1,
             trial_set: None,

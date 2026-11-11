@@ -64,6 +64,7 @@ pub(crate) fn load(name: &str) -> Result<SetupOptions, Error> {
         trial_count: Vec::new(),
         provider: preset.providers,
         model: preset.models,
+        thinking_effort: Vec::new(),
         native_snapshot_record: false,
         measure: preset.measurements,
         concurrency: Some(preset.concurrency),

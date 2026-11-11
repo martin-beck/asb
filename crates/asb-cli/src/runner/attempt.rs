@@ -261,6 +261,15 @@ impl<'a> ConfiguredAttempt<'a> {
             },
         )?;
 
+        if let (Some(adapter), Some(offer)) = (agents::find(&config.agent), selected_offer.as_ref())
+        {
+            crate::config::validate_thinking_effort(
+                adapter,
+                offer.interface,
+                config.thinking_effort,
+            )?;
+        }
+
         if context.options.custom_normalization.is_some() {
             require_normalizer_decoder(selected_offer.as_ref().map(|offer| offer.interface))?;
         }
@@ -2310,6 +2319,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "openrouter".into(),
             model: "tool-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,
