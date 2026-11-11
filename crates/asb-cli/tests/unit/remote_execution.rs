@@ -346,6 +346,87 @@ fn effective_resume_requires_host_proof_before_clearing_the_pending_barrier() {
     assert!(session.resume_ack_deadline.is_some());
     assert!(session.resume_target.is_some());
 }
+
+#[test]
+fn effective_resume_starts_execution_measurements_only_after_host_proof() {
+    let fixture = Fixture::new();
+    let mut session = fixture.session(&[], "stopped-preserved");
+    let root = crate::measurements::ProcessIdentity::read(std::process::id()).unwrap();
+    session.resume_ack_deadline = Some(Instant::now() + Duration::from_secs(1));
+    session.resume_exec_id = Some(json!("fixture"));
+    session.resume_target = Some(super::super::target::LocalTarget {
+        pid: root.pid,
+        namespace_pid: root.pid,
+        start_time_ticks: root.start_time_ticks,
+        cgroup: "/sys/fs/cgroup/fixture".into(),
+    });
+    session.resume_target_sha256 = Some("a".repeat(64));
+    let config = configuration();
+    let project = crate::project::ProjectConfig::default();
+    let connection = connection();
+    let measurements_dir = fixture.0.join("measurements");
+    let mut measurements = crate::measurements::Session::start_in_execution_namespace(
+        &measurements_dir,
+        &["agent-memory".into()],
+    )
+    .unwrap();
+    measurements
+        .attach_isolated_pid(root.pid, root.start_time_ticks)
+        .unwrap();
+    measurements
+        .event(crate::collectors::LifecycleEvent::RunStarted)
+        .unwrap();
+    {
+        let mut context = ExecutionContext {
+            ignore_tool_mismatch: false,
+            ignore_mcp_mismatch: false,
+            launch: None,
+            config: &config,
+            connection: Some(&connection),
+            project_root: &fixture.0,
+            project_config: &project,
+            replay: true,
+            max_steps: None,
+            tape_cassette: None,
+            tool_replay: false,
+            tool_tape_cassette: None,
+            mcp_mode: None,
+            mcp_tape_cassette: None,
+            measurements: Some(&mut measurements),
+            show_output: false,
+            progress: None,
+            collector_ready: None,
+        };
+        let proof_calls = std::cell::Cell::new(0);
+        session
+            .verify_effective_resume_with(
+                &mut context,
+                &json!({"exec_id":"fixture"}),
+                |_| {
+                    proof_calls.set(proof_calls.get() + 1);
+                    Ok(())
+                },
+                || false,
+            )
+            .unwrap();
+        assert_eq!(proof_calls.get(), 1);
+    }
+    assert!(session.measurement_active);
+    drop(measurements);
+    let lifecycle: Value =
+        serde_json::from_slice(&fs::read(measurements_dir.join("lifecycle.json")).unwrap())
+            .unwrap();
+    let kinds = lifecycle
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["event"]["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &kinds[..3],
+        ["run_started", "agent_execute_begin", "agent_started"]
+    );
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);

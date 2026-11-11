@@ -40,20 +40,47 @@ fn spawn_worker(task: WorkerTask) -> io::Result<WorkerHandle> {
         .name("asb-process-tree-snapshot".into())
         .spawn(task)
 }
+
+fn wait_for_execution_start(
+    root: ProcessIdentity,
+    cancelled: &AtomicBool,
+    execution_started: &AtomicBool,
+) -> bool {
+    while !cancelled.load(Ordering::Acquire)
+        && !execution_started.load(Ordering::Acquire)
+        && root.matches()
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    !cancelled.load(Ordering::Acquire)
+        && execution_started.load(Ordering::Acquire)
+        && root.matches()
+}
+
 impl ProcessTreeSnapshot {
     pub(super) fn start(
         root: ProcessIdentity,
         executable: PathBuf,
         arguments: TreeSnapshotArguments,
+        execution_started: Arc<AtomicBool>,
         stdout: File,
         stderr: File,
     ) -> Option<Self> {
-        Self::start_with_spawn(root, executable, arguments, stdout, stderr, spawn_worker)
+        Self::start_with_spawn(
+            root,
+            executable,
+            arguments,
+            execution_started,
+            stdout,
+            stderr,
+            spawn_worker,
+        )
     }
     pub(super) fn start_with_spawn(
         root: ProcessIdentity,
         executable: PathBuf,
         arguments: TreeSnapshotArguments,
+        execution_started: Arc<AtomicBool>,
         mut stdout: File,
         mut stderr: File,
         spawn: impl FnOnce(WorkerTask) -> io::Result<WorkerHandle>,
@@ -63,6 +90,14 @@ impl ProcessTreeSnapshot {
         let stop_deadline = Arc::new(Mutex::new(None));
         let cancellation_deadline = Arc::clone(&stop_deadline);
         let handle = spawn(Box::new(move || {
+            // A cohort attaches collectors to a stopped target before the
+            // shared launch rendezvous. Do not let that admission interval
+            // become a pidstat-style measurement sample; native execution
+            // has already emitted this event before attaching, so it starts
+            // immediately on the existing path.
+            if !wait_for_execution_start(root, &cancelled, &execution_started) {
+                return Ok(());
+            }
             let started = Instant::now();
             while !cancelled.load(Ordering::Acquire) && root.matches() {
                 let members = process_tree_pids(root.pid)
@@ -155,6 +190,33 @@ impl ProcessTreeSnapshot {
             .join()
             .map_err(|_| "process-tree snapshot worker failed")?
     }
+}
+
+#[cfg(test)]
+#[test]
+fn process_tree_snapshot_waits_for_execution_begin() {
+    let root = ProcessIdentity::read(std::process::id()).unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let execution_started = Arc::new(AtomicBool::new(false));
+    let notified = Arc::new(std::sync::Barrier::new(2));
+    let setter = {
+        let execution_started = Arc::clone(&execution_started);
+        let notified = Arc::clone(&notified);
+        std::thread::spawn(move || {
+            notified.wait();
+            std::thread::sleep(Duration::from_millis(20));
+            execution_started.store(true, Ordering::Release);
+        })
+    };
+    notified.wait();
+    let started = Instant::now();
+    assert!(wait_for_execution_start(
+        root,
+        &cancelled,
+        &execution_started
+    ));
+    assert!(started.elapsed() >= Duration::from_millis(10));
+    setter.join().unwrap();
 }
 impl Drop for ProcessTreeSnapshot {
     fn drop(&mut self) {

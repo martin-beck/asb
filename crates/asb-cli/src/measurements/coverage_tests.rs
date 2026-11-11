@@ -140,6 +140,7 @@ fn process_tree_snapshots_record_owned_target_output_and_command_failures() {
                     stream_bytes: 1024 * 1024,
                 }
             }),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             captures[0].writer().unwrap(),
             captures[1].writer().unwrap(),
         )

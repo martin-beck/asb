@@ -32,6 +32,30 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+/// Keep a paused target's verified identity adjacent to collector attachment.
+///
+/// A cohort launch rendezvous may wait for many peers. Enter it only after
+/// this replica has attached its collectors, while the target is still stopped.
+/// The separate collector rendezvous remains the only authority to resume a
+/// target.
+fn attach_target_before_launch<T>(
+    launch: Option<&dyn crate::workloads::session::LaunchReadiness>,
+    collector_ready: Option<&dyn crate::workloads::session::LaunchReadiness>,
+    attach: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let attached = attach()?;
+    if let Some(launch) = launch {
+        launch.ready()?;
+    }
+    // The final collector deadline starts only after every selected peer has
+    // reached the shared launch rendezvous with a verified stopped target.
+    // `ready` below remains the final Resume barrier.
+    if let Some(collector_ready) = collector_ready {
+        collector_ready.arm()?;
+    }
+    Ok(attached)
+}
+
 fn preparation_seconds(workload: &str, configured: Option<u64>) -> u64 {
     configured
         .or_else(|| super::preparation_default_seconds(workload))
@@ -1460,7 +1484,7 @@ impl Session {
     ) -> Result<(), String> {
         let mut verified_target = None;
         self.resume_target = None;
-        if let Some(launch) = context.launch {
+        if context.launch.is_some() {
             let target = &event["target"];
             let valid_hex = |value: &Value| {
                 value.as_str().is_some_and(|text| {
@@ -1479,43 +1503,42 @@ impl Session {
             {
                 return Err("isolated launch gate returned invalid stopped-target identity".into());
             }
-            // Every target is verified and still stopped before joining the
-            // launch barrier. After common release, each replica attaches its
-            // collectors concurrently, still before its own Resume request.
-            launch.ready()?;
-        }
-        // The attachment budget begins only once every member has a verified
-        // stopped target. It does not admit a replica: `ready` below remains
-        // the final collector-success barrier before Resume. This prevents a
-        // collector that never reaches its post-attachment arrival from
-        // consuming the execution timeout indefinitely.
-        if let Some(collector_ready) = context.collector_ready {
-            collector_ready.arm()?;
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
             if self.measurement_active {
                 return Err("isolated execution returned a second measurement target".into());
             }
-            let target = super::target::verify(&event["target"])?;
-            let target_evidence = json!({
-                "schema_version":1,"scope":"verified-local-isolated-process-tree",
-                "host_pid":target.pid,"namespace_pid":target.namespace_pid,
-                "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
-                "cgroup_membership":"preserved"
-            });
-            let target_sha256 = target_evidence_digest(&target_evidence)?;
-            crate::measurements::write_json(
-                &session.dir.join("execution-target.json"),
-                &target_evidence,
-            )?;
-            if let Err(error) = session.attach_isolated_pid(target.pid, target.start_time_ticks) {
-                session.event(Event::AgentAttachFailed)?;
-                return Err(error);
-            }
-            write_cohort_release_receipt(session, &target_sha256, "collector_attached")?;
+            let (target, target_sha256) =
+                attach_target_before_launch(context.launch, context.collector_ready, || {
+                    let target = super::target::verify(&event["target"])?;
+                    let target_evidence = json!({
+                        "schema_version":1,"scope":"verified-local-isolated-process-tree",
+                        "host_pid":target.pid,"namespace_pid":target.namespace_pid,
+                        "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
+                        "cgroup_membership":"preserved"
+                    });
+                    let target_sha256 = target_evidence_digest(&target_evidence)?;
+                    crate::measurements::write_json(
+                        &session.dir.join("execution-target.json"),
+                        &target_evidence,
+                    )?;
+                    if let Err(error) =
+                        session.attach_isolated_pid(target.pid, target.start_time_ticks)
+                    {
+                        session.event(Event::AgentAttachFailed)?;
+                        return Err(error);
+                    }
+                    write_cohort_release_receipt(session, &target_sha256, "collector_attached")?;
+                    Ok((target, target_sha256))
+                })?;
             self.resume_target = Some(target);
             verified_target = Some(target_sha256);
+        } else if let Some(launch) = context.launch {
+            launch.ready()?;
+            if let Some(collector_ready) = context.collector_ready {
+                collector_ready.arm()?;
+            }
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
@@ -1525,13 +1548,11 @@ impl Session {
             self.preparation_active = false;
             session.event(Event::MeasurementsReady)?;
             session.event(Event::AgentSpawn)?;
-            session.event(Event::AgentExecuteBegin)?;
-            self.measurement_active = true;
-            session.event(Event::AgentStarted)?;
         }
-        // The target remains stopped through collector attachment. Resume is
-        // the final common release: every admitted peer now has an equivalent
-        // verified target and active collector set.
+        // The target remains stopped through collector binding. Resume is the
+        // final common release: every admitted peer now has an equivalent
+        // verified target and a bound collector set. Capture activation waits
+        // for the workload-owned effective-release acknowledgement below.
         if let Some(collector_ready) = context.collector_ready {
             collector_ready.ready()?;
         }
@@ -1613,6 +1634,21 @@ impl Session {
                     Err(error) => return Err(error),
                 }
             }
+        }
+        // The controller request alone does not prove that the stopped target
+        // has run. Its workload-owned acknowledgement and host identity check
+        // above are the execution-release boundary for snapshots, lifecycle
+        // timing, kernel-pressure capture and tracing collectors.
+        if let Some(session) = context.measurements.as_deref_mut() {
+            let target = self
+                .resume_target
+                .as_ref()
+                .ok_or("isolated execution lost its verified target before collector activation")?;
+            session.activate_isolated_collectors(target.pid, target.start_time_ticks)?;
+            use crate::collectors::LifecycleEvent as Event;
+            session.event(Event::AgentExecuteBegin)?;
+            self.measurement_active = true;
+            session.event(Event::AgentStarted)?;
         }
         self.resume_exec_id.take();
         self.resume_ack_deadline.take();
@@ -1897,6 +1933,56 @@ mod execution_tests;
 
 #[cfg(test)]
 mod tests {
+    use crate::workloads::session::LaunchReadiness;
+
+    struct OrderedLaunch<'a> {
+        events: &'a std::cell::RefCell<Vec<&'static str>>,
+        name: &'static str,
+    }
+
+    impl crate::workloads::session::LaunchReadiness for OrderedLaunch<'_> {
+        fn ready(&self) -> Result<(), String> {
+            self.events.borrow_mut().push(self.name);
+            Ok(())
+        }
+
+        fn abort(&self) {
+            self.events.borrow_mut().push("abort");
+        }
+
+        fn arm(&self) -> Result<(), String> {
+            self.events.borrow_mut().push("collector-arm");
+            Ok(())
+        }
+
+        fn remaining(&self) -> Result<std::time::Duration, String> {
+            Ok(std::time::Duration::from_secs(1))
+        }
+    }
+
+    #[test]
+    fn paused_target_attaches_collectors_before_shared_launch_rendezvous() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let launch = OrderedLaunch {
+            events: &events,
+            name: "launch",
+        };
+        let collector_ready = OrderedLaunch {
+            events: &events,
+            name: "collector-ready",
+        };
+        super::attach_target_before_launch(Some(&launch), Some(&collector_ready), || {
+            events.borrow_mut().push("attached");
+            Ok(())
+        })
+        .unwrap();
+        collector_ready.ready().unwrap();
+        assert_eq!(
+            *events.borrow(),
+            ["attached", "launch", "collector-arm", "collector-ready"]
+        );
+    }
+
     #[test]
     fn controller_uses_workload_preparation_default_and_explicit_override() {
         assert_eq!(super::preparation_seconds("swe-bench", None), 7_320);
