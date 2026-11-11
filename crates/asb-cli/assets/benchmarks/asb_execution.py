@@ -6,13 +6,16 @@ collectors and resumes execution. Docker-daemon PIDs are deliberately not
 claimed to be local-host PIDs: the caller must establish that separately.
 """
 from contextlib import contextmanager
+import io
 import json
 import math
 import os
 import platform
 from pathlib import Path
 import re
+import secrets
 import stat
+import tarfile
 import threading
 import time
 import tempfile
@@ -209,9 +212,25 @@ def principal_observation(metadata):
     return result
 
 
-GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; kill -STOP "$$"; exec "$@"'
-STOPPED = 'while IFS=: read -r key value; do case "$key" in State) case "$value" in *T*) exit 0;; esac;; esac; done < "/proc/$1/status"; exit 1'
+GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; rm -f "$ASB_GATE_RELEASE"; exec "$@"'
 MAX_ARGUMENT_BYTES = 1024 * 1024
+
+
+def release_gate(api, container, release_path):
+    """Release one private gate through the existing Docker API, without exec."""
+    if not isinstance(release_path, str) or re.fullmatch(r"/tmp/\.asb-gate-release-[0-9a-f]{32}", release_path) is None:
+        raise ExecutionError("invalid container execution gate release path")
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as contents:
+        member = tarfile.TarInfo(release_path.rsplit("/", 1)[1])
+        member.mode, member.mtime, member.size = 0o600, 0, 0
+        contents.addfile(member)
+    try:
+        accepted = api.put_archive(container.id, path="/tmp", data=archive.getvalue())
+    except Exception as error:
+        raise ExecutionError("cannot release container execution gate") from error
+    if accepted is not True:
+        raise ExecutionError("Docker rejected container execution gate release")
 
 
 class WorkloadFrames:
@@ -539,7 +558,13 @@ class ManagedDockerWorkspace:
         stream = None
         result = None
         try:
-            command = argv if gate == "application" else ["/bin/sh", "-c", GATE, "asb-gate", *argv]
+            release_path = None
+            gate_environment = environment
+            command = argv
+            if gate != "application":
+                release_path = "/tmp/.asb-gate-release-" + secrets.token_hex(16)
+                gate_environment = dict(environment, ASB_GATE_RELEASE=release_path)
+                command = ["/bin/sh", "-c", GATE, "asb-gate", *argv]
             # A sweep creates independent Python workers.  Their agents still
             # run concurrently, but concurrently creating the paused Docker
             # gate streams overwhelms some native Docker daemons before the
@@ -553,13 +578,13 @@ class ManagedDockerWorkspace:
                             or (cancelled is not None and cancelled.is_set()))
 
             with _gate_resume_section(gate_setup_aborted):
-                stream = (transport_factory or DockerExecTransport)(api,container,command,environment,self.workdir)
+                stream = (transport_factory or DockerExecTransport)(api,container,command,gate_environment,self.workdir)
                 ready = bytearray()
                 # Docker's multiplexed stream may deliver stderr before the gate's
                 # already-written stdout readiness frame. Installer diagnostics are
                 # ordinary agent output, not proof that the gate itself failed.
                 # Retain them with the eventual stderr result after the gate is
-                # authenticated and stopped.
+                # authenticated and waiting for its private release file.
                 gate_stderr = bytearray()
                 for out, err in stream:
                     if err:
@@ -586,25 +611,6 @@ class ManagedDockerWorkspace:
                 namespace_pid = int(match.group(1))
                 if namespace_pid <= 1:
                     raise ExecutionError("container gate did not identify a distinct agent process")
-                # The readiness bytes precede SIGSTOP by a few instructions. Do not
-                # attach or resume until the process is actually stopped.
-                for _ in range(100):
-                    stopped = container.exec_run(["/bin/sh", "-c", STOPPED, "asb-status", str(namespace_pid)])
-                    if stopped.exit_code == 0:
-                        break
-                    if gate_setup_aborted():
-                        raise ExecutionError("container gate expired while waiting for SIGSTOP")
-                    time.sleep(0.01)
-                else:
-                    raise ExecutionError("container gate never reached its stopped state")
-                try:
-                    # Freeze the owned container while collectors attach.  Its
-                    # later unpause is a Docker container operation, not a
-                    # second Docker exec request, which avoids the daemon's
-                    # concurrent-exec failure mode under dense cohorts.
-                    container.pause()
-                except Exception as error:
-                    raise ExecutionError("cannot pause container execution gate") from error
             try:
                 target = execution_target(stream,container,namespace_pid)
             except ExecutionError:
@@ -638,13 +644,20 @@ class ManagedDockerWorkspace:
             # Releasing it between attempts recreates the same Docker-daemon
             # burst that this section is intended to prevent.
             with _gate_resume_section(resume_aborted):
-                # A native Docker daemon can need several seconds to unpause
-                # just-created task containers under cohort pressure.
+                # A native Docker daemon can need several seconds to accept a
+                # control archive for just-created task containers under cohort pressure.
                 # This sequence is process-serialized above, so exponential
                 # backoff recovers the daemon without a control-plane storm.
                 for resume_attempt in range(9):
                     try:
-                        container.unpause()
+                        if release_path is None:
+                            resumed = container.exec_run(
+                                ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
+                            )
+                            if resumed.exit_code != 0:
+                                raise ExecutionError("Docker rejected application gate resume")
+                        else:
+                            release_gate(api, container, release_path)
                         resume_error = None
                         break
                     except Exception:
