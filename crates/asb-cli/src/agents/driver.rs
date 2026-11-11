@@ -14,6 +14,7 @@ const UNPRIVILEGED_UID: u32 = 65_534;
 const UNPRIVILEGED_GID: u32 = 65_534;
 
 const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
+const GATE_RELEASE: &str = "ASB_GATE_RELEASE";
 /// Guest artifact bytes are copied by the owning workload controller rather
 /// than embedded in its bounded JSON control message.
 const MAX_EXPORTED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
@@ -66,6 +67,45 @@ pub(crate) fn namespace_id() -> Result<u64, Error> {
     Err(Error::Input(
         "workload process ownership requires Linux PID namespaces".into(),
     ))
+}
+
+fn await_gate_release() -> Result<bool, Error> {
+    let Some(value) = std::env::var_os(GATE_RELEASE) else {
+        return Ok(false);
+    };
+    // The host supplies this one-shot path through the Docker API. Reject
+    // anything but its private /tmp capability shape before waiting on it.
+    let path = PathBuf::from(value);
+    if !valid_gate_release_path(&path) {
+        return Err(Error::Run("invalid private guest gate release path".into()));
+    }
+    loop {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(Error::Run(format!(
+                    "cannot consume guest gate release: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn valid_gate_release_path(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/tmp"))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.len() == ".asb-gate-release-".len() + 32
+                    && name.starts_with(".asb-gate-release-")
+                    && name[".asb-gate-release-".len()..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -941,13 +981,16 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     if agent_route.is_none() {
         println!("__ASB_GATE__:{}", std::process::id());
         std::io::stdout().flush().map_err(crate::io_error)?;
-        #[cfg(unix)]
-        crate::process_gate::pause_current()
-            .map_err(|error| Error::Run(format!("cannot stop prepared guest agent: {error}")))?;
-        #[cfg(not(unix))]
-        return Err(Error::Run(
-            "guest agent gate currently requires Unix signals".into(),
-        ));
+        if !await_gate_release()? {
+            #[cfg(unix)]
+            crate::process_gate::pause_current().map_err(|error| {
+                Error::Run(format!("cannot stop prepared guest agent: {error}"))
+            })?;
+            #[cfg(not(unix))]
+            return Err(Error::Run(
+                "guest agent gate currently requires Unix signals".into(),
+            ));
+        }
     }
     let mut auxiliary = auxiliary_plan
         .map(super::auxiliary::AuxiliaryPlan::start)
@@ -1263,6 +1306,23 @@ fn snapshot_guest_requires_the_matching_marker_before_launch() {
         assert!(validate_snapshot_marker(true, true, replay, record, replay_socket).is_ok());
         assert!(validate_snapshot_marker(true, false, replay, record, replay_socket).is_err());
         assert!(validate_snapshot_marker(true, true, !replay, record, replay_socket).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn guest_gate_release_path_is_private_and_fixed_shape() {
+    assert!(valid_gate_release_path(Path::new(
+        "/tmp/.asb-gate-release-0123456789abcdef0123456789abcdef"
+    )));
+    for path in [
+        "/tmp/asb-gate-release-0123456789abcdef0123456789abcdef",
+        "/tmp/.asb-gate-release-0123456789abcdef0123456789abcdeF",
+        "/tmp/.asb-gate-release-0123",
+        "/var/tmp/.asb-gate-release-0123456789abcdef0123456789abcdef",
+        "/tmp/sub/.asb-gate-release-0123456789abcdef0123456789abcdef",
+    ] {
+        assert!(!valid_gate_release_path(Path::new(path)), "{path}");
     }
 }
 
