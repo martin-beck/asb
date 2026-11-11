@@ -1,4 +1,5 @@
 """Provider-free managed execution tests using a deterministic Docker API fixture."""
+from contextlib import contextmanager
 import importlib.util
 import json
 import multiprocessing
@@ -533,6 +534,21 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue(api.stream._response.closed)
         workspace.close()
         self.assertEqual(container.events.count("remove"), 1)
+
+    def test_gate_setup_and_resume_use_the_shared_control_plane_section(self):
+        workspace, _, _, _ = self.workspace()
+        sections = []
+
+        @contextmanager
+        def section(aborted):
+            sections.append(aborted)
+            yield
+
+        with patch.object(RUNTIME, "_gate_resume_section", section):
+            with workspace:
+                result = workspace.execute(["agent"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(len(sections), 2)
 
     def test_gate_resume_retries_one_transient_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()

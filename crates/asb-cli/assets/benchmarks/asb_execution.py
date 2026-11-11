@@ -540,50 +540,63 @@ class ManagedDockerWorkspace:
         result = None
         try:
             command = argv if gate == "application" else ["/bin/sh", "-c", GATE, "asb-gate", *argv]
-            stream = (transport_factory or DockerExecTransport)(api,container,command,environment,self.workdir)
-            ready = bytearray()
-            # Docker's multiplexed stream may deliver stderr before the gate's
-            # already-written stdout readiness frame. Installer diagnostics are
-            # ordinary agent output, not proof that the gate itself failed.
-            # Retain them with the eventual stderr result after the gate is
-            # authenticated and stopped.
-            gate_stderr = bytearray()
-            for out, err in stream:
-                if err:
-                    room = output_limit - len(gate_stderr)
-                    if len(err) > room:
-                        raise ExecutionError("container execution gate stderr exceeded its output limit before readiness")
-                    gate_stderr.extend(err)
-                ready.extend(out or b"")
-                if len(ready) > 64:
-                    raise ExecutionError("container execution gate returned an invalid readiness frame")
-                if ready.endswith(b"\n"):
-                    break
-            match = re.fullmatch(rb"__ASB_GATE__:(\d+)\n", ready)
-            if match is None or expired.is_set() or interrupted.is_set():
-                # Before readiness this is the only diagnostic emitted by the
-                # private guest driver. Preserve a bounded, single-line tail
-                # so a failed pre-gate preparation can be repaired rather than
-                # being reported as an indistinguishable timeout.
-                detail = " ".join(gate_stderr.decode("utf-8", "replace").split())[-4096:]
-                message = "container execution gate did not become ready before its deadline"
-                if detail:
-                    message += f": {detail}"
-                raise ExecutionError(message)
-            namespace_pid = int(match.group(1))
-            if namespace_pid <= 1:
-                raise ExecutionError("container gate did not identify a distinct agent process")
-            # The readiness bytes precede SIGSTOP by a few instructions. Do not
-            # attach or resume until the process is actually stopped.
-            for _ in range(100):
-                stopped = container.exec_run(["/bin/sh", "-c", STOPPED, "asb-status", str(namespace_pid)])
-                if stopped.exit_code == 0:
-                    break
-                if expired.is_set() or interrupted.is_set():
-                    raise ExecutionError("container gate expired while waiting for SIGSTOP")
-                time.sleep(0.01)
-            else:
-                raise ExecutionError("container gate never reached its stopped state")
+            # A sweep creates independent Python workers.  Their agents still
+            # run concurrently, but concurrently creating the paused Docker
+            # gate streams overwhelms some native Docker daemons before the
+            # actual benchmark begins.  Serialize this short control-plane
+            # phase with the same bounded interprocess gate lock used for
+            # resume; release it before collector attachment and execution.
+            def gate_setup_aborted():
+                with phase_lock:
+                    return (expired.is_set() or interrupted.is_set()
+                            or time.monotonic() >= phase_deadline[0]
+                            or (cancelled is not None and cancelled.is_set()))
+
+            with _gate_resume_section(gate_setup_aborted):
+                stream = (transport_factory or DockerExecTransport)(api,container,command,environment,self.workdir)
+                ready = bytearray()
+                # Docker's multiplexed stream may deliver stderr before the gate's
+                # already-written stdout readiness frame. Installer diagnostics are
+                # ordinary agent output, not proof that the gate itself failed.
+                # Retain them with the eventual stderr result after the gate is
+                # authenticated and stopped.
+                gate_stderr = bytearray()
+                for out, err in stream:
+                    if err:
+                        room = output_limit - len(gate_stderr)
+                        if len(err) > room:
+                            raise ExecutionError("container execution gate stderr exceeded its output limit before readiness")
+                        gate_stderr.extend(err)
+                    ready.extend(out or b"")
+                    if len(ready) > 64:
+                        raise ExecutionError("container execution gate returned an invalid readiness frame")
+                    if ready.endswith(b"\n"):
+                        break
+                match = re.fullmatch(rb"__ASB_GATE__:(\d+)\n", ready)
+                if match is None or expired.is_set() or interrupted.is_set():
+                    # Before readiness this is the only diagnostic emitted by the
+                    # private guest driver. Preserve a bounded, single-line tail
+                    # so a failed pre-gate preparation can be repaired rather than
+                    # being reported as an indistinguishable timeout.
+                    detail = " ".join(gate_stderr.decode("utf-8", "replace").split())[-4096:]
+                    message = "container execution gate did not become ready before its deadline"
+                    if detail:
+                        message += f": {detail}"
+                    raise ExecutionError(message)
+                namespace_pid = int(match.group(1))
+                if namespace_pid <= 1:
+                    raise ExecutionError("container gate did not identify a distinct agent process")
+                # The readiness bytes precede SIGSTOP by a few instructions. Do not
+                # attach or resume until the process is actually stopped.
+                for _ in range(100):
+                    stopped = container.exec_run(["/bin/sh", "-c", STOPPED, "asb-status", str(namespace_pid)])
+                    if stopped.exit_code == 0:
+                        break
+                    if gate_setup_aborted():
+                        raise ExecutionError("container gate expired while waiting for SIGSTOP")
+                    time.sleep(0.01)
+                else:
+                    raise ExecutionError("container gate never reached its stopped state")
             try:
                 target = execution_target(stream,container,namespace_pid)
             except ExecutionError:
