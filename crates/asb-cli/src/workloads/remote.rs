@@ -1442,7 +1442,7 @@ impl Session {
         event: &Value,
         deadline: Instant,
     ) -> Result<(), String> {
-        if context.launch.is_some() {
+        if let Some(launch) = context.launch {
             let target = &event["target"];
             let valid_hex = |value: &Value| {
                 value.as_str().is_some_and(|text| {
@@ -1461,6 +1461,10 @@ impl Session {
             {
                 return Err("isolated launch gate returned invalid stopped-target identity".into());
             }
+            // Every target is verified and still stopped before joining the
+            // launch barrier. After common release, each replica attaches its
+            // collectors concurrently, still before its own Resume request.
+            launch.ready()?;
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
