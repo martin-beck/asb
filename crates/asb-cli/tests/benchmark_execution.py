@@ -539,6 +539,7 @@ class ExecutionTests(unittest.TestCase):
             environment = api.calls[0]["environment"]
             self.assertEqual(environment["FIXTURE_KEY"], "fixture-only")
             self.assertRegex(environment["ASB_GATE_RELEASE"], r"^/tmp/\.asb-gate-release-[0-9a-f]{32}$")
+            self.assertIn("unset ASB_GATE_RELEASE", api.calls[0]["cmd"][2])
             self.assertLess(container.events.index("attached"), container.events.index("release"))
             self.assertNotIn("volumes", creation[0])
             self.assertNotIn("network_mode", creation[0])

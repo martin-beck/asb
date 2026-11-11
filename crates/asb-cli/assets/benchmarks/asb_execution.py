@@ -212,9 +212,9 @@ def principal_observation(metadata):
     return result
 
 
-# The archive-created marker is a container-lifetime admission capability.
-# Nested guest setup gates share it, so only container teardown reclaims it.
-GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; exec "$@"'
+# The archive-created marker admits only this outer shell.  It remains as
+# container teardown evidence, but descendants receive no stale capability.
+GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; unset ASB_GATE_RELEASE; exec "$@"'
 MAX_ARGUMENT_BYTES = 1024 * 1024
 
 
