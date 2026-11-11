@@ -260,7 +260,7 @@ def main():
         # below instead pass an explicit PATH of inert tool fixtures.
         # Real search/select/step/concurrency events, including backwards nav.
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \t\x1b[Z\tlocal \t \tbug-fix \t\t\x1b[B \t\t")
+            b"pi \t\x1b[Z\tlocal \t \t\tbug-fix \t\t\x1b[B \t\t")
         assert code == 0, transcript
         assert b"Generated 1 benchmark configurations" in transcript, transcript
         sweep_files = list(root.glob("asb-sweep-*.toml"))
@@ -277,7 +277,7 @@ def main():
         # Select the CPU-pool option, edit both fields and opt in to CPU-wide
         # recording through real terminal events. No benchmark is executed.
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\x1b[B \t\x1b[B \x10" +
+            b"pi \tlocal \t \t\tbug-fix \t\t\x1b[B \t\x1b[B \x10" +
             b"1-3,5-7\r\x073\r\x17\t")
         assert code == 0, transcript[-3000:]
         assert b"CPU affinity: pool" in transcript
@@ -295,7 +295,7 @@ def main():
         # End reaches the real public maximum; publication must retain numeric
         # 512, and single-selection must replace the default rather than add it.
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\x1b[F \t\t")
+            b"pi \tlocal \t \t\tbug-fix \t\t\x1b[F \t\t")
         assert code == 0, transcript
         next_sweeps = set(root.glob("asb-sweep-*.toml")) - set(sweep_files)
         assert len(next_sweeps) == 1, transcript
@@ -316,7 +316,7 @@ def main():
         original_project = project_file.read_text()
         project_file.write_text("tools_dir='.asb-tools'\nworkloads_dir='workloads'\nworkspace_dir='" + "x" * 70_000 + "'\n")
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\t\t")
+            b"pi \tlocal \t \t\tbug-fix \t\t\t\t")
         assert code != 0 and b"64 KiB" in transcript, transcript[-3000:]
         assert b"no setup files were written" in transcript, transcript[-3000:]
         assert set(root.iterdir()) == prior_paths
@@ -342,7 +342,7 @@ def main():
         raw_prior.write_bytes(b"prior configuration unchanged")
         raw_paths = set(raw_root.iterdir())
         code, transcript = session(binary, raw_root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \t\t\t\t")
+            b"pi \tlocal \t \t\tbug-fix \t\t\t\t")
         assert code != 0 and b"UTF-8" in transcript, transcript[-3000:]
         assert b"no setup files were written" in transcript, transcript[-3000:]
         assert set(raw_root.iterdir()) == raw_paths
@@ -400,7 +400,7 @@ def main():
         perf.unlink()
         invoked.unlink(missing_ok=True)
         code, transcript = session(binary, root, ["setup", "tui"],
-            b"pi \tlocal \t \tbug-fix \tflamegraph ", str(fixture_bin),
+            b"pi \tlocal \t \t\tbug-fix \tflamegraph ", str(fixture_bin),
             [(b"Cannot install required collector", b"\x03", lambda: None)])
         assert code != 0, transcript
         assert invoked.is_file(), "missing collector dependency must attempt installation"
