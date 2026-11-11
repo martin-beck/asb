@@ -706,13 +706,18 @@ fn run_loaded(
     if let Some(index) = cohort.admitted_slots.first() {
         cohort.dispatch = Some(cohort.dispatch_for(*index, config.concurrency)?);
     }
-    let options = RunOptions {
-        execution_cohort: Some(&cohort),
-        ..options
-    };
+    // A direct concurrent run is still a real cohort: do not merely record
+    // membership metadata while allowing replicas to resume one by one.
+    // Reuse the batch admission path so every prepared target waits for the
+    // same verified-material and launch barriers before any replay begins.
+    let admission = batch::Admission::from_cohort(
+        cohort,
+        None,
+        crate::planning::BatchAdmissionPolicy::current(),
+    )?;
     let generated_log = config.log_file.clone();
     let concurrency = config.concurrency;
-    let result = run_dispatched(config_path, config, options, output, warnings);
+    let result = run_admitted_batch(config_path, config, options, &admission, output, warnings);
     let direct = configured_log.is_some();
     if let Some(configured_log) = configured_log {
         publish_configured_logs(
