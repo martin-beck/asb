@@ -8,6 +8,7 @@ use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Use the parser's schema for completions.  The real parser deliberately
 /// accepts custom tool and workload sources; this completion-only command adds
@@ -299,7 +300,8 @@ pub(crate) fn run_with_interactive(
             let native_capsule_record = options.native_capsule_record.as_deref().map(&resolve);
             let native_capsule_replay = options.native_capsule_replay.as_deref().map(&resolve);
             let json = options.json;
-            runner::run_with_tape(
+            let report_source = Mutex::new(None);
+            let result = runner::run_with_tape(
                 &report_path,
                 runner::RunOptions {
                     invocation_dir: Some(&base),
@@ -329,19 +331,45 @@ pub(crate) fn run_with_interactive(
                     ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                     ignore_compatibility: options.ignore_compatibility,
                     interactive: interactive && !options.json,
+                    report_source: Some(&report_source),
                     ..Default::default()
                 },
                 stdout,
-            )
-            .and_then(|_| {
-                if json {
-                    Ok(())
-                } else if options.verbose {
+            );
+            match result {
+                Ok(()) if json => Ok(()),
+                Ok(()) if options.verbose => {
                     super::compare::generate_at(&report_path, &base, stdout, false).map(|_| ())
-                } else {
-                    super::compare::run_links_at(&report_path, &base, stdout)
                 }
-            })
+                Ok(()) => super::compare::run_links_at(&report_path, &base, stdout),
+                Err(error) if json => Err(error),
+                Err(error) => {
+                    let source = report_source.lock().ok().and_then(|source| source.clone());
+                    if let Some(source) = source {
+                        let report = if options.verbose {
+                            super::compare::generate_at(
+                                source.to_string_lossy().as_ref(),
+                                &base,
+                                stdout,
+                                false,
+                            )
+                            .map(|_| ())
+                        } else {
+                            super::compare::run_links_at(
+                                source.to_string_lossy().as_ref(),
+                                &base,
+                                stdout,
+                            )
+                        };
+                        match report {
+                            Ok(()) => Err(error),
+                            Err(report_error) => Err(report_generation_error(error, report_error)),
+                        }
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
         }
         Some(CommandLine::Sweep(options)) => {
             let tape = match tape_selection(TapeFlags::from_sweep(&options)) {
@@ -537,6 +565,17 @@ pub(crate) fn run_with_interactive(
     match result {
         Ok(()) => 0,
         Err(error) => fail(stderr, &error.to_string()),
+    }
+}
+
+fn report_generation_error(error: Error, report_error: Error) -> Error {
+    let message =
+        format!("{error}; report generation after retained run evidence failed: {report_error}");
+    match error {
+        Error::Input(_) => Error::Input(message),
+        Error::Io(_) => Error::Io(message),
+        Error::Run(_) => Error::Run(message),
+        Error::Usage(message) => Error::Usage(message),
     }
 }
 
@@ -1678,7 +1717,8 @@ struct ToolInstallArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, report_generation_error};
+    use crate::Error;
     use clap::Parser;
 
     #[test]
@@ -1748,6 +1788,21 @@ mod tests {
             "fixture-binary",
         ])
         .expect("registry suggestions must not constrain actual custom-tool parsing");
+    }
+
+    #[test]
+    fn failed_report_generation_keeps_the_original_run_error() {
+        let error = report_generation_error(
+            Error::Run("agent execution failed".into()),
+            Error::Io("report output is unavailable".into()),
+        );
+        assert!(matches!(error, Error::Run(_)));
+        assert!(error.to_string().contains("agent execution failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("report generation after retained run evidence failed")
+        );
     }
 
     #[test]
