@@ -638,6 +638,14 @@ fn selected_record_args(pid: u32, cpu_wide: Option<&[u32]>) -> Result<Vec<String
     }
 }
 
+fn record_activation_timeout(cpu_wide: bool) -> Duration {
+    if cpu_wide {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(10)
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn validate_agent_target(
     pid: u32,
@@ -693,6 +701,7 @@ impl measurements::Session {
         // inherits into descendants. The optional CPU-wide mode instead
         // samples every task running on this replica's allocated CPUs.
         let cpu_wide = self.state::<PerfState>().borrow().cpu_wide.clone();
+        let record_activation_timeout = record_activation_timeout(cpu_wide.is_some());
         let record_args = selected_record_args(pid, cpu_wide.as_deref())?;
         let (mut command, route) = self.collector_command("perf")?;
         command
@@ -717,7 +726,7 @@ impl measurements::Session {
         };
         #[cfg(target_os = "linux")]
         let record_failure = record_ready
-            .enable(Duration::from_secs(10), || collector.startup_exit())
+            .enable(record_activation_timeout, || collector.startup_exit())
             .err();
         #[cfg(not(target_os = "linux"))]
         let record_failure = startup_failure(&mut collector)?;
@@ -1095,6 +1104,18 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-a"));
         assert!(!args.iter().any(|arg| arg == "-p"));
         assert!(super::selected_record_args(42, Some(&[])).is_err());
+    }
+
+    #[test]
+    fn cpu_wide_recording_allows_synthesis_before_declaring_startup_failure() {
+        assert_eq!(
+            super::record_activation_timeout(false),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            super::record_activation_timeout(true),
+            std::time::Duration::from_secs(60)
+        );
     }
     #[test]
     fn symfs_marker_distinguishes_partial_complete_and_invalid_trees() {
