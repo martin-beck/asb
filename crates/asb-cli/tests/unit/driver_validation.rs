@@ -112,6 +112,7 @@ impl Fixture {
             run_dir: self.0.join("runtime/run"),
             replay: false,
             timeout_seconds: 1.0,
+            shared_launch_seconds: None,
             namespace_collectors: Vec::new(),
         }
     }

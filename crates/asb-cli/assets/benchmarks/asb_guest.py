@@ -699,6 +699,19 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     elif lifetime != "quiesce":
         raise ExecutionError("unknown workload process lifetime")
     guest["timeout_seconds"] = request.get("timeout", getattr(task, "agent_timeout", 900))
+    # A cohort dispatcher may need longer than the ordinary local execution
+    # observation guard before it releases every stopped agent together.  This
+    # is deliberately absent for ordinary runs and bounded before it crosses
+    # the guest boundary, so it cannot turn an arbitrary client timeout into
+    # an unbounded setup wait.
+    shared_launch_seconds = request.get("preparation_seconds")
+    if shared_launch_seconds is not None:
+        if (isinstance(shared_launch_seconds, bool)
+                or not isinstance(shared_launch_seconds, (int, float))
+                or not math.isfinite(shared_launch_seconds)
+                or not 0.001 <= shared_launch_seconds <= 7200):
+            raise ExecutionError("shared launch window must be between 0.001 and 7200 seconds")
+        guest["shared_launch_seconds"] = shared_launch_seconds
     guest.update(project_root="/opt/asb-project", runtime_dir="/opt/asb-private", run_dir="/opt/asb-private/attempt")
     environment = dict(environment, ASB_GUEST_AGENT_REQUEST=json.dumps(guest))
     ended = False
