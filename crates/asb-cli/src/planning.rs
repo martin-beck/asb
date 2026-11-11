@@ -112,8 +112,10 @@ pub(crate) struct BatchAdmissionPolicy {
     scope: &'static str,
     material_seconds: u64,
     launch_seconds: u64,
+    collector_seconds: u64,
     material_arming: &'static str,
     launch_arming: &'static str,
+    collector_arming: &'static str,
 }
 
 impl<'de> Deserialize<'de> for BatchAdmissionPolicy {
@@ -133,11 +135,13 @@ impl<'de> Deserialize<'de> for BatchAdmissionPolicy {
 impl BatchAdmissionPolicy {
     pub(crate) const fn current() -> Self {
         Self {
-            scope: "verified-material-shared-launch-v1",
+            scope: "verified-material-shared-launch-collector-ready-v2",
             material_seconds: 7200,
             launch_seconds: 7200,
+            collector_seconds: 300,
             material_arming: "batch-gate-construction",
             launch_arming: "first-post-material-slot-registration",
+            collector_arming: "verified-stopped-target-cohort",
         }
     }
     pub(crate) fn material_timeout(self) -> std::time::Duration {
@@ -145,6 +149,9 @@ impl BatchAdmissionPolicy {
     }
     pub(crate) fn launch_timeout(self) -> std::time::Duration {
         std::time::Duration::from_secs(self.launch_seconds)
+    }
+    pub(crate) fn collector_timeout(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.collector_seconds)
     }
 }
 
@@ -156,8 +163,12 @@ struct RecordedAdmission {
     scope: String,
     material_seconds: u64,
     launch_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collector_seconds: Option<u64>,
     material_arming: String,
     launch_arming: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collector_arming: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -166,8 +177,12 @@ struct RecordedAdmissionWire {
     scope: String,
     material_seconds: u64,
     launch_seconds: u64,
+    #[serde(default)]
+    collector_seconds: Option<u64>,
     material_arming: String,
     launch_arming: String,
+    #[serde(default)]
+    collector_arming: Option<String>,
 }
 
 impl TryFrom<RecordedAdmissionWire> for RecordedAdmission {
@@ -178,6 +193,13 @@ impl TryFrom<RecordedAdmissionWire> for RecordedAdmission {
             .any(|text| text.is_empty() || text.len() > 128 || text.chars().any(char::is_control))
             || !(1..=86400).contains(&value.material_seconds)
             || !(1..=86400).contains(&value.launch_seconds)
+            || value.collector_seconds.is_some() != value.collector_arming.is_some()
+            || value
+                .collector_seconds
+                .is_some_and(|seconds| !(1..=86400).contains(&seconds))
+            || value.collector_arming.as_ref().is_some_and(|text| {
+                text.is_empty() || text.len() > 128 || text.chars().any(char::is_control)
+            })
         {
             return Err("invalid historical batch admission identity");
         }
@@ -185,8 +207,10 @@ impl TryFrom<RecordedAdmissionWire> for RecordedAdmission {
             scope: value.scope,
             material_seconds: value.material_seconds,
             launch_seconds: value.launch_seconds,
+            collector_seconds: value.collector_seconds,
             material_arming: value.material_arming,
             launch_arming: value.launch_arming,
+            collector_arming: value.collector_arming,
         })
     }
 }
@@ -197,8 +221,10 @@ impl From<BatchAdmissionPolicy> for RecordedAdmission {
             scope: value.scope.into(),
             material_seconds: value.material_seconds,
             launch_seconds: value.launch_seconds,
+            collector_seconds: Some(value.collector_seconds),
             material_arming: value.material_arming.into(),
             launch_arming: value.launch_arming.into(),
+            collector_arming: Some(value.collector_arming.into()),
         }
     }
 }
@@ -947,6 +973,17 @@ mod tests {
         assert!(serde_json::from_value::<BatchAdmissionPolicy>(historical.clone()).is_err());
         let passive: RecordedAdmission = serde_json::from_value(historical.clone()).unwrap();
         assert_eq!(serde_json::to_value(&passive).unwrap(), historical);
+        let mut legacy = historical.clone();
+        legacy.as_object_mut().unwrap().remove("collector_seconds");
+        legacy.as_object_mut().unwrap().remove("collector_arming");
+        let legacy_passive: RecordedAdmission = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&legacy_passive).unwrap(), legacy);
+        let mut incomplete = historical.clone();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("collector_arming");
+        assert!(serde_json::from_value::<RecordedAdmission>(incomplete).is_err());
         let fingerprint = protocol_fingerprint_core(
             module.as_ref(),
             &policy,
@@ -1213,6 +1250,7 @@ mod tests {
         let admission = BatchAdmissionPolicy::current();
         assert_eq!(admission.material_timeout().as_secs(), 7200);
         assert_eq!(admission.launch_timeout().as_secs(), 7200);
+        assert_eq!(admission.collector_timeout().as_secs(), 300);
         let manual = protocol_fingerprint(&config, &resolve(&config).unwrap(), caps, 2).unwrap();
         let first = protocol_fingerprint_with_admission(
             &config,

@@ -108,6 +108,7 @@ impl Admission {
             expected,
             policy.material_timeout(),
             policy.launch_timeout(),
+            policy.collector_timeout(),
         )
     }
 
@@ -120,6 +121,7 @@ impl Admission {
         Self::with_deadlines(
             Self::fresh_cohort(total, participants)?,
             None,
+            timeout,
             timeout,
             timeout,
         )
@@ -151,6 +153,7 @@ impl Admission {
         expected: Option<Compatibility>,
         material_timeout: Duration,
         launch_timeout: Duration,
+        collector_timeout: Duration,
     ) -> Result<Self, Error> {
         let total = cohort.selected_replicas;
         if cohort
@@ -167,7 +170,7 @@ impl Admission {
         let launch = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
         // A stopped target has joined `launch`; this second boundary admits
         // only replicas whose selected collectors have attached successfully.
-        let collectors = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
+        let collectors = Gate::deferred_selected(total, &cohort.admitted_slots, collector_timeout)?;
         let settlement =
             SettlementBarrier::selected(total, &cohort.admitted_slots, launch_timeout)?;
         Ok(Self {
