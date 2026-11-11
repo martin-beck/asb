@@ -41,6 +41,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     command,
     prepare_adapter,
 )
+.with_thinking_effort(supports_thinking_effort)
 .with_estimated_disk_mib(768)
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
@@ -486,19 +487,28 @@ fn output_usage(_: &str, _: &str, _: bool) -> crate::measurements::TokenUsage {
 }
 
 fn command(context: &CommandContext<'_>) -> CommandSpec {
+    let mut args = vec![
+        "--provider".into(),
+        "asb".into(),
+        "--model".into(),
+        context.config.model.clone(),
+    ];
+    if let Some(effort) = context.config.thinking_effort {
+        args.extend(["--thinking".into(), effort.to_string()]);
+    }
+    args.extend(["--print".into(), "--mode".into(), "text".into()]);
     CommandSpec {
         program: "pi".into(),
-        args: vec![
-            "--provider".into(),
-            "asb".into(),
-            "--model".into(),
-            context.config.model.clone(),
-            "--print".into(),
-            "--mode".into(),
-            "text".into(),
-        ],
+        args,
         prompt_delivery: PromptDelivery::Argument,
     }
+}
+
+fn supports_thinking_effort(
+    interface: crate::endpoint::Interface,
+    _: crate::benchmark::ThinkingEffort,
+) -> bool {
+    matches!(interface, crate::endpoint::Interface::OpenAiResponses)
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
     let connection = context.connection;
@@ -830,6 +840,52 @@ mod tests {
         assert!(super::finalize_native_recording(&emit(true), "bad").is_err());
     }
     use super::*;
+
+    #[test]
+    fn explicit_thinking_effort_is_forwarded_only_for_pi_responses() {
+        let config = crate::benchmark::BenchmarkConfig {
+            runtime: Default::default(),
+            planning: None,
+            agent: "pi".into(),
+            workload: "bug-fix".into(),
+            provider: "openai".into(),
+            model: "gpt-6-sol".into(),
+            thinking_effort: Some(crate::benchmark::ThinkingEffort::XHigh),
+            native_snapshot_record: false,
+            concurrency: 1,
+            trial_set: None,
+            trial: None,
+            workspace: "workspace".into(),
+            log_file: "run.log".into(),
+            measurements: None,
+            retention: Default::default(),
+            mcp_servers: Vec::new(),
+        };
+        let command = command(&CommandContext {
+            executable: "pi",
+            config: &config,
+            endpoint: Some("http://127.0.0.1:1/v1"),
+            interface: Some(crate::endpoint::Interface::OpenAiResponses),
+            prompt: "repair",
+            max_steps: None,
+            native_tool_mode: None,
+            native_tool: None,
+        });
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--thinking", "xhigh"])
+        );
+        assert!(supports_thinking_effort(
+            crate::endpoint::Interface::OpenAiResponses,
+            crate::benchmark::ThinkingEffort::High
+        ));
+        assert!(!supports_thinking_effort(
+            crate::endpoint::Interface::OpenAiChat,
+            crate::benchmark::ThinkingEffort::High
+        ));
+    }
 
     #[test]
     fn fetch_diagnostic_preserves_results_and_sanitizes_failures() {

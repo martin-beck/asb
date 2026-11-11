@@ -35,6 +35,7 @@ const DESCRIPTIONS: &[&str] = &[
     "Choose one or more agents that will execute each benchmark.",
     "Choose the provider endpoint used by the selected agents.",
     "Choose tool-capable models available in the selected providers.",
+    "Choose default or explicit agent-owned reasoning effort levels.",
     "Choose one or more workload prompts installed in this project.",
     "Choose the measurement collectors; host tools are installed project-locally when possible.",
     "Choose how many identical executions run in parallel for each generated benchmark.",
@@ -188,7 +189,7 @@ impl Pane {
 struct App {
     root: PathBuf,
     project: project::ProjectConfig,
-    panes: [Pane; 9],
+    panes: [Pane; 10],
     step: PaneKind,
     extension_tab: String,
     extension_description: String,
@@ -295,6 +296,7 @@ impl App {
             PaneKind::Agents,
             PaneKind::Providers,
             PaneKind::Models,
+            PaneKind::ThinkingEffort,
             PaneKind::Workloads,
         ];
         if !self.pane(PaneKind::Extensions).choices.is_empty() {
@@ -430,6 +432,24 @@ impl App {
             },
         ]);
         runtime_pane.selected[0] = true;
+        let mut thinking_effort_pane = Pane::new(
+            std::iter::once(Choice {
+                label: "default".into(),
+                key: ChoiceKey::ThinkingEffort(None),
+                availability: Availability::Available,
+            })
+            .chain(
+                crate::benchmark::ThinkingEffort::ALL
+                    .into_iter()
+                    .map(|effort| Choice {
+                        label: effort.to_string(),
+                        key: ChoiceKey::ThinkingEffort(Some(effort)),
+                        availability: Availability::Available,
+                    }),
+            )
+            .collect(),
+        );
+        thinking_effort_pane.selected[0] = true;
         let mut app = Self {
             root,
             project,
@@ -437,6 +457,7 @@ impl App {
                 Pane::new(agents),
                 Pane::new(provider_choices),
                 Pane::new(Vec::new()),
+                thinking_effort_pane,
                 workload_pane,
                 measure_pane,
                 concurrency_pane,
@@ -546,6 +567,15 @@ impl App {
             select_choice(
                 self.pane_mut(PaneKind::Providers),
                 ChoiceKey::Provider(config.provider.clone()),
+                input,
+            )?;
+        }
+
+        self.pane_mut(PaneKind::ThinkingEffort).selected.fill(false);
+        for config in &configs {
+            select_choice(
+                self.pane_mut(PaneKind::ThinkingEffort),
+                ChoiceKey::ThinkingEffort(config.thinking_effort),
                 input,
             )?;
         }
@@ -1325,6 +1355,7 @@ fn select_choice(pane: &mut Pane, key: ChoiceKey, input: &Path) -> Result<(), Er
                 ChoiceKey::Agent(_) => "agent",
                 ChoiceKey::Provider(_) => "provider",
                 ChoiceKey::Model { .. } => "model",
+                ChoiceKey::ThinkingEffort(_) => "thinking effort",
                 ChoiceKey::Prompt(_) | ChoiceKey::TrialSet { .. } => "workload",
                 ChoiceKey::Collector(_) => "collector",
                 ChoiceKey::CollectorOption { .. } => "collector option",
@@ -1381,6 +1412,8 @@ fn choice_key_label(key: &ChoiceKey) -> String {
         | ChoiceKey::Trial(value) => value.clone(),
         ChoiceKey::CollectorOption { selection, .. } => selection.clone(),
         ChoiceKey::Model { provider, model } => format!("{provider}:{model}"),
+        ChoiceKey::ThinkingEffort(None) => "default".into(),
+        ChoiceKey::ThinkingEffort(Some(value)) => value.to_string(),
         ChoiceKey::TrialSet { workload, file } => format!("{}:{}", workload, file.display()),
         ChoiceKey::Concurrency(value) => value.to_string(),
         ChoiceKey::RuntimeNone => "CPU affinity: None (portable)".into(),
@@ -3340,6 +3373,13 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                 .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
         })
         .collect::<Vec<_>>();
+    let mut efforts = app.panes[PaneKind::ThinkingEffort.index()]
+        .selected_choices()
+        .filter_map(|choice| choice.key.thinking_effort())
+        .collect::<Vec<_>>();
+    if efforts.is_empty() {
+        efforts.push(None);
+    }
     let workloads = app.panes[PaneKind::Workloads.index()]
         .selected_choices()
         .filter(|choice| !choice.key.is_control())
@@ -3401,6 +3441,7 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
     let planned = agents
         .len()
         .checked_mul(valid_models)
+        .and_then(|count| count.checked_mul(efforts.len()))
         .and_then(|count| count.checked_mul(total_trials));
     if planned.is_none_or(|count| count > crate::sweep::MAX_CONFIGS) {
         return Err(Error::Input(format!(
@@ -3426,35 +3467,54 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                 if model_provider != provider {
                     continue;
                 }
-                for (workload, trial_set, trials) in &workloads {
-                    for trial in trials {
-                        let name = format!("asb-test-{stamp}-{index:03}.toml");
-                        let config = BenchmarkConfig {
-                            runtime: runtime.clone(),
-                            native_snapshot_record: app.native_snapshot_record,
-                            planning: None,
-                            agent: agent.clone(),
-                            workload: workload.clone(),
-                            provider: provider.clone(),
-                            model: model.clone(),
-                            concurrency,
-                            trial_set: trial_set.clone(),
-                            trial: trial.clone(),
-                            workspace: app.project.workspace_dir.clone(),
-                            log_file: crate::benchmark::default_log_path(&format!(
-                                "{}.log",
-                                name.trim_end_matches(".toml")
-                            )),
-                            measurements: Some(MeasurementConfig {
-                                enabled: true,
-                                directory: "measurements".into(),
-                                collectors: measures.clone(),
-                            }),
-                            retention: crate::benchmark::RetentionConfig::default(),
-                            mcp_servers: Vec::new(),
-                        };
-                        configs.push(config)?;
-                        index += 1;
+                for effort in &efforts {
+                    for (workload, trial_set, trials) in &workloads {
+                        for trial in trials {
+                            let name = format!("asb-test-{stamp}-{index:03}.toml");
+                            let config = BenchmarkConfig {
+                                runtime: runtime.clone(),
+                                native_snapshot_record: app.native_snapshot_record,
+                                planning: None,
+                                agent: agent.clone(),
+                                workload: workload.clone(),
+                                provider: provider.clone(),
+                                model: model.clone(),
+                                thinking_effort: *effort,
+                                concurrency,
+                                trial_set: trial_set.clone(),
+                                trial: trial.clone(),
+                                workspace: app.project.workspace_dir.clone(),
+                                log_file: crate::benchmark::default_log_path(&format!(
+                                    "{}.log",
+                                    name.trim_end_matches(".toml")
+                                )),
+                                measurements: Some(MeasurementConfig {
+                                    enabled: true,
+                                    directory: "measurements".into(),
+                                    collectors: measures.clone(),
+                                }),
+                                retention: crate::benchmark::RetentionConfig::default(),
+                                mcp_servers: Vec::new(),
+                            };
+                            if config.thinking_effort.is_some() {
+                                let adapter =
+                                    agents::find(agent).expect("selected agent remains registered");
+                                let endpoint = crate::endpoint::choose_from(
+                                    adapter.id(),
+                                    adapter.supported_endpoints(),
+                                    &config.provider,
+                                    &config.model,
+                                    &providers::offered_endpoints(&config.provider, &config.model),
+                                )?;
+                                crate::config::validate_thinking_effort(
+                                    adapter,
+                                    endpoint.interface,
+                                    config.thinking_effort,
+                                )?;
+                            }
+                            configs.push(config)?;
+                            index += 1;
+                        }
                     }
                 }
             }
@@ -4707,7 +4767,7 @@ mod tests {
             availability: Availability::Unknown,
         }]);
         app.panes[PaneKind::Workloads.index()] = Pane::new(vec![trial_set_choice("swe-bench")]);
-        for pane in &mut app.panes[..4] {
+        for pane in &mut app.panes[..5] {
             pane.selected[0] = true;
         }
         // A trial-capable workload publishes the current extension pane, even
@@ -4780,7 +4840,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("asb-tui-concurrency-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("test root");
         let app = App::new(root.clone(), ProjectConfig::default());
-        assert_eq!(app.panes.len(), 9);
+        assert_eq!(app.panes.len(), 10);
         assert_eq!(
             app.panes[PaneKind::Concurrency.index()]
                 .selected_choices()
@@ -4792,6 +4852,78 @@ mod tests {
             "1"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn thinking_effort_tui_selection_expands_and_restores_a_matrix() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-tui-thinking-effort-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = App::new(root.clone(), ProjectConfig::default());
+        app.panes[PaneKind::Agents.index()] = Pane::new(vec![agent_choice("pi")]);
+        app.panes[PaneKind::Agents.index()].selected[0] = true;
+        app.panes[PaneKind::Providers.index()] = Pane::new(vec![provider_choice("openai")]);
+        app.panes[PaneKind::Providers.index()].selected[0] = true;
+        app.panes[PaneKind::Models.index()] = Pane::new(vec![Choice {
+            label: "openai:gpt-6-sol".into(),
+            key: ChoiceKey::Model {
+                provider: "openai".into(),
+                model: "gpt-6-sol".into(),
+            },
+            availability: Availability::Available,
+        }]);
+        app.panes[PaneKind::Models.index()].selected[0] = true;
+        app.panes[PaneKind::Workloads.index()] = Pane::new(vec![Choice {
+            label: "bug-fix".into(),
+            key: ChoiceKey::Prompt("bug-fix".into()),
+            availability: Availability::Available,
+        }]);
+        app.panes[PaneKind::Workloads.index()].selected[0] = true;
+        app.panes[PaneKind::ThinkingEffort.index()]
+            .selected
+            .fill(false);
+        for effort in [
+            Some(crate::benchmark::ThinkingEffort::High),
+            Some(crate::benchmark::ThinkingEffort::XHigh),
+        ] {
+            let index = app
+                .pane(PaneKind::ThinkingEffort)
+                .choices
+                .iter()
+                .position(|choice| choice.key == ChoiceKey::ThinkingEffort(effort))
+                .unwrap();
+            app.panes[PaneKind::ThinkingEffort.index()].selected[index] = true;
+        }
+        let (_, _, configs) = super::prepare_configs(&app).unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(
+            configs
+                .iter()
+                .map(|config| config.thinking_effort)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                Some(crate::benchmark::ThinkingEffort::High),
+                Some(crate::benchmark::ThinkingEffort::XHigh),
+            ])
+        );
+        let sweep = root.join("effort-sweep.toml");
+        crate::config::matrix::publish_sweep(&sweep, configs, &mut Vec::new()).unwrap();
+        let mut restored = App::new(root.clone(), ProjectConfig::default());
+        restored.preselect(&sweep).unwrap();
+        assert_eq!(
+            restored
+                .pane(PaneKind::ThinkingEffort)
+                .selected_choices()
+                .filter_map(|choice| choice.key.thinking_effort())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                Some(crate::benchmark::ThinkingEffort::High),
+                Some(crate::benchmark::ThinkingEffort::XHigh),
+            ])
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
