@@ -561,9 +561,9 @@ class ManagedDockerWorkspace:
             release_path = None
             gate_environment = environment
             command = argv
+            release_path = "/tmp/.asb-gate-release-" + secrets.token_hex(16)
+            gate_environment = dict(environment, ASB_GATE_RELEASE=release_path)
             if gate != "application":
-                release_path = "/tmp/.asb-gate-release-" + secrets.token_hex(16)
-                gate_environment = dict(environment, ASB_GATE_RELEASE=release_path)
                 command = ["/bin/sh", "-c", GATE, "asb-gate", *argv]
             # A sweep creates independent Python workers.  Their agents still
             # run concurrently, but concurrently creating the paused Docker
@@ -650,14 +650,7 @@ class ManagedDockerWorkspace:
                 # backoff recovers the daemon without a control-plane storm.
                 for resume_attempt in range(9):
                     try:
-                        if release_path is None:
-                            resumed = container.exec_run(
-                                ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
-                            )
-                            if resumed.exit_code != 0:
-                                raise ExecutionError("Docker rejected application gate resume")
-                        else:
-                            release_gate(api, container, release_path)
+                        release_gate(api, container, release_path)
                         resume_error = None
                         break
                     except Exception:
