@@ -81,6 +81,7 @@ pub(super) struct Admission {
     claimed: std::sync::atomic::AtomicBool,
     material: Gate,
     launch: Gate,
+    collectors: Gate,
     settlement: SettlementBarrier,
     cohort: crate::measurements::ExecutionCohort,
 }
@@ -164,12 +165,16 @@ impl Admission {
         }
         let material = Gate::selected(total, &cohort.admitted_slots, expected, material_timeout)?;
         let launch = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
+        // A stopped target has joined `launch`; this second boundary admits
+        // only replicas whose selected collectors have attached successfully.
+        let collectors = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
         let settlement =
             SettlementBarrier::selected(total, &cohort.admitted_slots, launch_timeout)?;
         Ok(Self {
             claimed: std::sync::atomic::AtomicBool::new(false),
             material,
             launch,
+            collectors,
             settlement,
             cohort,
         })
@@ -185,6 +190,9 @@ impl Admission {
     }
     pub(super) fn launch(&self) -> &Gate {
         &self.launch
+    }
+    pub(super) fn collectors(&self) -> &Gate {
+        &self.collectors
     }
     pub(super) fn settlement(&self) -> &SettlementBarrier {
         &self.settlement
@@ -746,6 +754,67 @@ impl crate::workloads::session::LaunchReadiness for LaunchAdmission<'_> {
     }
 }
 
+/// A final release boundary whose deadline starts only after a replica has
+/// attached its collector set. Unlike target launch admission, registration is
+/// deliberately deferred: workload preparation must not consume the bounded
+/// post-attachment release budget.
+pub(crate) struct CollectorAdmission<'a> {
+    gate: &'a Gate,
+    replica: Identity,
+    identity: Compatibility,
+    arrival: Mutex<Option<Arrival<'a>>>,
+}
+
+impl<'a> CollectorAdmission<'a> {
+    pub(crate) fn new(gate: &'a Gate, replica: Identity, identity: Compatibility) -> Self {
+        Self {
+            gate,
+            replica,
+            identity,
+            arrival: Mutex::new(None),
+        }
+    }
+}
+
+impl crate::workloads::session::LaunchReadiness for CollectorAdmission<'_> {
+    fn ready(&self) -> Result<(), String> {
+        let mut arrival = self.arrival.lock().map_err(|_| unavailable().to_string())?;
+        if arrival.is_none() {
+            *arrival = Some(
+                self.gate
+                    .register(self.replica)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        arrival
+            .as_mut()
+            .expect("registered collector arrival")
+            .ready(self.identity.clone())
+            .map_err(|error| error.to_string())
+    }
+
+    fn abort(&self) {
+        self.gate
+            .abort("replica failed before shared collector readiness");
+    }
+
+    fn remaining(&self) -> Result<Duration, String> {
+        let state = self
+            .gate
+            .state
+            .lock()
+            .map_err(|_| unavailable().to_string())?;
+        if let Some(reason) = &state.aborted {
+            return Err(reason.clone());
+        }
+        state
+            .deadline
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "shared collector readiness deadline has not started".into())
+    }
+}
+
 impl Drop for Arrival<'_> {
     fn drop(&mut self) {
         if !self.settled {
@@ -1293,6 +1362,36 @@ mod tests {
         assert!(second.ready().is_err());
         assert!(first.ready().is_err());
         assert!(gate.confirmed_identity().is_err());
+    }
+
+    #[test]
+    fn collector_deadline_starts_only_when_attachment_is_ready() {
+        use crate::workloads::session::LaunchReadiness;
+        let gate = Gate::deferred(2, Duration::from_secs(3)).unwrap();
+        let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
+        let second = CollectorAdmission::new(&gate, Identity { index: 2, total: 2 }, material());
+        assert!(gate.state.lock().unwrap().deadline.is_none());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                entered_tx.send(()).unwrap();
+                done_tx.send(first.ready()).unwrap();
+            });
+            entered_rx.recv().unwrap();
+            for _ in 0..100 {
+                if gate.state.lock().unwrap().deadline.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(gate.state.lock().unwrap().deadline.is_some());
+            second.ready().unwrap();
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap();
+        });
     }
 
     #[test]

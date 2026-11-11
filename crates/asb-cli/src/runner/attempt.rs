@@ -488,6 +488,7 @@ struct ReadyAttempt<'a> {
     prepared: PreparedAttempt,
     selected_offer: Option<crate::endpoint::Offer>,
     launch: Option<batch::LaunchAdmission<'a>>,
+    collector_ready: Option<batch::CollectorAdmission<'a>>,
 }
 
 /// An unsuccessful preparation transition must notify peers before cancellation,
@@ -849,6 +850,24 @@ impl<'a> ReadyAttempt<'a> {
                     batch::LaunchAdmission::new(gate, options.replica, identity)
                 })
                 .transpose()?;
+            let collector_ready = options
+                .collector_gate
+                .map(|gate| {
+                    let identity = options
+                        .preparation_gate
+                        .ok_or_else(|| {
+                            Error::Run(
+                                "collector readiness admission requires verified material".into(),
+                            )
+                        })?
+                        .confirmed_identity()?;
+                    Ok(batch::CollectorAdmission::new(
+                        gate,
+                        options.replica,
+                        identity,
+                    ))
+                })
+                .transpose()?;
             let workload_baseline = workload_session.baseline_evidence();
             let workload_baseline_passed = workload_baseline.measured_passed();
             if !json && workload_baseline_passed == Some(true) {
@@ -964,6 +983,7 @@ impl<'a> ReadyAttempt<'a> {
                 },
                 tape_session,
                 launch,
+                collector_ready,
                 capsule_record,
                 capsule_replay,
                 guest_capsule_record,
@@ -974,6 +994,7 @@ impl<'a> ReadyAttempt<'a> {
             metadata,
             tape,
             launch,
+            collector_ready,
             capsule_record,
             capsule_replay,
             guest_capsule_record,
@@ -996,6 +1017,7 @@ impl<'a> ReadyAttempt<'a> {
             },
             selected_offer,
             launch,
+            collector_ready,
         })
     }
 
@@ -1011,6 +1033,7 @@ impl<'a> ReadyAttempt<'a> {
             mut prepared,
             selected_offer,
             launch,
+            collector_ready,
         } = self;
         let config_path = context.config_path.as_path();
         let config = &context.config;
@@ -1026,9 +1049,15 @@ impl<'a> ReadyAttempt<'a> {
         let launch = launch
             .as_ref()
             .map(|launch| launch as &dyn workloads::session::LaunchReadiness);
+        let collector_ready = collector_ready
+            .as_ref()
+            .map(|ready| ready as &dyn workloads::session::LaunchReadiness);
         let mut runtime_entered = false;
         let execution = (|| {
-            let _launch_failure = workloads::session::LaunchFailureGuard(launch);
+            let _launch_failure = workloads::session::LaunchFailureGuard {
+                launch,
+                collector_ready,
+            };
             let tape_url = prepared.tape.as_ref().map(|session| session.url());
             let provider_endpoint =
                 tape_url.or_else(|| providers::local_bridge_endpoint(&config.provider, bridge));
@@ -1066,6 +1095,7 @@ impl<'a> ReadyAttempt<'a> {
             let isolated = prepared.workload.execute(
                 &mut workloads::ExecutionContext {
                     launch,
+                    collector_ready,
                     config,
                     connection: connection.as_ref(),
                     project_root,
