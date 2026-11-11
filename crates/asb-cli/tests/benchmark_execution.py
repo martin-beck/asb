@@ -57,6 +57,25 @@ class Stream:
         self.closed = True
 
 
+class ControlStream:
+    def __init__(self, api):
+        self.api, self.sent, self.closed = api, False, False
+        self._response = SimpleNamespace(closed=False)
+        self._response.close = lambda: setattr(self._response, "closed", True)
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.api.control_hang:
+            self.api.control_started.set()
+            self.api.control_release.wait(5)
+        if self.sent or not self.api.control_output:
+            raise StopIteration
+        self.sent = True
+        return self.api.control_output, None
+    def close(self):
+        self.closed = True
+
+
 class Container:
     def __init__(self):
         self.id = "owned-container"
@@ -72,7 +91,7 @@ class Container:
     def reload(self):
         pass
     def exec_run(self, argv):
-        if "asb-resume" in argv:
+        if "__asb-resume" in argv:
             self.events.append("resume")
             self.resumed = True
         else:
@@ -102,8 +121,19 @@ class API:
         self.calls = []
         self.releases = []
         self.completed = False
+        self.control_status = 0
+        self.control_output = b""
+        self.control_hang = False
+        self.control_started = threading.Event()
+        self.control_release = threading.Event()
+        self.control_calls = []
     def exec_create(self, container_id, **kwargs):
         assert container_id == self.container.id
+        if kwargs["cmd"][:2] == ["/opt/asb-runtime/asb", "__asb-resume"]:
+            self.control_calls.append(kwargs)
+            self.container.events.append("resume")
+            self.container.resumed = True
+            return {"Id": "resume-1"}
         self.completed = False
         self.container.resumed = False
         self.container.killed.clear()
@@ -111,10 +141,15 @@ class API:
         self.container.events.append("gate")
         return {"Id": "exec-1"}
     def exec_start(self, exec_id, stream, demux):
-        assert exec_id == "exec-1" and stream and demux
+        assert stream and demux
+        if exec_id == "resume-1":
+            return ControlStream(self)
+        assert exec_id == "exec-1"
         self.stream = Stream(self)
         return self.stream
     def exec_inspect(self, exec_id):
+        if exec_id == "resume-1":
+            return {"Pid": 9002, "Running": False, "ExitCode": self.control_status}
         assert exec_id == "exec-1"
         return {"Pid": self.pid, "Running": not self.completed,
                 "ExitCode": (137 if self.hang else self.status) if self.completed else None}
@@ -295,7 +330,10 @@ class ExecutionTests(unittest.TestCase):
                         raise AssertionError("SDK did not stop its owned namespace")
                     raise StopIteration
                 return super().__next__()
-        def start(*_args, **_kwargs):
+        original_start = api.exec_start
+        def start(exec_id, *args, **kwargs):
+            if exec_id == "resume-1":
+                return original_start(exec_id, *args, **kwargs)
             api.stream = RetainedStream(api)
             return api.stream
         api.exec_start = start
@@ -426,7 +464,10 @@ class ExecutionTests(unittest.TestCase):
                     # its private result and output may settle afterward.
                     time.sleep(.08)
                 return super().__next__()
-        def start(*_args, **_kwargs):
+        original_start = api.exec_start
+        def start(exec_id, *args, **kwargs):
+            if exec_id == "resume-1":
+                return original_start(exec_id, *args, **kwargs)
             api.stream = DelayedSettlement(api)
             return api.stream
         api.exec_start = start
@@ -644,6 +685,51 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(container.events.count("release"), 1)
         self.assertFalse(container.resumed)
         self.assertIn("kill", container.events)
+
+    def test_application_gate_resumes_the_stopped_principal_after_archive_delivery(self):
+        workspace, container, api, _ = self.workspace()
+        def accepted_without_target_resume(container_id, path, data):
+            self.assertEqual((container_id, path), (container.id, "/tmp"))
+            self.assertIsInstance(data, bytes)
+            api.releases.append(data)
+            container.events.append("release")
+            return True
+        api.put_archive = accepted_without_target_resume
+        with workspace:
+            result = workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], gate="application")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(container.events[container.events.index("release") + 1], "resume")
+        self.assertTrue(container.resumed)
+
+    def test_application_gate_rejects_a_failed_or_chatty_resume_helper(self):
+        for status, output in [(2,b""), (0,b"unexpected")]:
+            with self.subTest(status=status, output=output):
+                workspace, container, api, _ = self.workspace()
+                def accepted_without_target_resume(container_id, path, data):
+                    self.assertEqual((container_id, path), (container.id, "/tmp"))
+                    api.releases.append(data)
+                    container.events.append("release")
+                    return True
+                api.put_archive = accepted_without_target_resume
+                api.control_status, api.control_output = status, output
+                with patch.object(RUNTIME.time, "sleep"):
+                    with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "execution gate could not be resumed"):
+                        workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], gate="application")
+                self.assertIn("kill", container.events)
+
+    def test_application_gate_resume_control_returns_when_cancelled_while_docker_blocks(self):
+        _workspace, container, api, _ = self.workspace()
+        api.control_hang = True
+        cancelled = threading.Event()
+        timer = threading.Timer(.05, cancelled.set)
+        timer.start()
+        try:
+            with self.assertRaisesRegex(RUNTIME.ExecutionError, "resume control was cancelled"):
+                RUNTIME.resume_application_gate(api, container, 42, cancelled.is_set)
+        finally:
+            api.control_release.set()
+            timer.cancel()
+        self.assertTrue(api.control_started.is_set())
 
     @unittest.skipIf(
         RUNTIME.fcntl is None or "fork" not in multiprocessing.get_all_start_methods(),

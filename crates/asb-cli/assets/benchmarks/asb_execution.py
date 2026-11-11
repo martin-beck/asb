@@ -235,6 +235,53 @@ def release_gate(api, container, release_path):
         raise ExecutionError("Docker rejected container execution gate release")
 
 
+def resume_application_gate(api, container, namespace_pid, aborted):
+    """Boundedly resume the exact stopped application principal inside its owned namespace."""
+    if type(namespace_pid) is not int or namespace_pid <= 1:
+        raise ExecutionError("invalid application gate namespace PID")
+    if not callable(aborted):
+        raise ExecutionError("invalid application gate cancellation probe")
+    result, settled = [], threading.Event()
+    def control():
+        stream = None
+        try:
+            created = api.exec_create(container.id,
+                cmd=["/opt/asb-runtime/asb", "__asb-resume", str(namespace_pid)],
+                stdout=True,stderr=True)
+            exec_id = created.get("Id") if isinstance(created,dict) else None
+            if not isinstance(exec_id,str) or not exec_id:
+                raise ExecutionError("Docker did not create application gate resume control")
+            stream = api.exec_start(exec_id,stream=True,demux=True)
+            for out, err in stream:
+                # The private helper never emits content. Do not retain even a
+                # bounded prefix from an unexpected runtime or daemon response.
+                if out or err:
+                    raise ExecutionError("application gate resume control emitted output")
+            inspection = api.exec_inspect(exec_id)
+            if inspection.get("Running") is not False or inspection.get("ExitCode") != 0:
+                raise ExecutionError("application gate resume control did not exit cleanly")
+            result.append(None)
+        except BaseException as error:
+            result.append(error)
+        finally:
+            try:
+                if stream is not None:
+                    stream.close()
+                    response = getattr(stream,"_response",None)
+                    if response is not None:
+                        response.close()
+            except BaseException as error:
+                if not result:
+                    result.append(error)
+            settled.set()
+    threading.Thread(target=control,daemon=True).start()
+    while not settled.wait(0.05):
+        if aborted():
+            raise ExecutionError("application gate resume control was cancelled or exceeded its deadline")
+    if len(result) != 1 or result[0] is not None:
+        raise ExecutionError("container application gate could not be resumed")
+
+
 class WorkloadFrames:
     """Bounded framing for a namespace-owned supervisor, never agent stdout metadata.
 
@@ -658,6 +705,8 @@ class ManagedDockerWorkspace:
                 for resume_attempt in range(9):
                     try:
                         release_gate(api, container, release_path)
+                        if gate == "application":
+                            resume_application_gate(api, container, namespace_pid, resume_aborted)
                         resume_error = None
                         break
                     except Exception:

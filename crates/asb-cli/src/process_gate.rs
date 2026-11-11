@@ -193,6 +193,49 @@ pub(crate) fn pause_current() -> io::Result<()> {
     }
 }
 
+/// Resume exactly one already-stopped principal in this private PID namespace.
+///
+/// Docker cannot signal an individual `exec` process through its archive API.
+/// The workload controller has already bound this namespace PID to its owned
+/// container and the host controller re-verifies the PID generation and cgroup
+/// before accepting any execution output. This internal helper keeps the
+/// in-container signal targeted and avoids a shell command or host-wide PID.
+#[cfg(unix)]
+pub(crate) fn resume_namespace_target(args: &[OsString]) -> std::process::ExitCode {
+    let result = (|| -> io::Result<()> {
+        let [value] = args else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid target",
+            ));
+        };
+        let pid = value
+            .to_str()
+            .and_then(|value| value.parse::<libc::pid_t>().ok())
+            .filter(|pid| *pid > 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid target"))?;
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+            if !status.lines().any(|line| {
+                line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+            }) {
+                return Err(io::Error::other("target is not stopped"));
+            }
+        }
+        if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+    if result.is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        // This internal command deliberately emits no target or request data.
+        std::process::ExitCode::from(2)
+    }
+}
+
 /// Consume the archive-created release capability before starting a target.
 /// The outer guest shell has already waited for the marker before it execs
 /// this gate.  Descendant gates must not inherit that admission state: they
