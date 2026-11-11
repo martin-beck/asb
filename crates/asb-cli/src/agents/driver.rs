@@ -69,7 +69,13 @@ pub(crate) fn namespace_id() -> Result<u64, Error> {
     ))
 }
 
-fn await_gate_release() -> Result<bool, Error> {
+/// Consume the Docker execution gate capability at the guest boundary.
+///
+/// The outer shell has already waited for this private marker before it execs
+/// the guest driver.  The marker remains as teardown evidence, but nested
+/// agent gates must not inherit the outer environment capability.
+#[allow(unsafe_code)]
+fn consume_gate_release() -> Result<bool, Error> {
     let Some(value) = std::env::var_os(GATE_RELEASE) else {
         return Ok(false);
     };
@@ -81,7 +87,10 @@ fn await_gate_release() -> Result<bool, Error> {
     }
     loop {
         match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => return Ok(true),
+            Ok(metadata) if metadata.file_type().is_file() => {
+                unsafe { std::env::remove_var(GATE_RELEASE) }
+                return Ok(true);
+            }
             Ok(_) => {
                 return Err(Error::Run(
                     "guest gate release is not a regular file".into(),
@@ -882,6 +891,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 }
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
+    let archive_gate_released = consume_gate_release()?;
     request.capsule.validate()?;
     validate_snapshot_marker(
         request.snapshot_private_mount,
@@ -986,7 +996,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
     if agent_route.is_none() {
         println!("__ASB_GATE__:{}", std::process::id());
         std::io::stdout().flush().map_err(crate::io_error)?;
-        if !await_gate_release()? {
+        if !archive_gate_released {
             #[cfg(unix)]
             crate::process_gate::pause_current().map_err(|error| {
                 Error::Run(format!("cannot stop prepared guest agent: {error}"))
@@ -1329,6 +1339,41 @@ fn guest_gate_release_path_is_private_and_fixed_shape() {
     ] {
         assert!(!valid_gate_release_path(Path::new(path)), "{path}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn guest_gate_release_is_consumed_before_nested_agent_gates() {
+    const CASE: &str = "ASB_GUEST_GATE_RELEASE_CASE";
+    if std::env::var_os(CASE).is_some() {
+        assert!(consume_gate_release().unwrap());
+        assert!(std::env::var_os(GATE_RELEASE).is_none());
+        return;
+    }
+    let release = Path::new("/tmp").join(format!(
+        ".asb-gate-release-{:032x}",
+        crate::workloads::TaskIdentity::local("guest-archive-release", None)
+            .attempt_id
+            .as_bytes()
+            .iter()
+            .fold(0u128, |value, byte| value
+                .wrapping_mul(31)
+                .wrapping_add(*byte as u128))
+    ));
+    fs::write(&release, []).unwrap();
+    let name = format!(
+        "{}::guest_gate_release_is_consumed_before_nested_agent_gates",
+        module_path!().split_once("::").unwrap().1
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(CASE, "1")
+        .env(GATE_RELEASE, &release)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(release.exists());
+    fs::remove_file(release).unwrap();
 }
 
 // Successful broker settlement checks the complete selected native stream.
