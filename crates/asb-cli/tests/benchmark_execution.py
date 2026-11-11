@@ -10,7 +10,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).parents[1] / "assets/benchmarks/asb_execution.py"
@@ -556,6 +556,32 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(resume_attempts, 2)
         self.assertEqual(container.events.count("resume"), 2)
+        self.assertTrue(api.completed)
+
+    def test_gate_resume_uses_bounded_backoff_for_sustained_daemon_refusal(self):
+        workspace, container, api, _ = self.workspace()
+        original = container.exec_run
+        resume_attempts = 0
+
+        def exec_run(argv):
+            nonlocal resume_attempts
+            if "asb-resume" not in argv:
+                return original(argv)
+            resume_attempts += 1
+            container.events.append("resume")
+            if resume_attempts < 9:
+                return SimpleNamespace(exit_code=1, output=b"")
+            container.resumed = True
+            return SimpleNamespace(exit_code=0, output=b"")
+
+        container.exec_run = exec_run
+        with patch.object(RUNTIME.time, "sleep") as sleep:
+            with workspace:
+                result = workspace.execute(["agent"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(resume_attempts, 9)
+        self.assertIn(call(2.0), sleep.call_args_list)
+        self.assertIn(call(0.25), sleep.call_args_list)
         self.assertTrue(api.completed)
 
     @unittest.skipIf(

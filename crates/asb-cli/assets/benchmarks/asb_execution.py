@@ -71,7 +71,6 @@ def _gate_resume_section(aborted):
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
                 raise ExecutionError("Docker gate-resume coordination lock is not a private regular file")
             os.fchmod(fd, 0o600)
-            wait_deadline = time.monotonic() + 15
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -79,9 +78,12 @@ def _gate_resume_section(aborted):
                 except BlockingIOError:
                     if aborted():
                         raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
-                    if time.monotonic() >= wait_deadline:
-                        raise ExecutionError("timed out waiting to coordinate container execution gate resume")
-                    time.sleep(0.01)
+                    # The caller's preparation budget is the authoritative
+                    # bound.  A fixed short lock-acquisition deadline makes a
+                    # legitimate high-concurrency cohort fail simply because
+                    # earlier replicas are performing their bounded recovery.
+                    # Keep this wait cancellable and let that budget decide.
+                    time.sleep(0.02)
                 except OSError as error:
                     raise ExecutionError("cannot coordinate container execution gate resume") from error
             try:
@@ -617,7 +619,11 @@ class ManagedDockerWorkspace:
             # Releasing it between attempts recreates the same Docker-daemon
             # burst that this section is intended to prevent.
             with _gate_resume_section(resume_aborted):
-                for resume_attempt in range(3):
+                # A native Docker daemon can need several seconds to make a
+                # just-created paused task execable under cohort pressure.
+                # This sequence is process-serialized above, so exponential
+                # backoff recovers the daemon without recreating an exec storm.
+                for resume_attempt in range(9):
                     try:
                         resumed = container.exec_run(
                             ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
@@ -630,8 +636,12 @@ class ManagedDockerWorkspace:
                         resume_error = "unavailable"
                     if resume_aborted():
                         raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
-                    if resume_attempt < 2:
-                        time.sleep(0.05 * (resume_attempt + 1))
+                    if resume_attempt < 8:
+                        time.sleep(min(2.0, 0.05 * (2 ** resume_attempt)))
+                if resume_error is None and resume_attempt:
+                    # Let Docker settle the accepted CONT before the next
+                    # independently prepared replica asks it to exec again.
+                    time.sleep(0.25)
             if resume_error is not None:
                 raise ExecutionError("container execution gate could not be resumed after bounded retry")
             stdout, stderr = bytearray(), gate_stderr
