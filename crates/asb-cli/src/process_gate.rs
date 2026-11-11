@@ -15,6 +15,9 @@ use std::path::Path;
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
+const GATE_RELEASE: &str = "ASB_GATE_RELEASE";
+
+#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
 #[cfg(target_os = "linux")]
@@ -190,6 +193,47 @@ pub(crate) fn pause_current() -> io::Result<()> {
     }
 }
 
+/// Consume the one-shot release capability that the workload controller
+/// materializes through Docker's archive API.  The gate must first stop so
+/// collectors can attach; after its owner resumes it, consuming this file is
+/// the only admission path.  Do not pass the capability to the target: a
+/// nested ASB gate would otherwise wait for a second, nonexistent release.
+#[cfg(target_os = "linux")]
+fn await_archive_gate_release() -> io::Result<()> {
+    let Some(value) = std::env::var_os(GATE_RELEASE) else {
+        return Ok(());
+    };
+    unsafe { std::env::remove_var(GATE_RELEASE) };
+    let path = std::path::PathBuf::from(value);
+    let valid = path.parent() == Some(Path::new("/tmp"))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.len() == ".asb-gate-release-".len() + 32
+                    && name.starts_with(".asb-gate-release-")
+                    && name[".asb-gate-release-".len()..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            });
+    if !valid {
+        return Err(io::Error::other("invalid private guest gate release path"));
+    }
+    loop {
+        match std::fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "cannot consume guest gate release: {error}"
+                )));
+            }
+        }
+    }
+}
+
 /// Cooperatively cancel an owned gate, allowing its subreaper to finish.
 /// Repeated CONT closes cancellation racing with the gate's initial STOP.
 #[cfg(all(test, target_os = "linux"))]
@@ -318,6 +362,7 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
     }
     #[cfg(target_os = "linux")]
     let status = (|| {
+        await_archive_gate_release()?;
         if owner.cancelled()? {
             return Err(io::Error::other(
                 "native gate owner exited before client execution",
