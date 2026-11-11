@@ -75,11 +75,19 @@ pub(super) fn run(
     output: &mut dyn Write,
     warnings: &Mutex<BTreeSet<String>>,
 ) -> Result<(), Error> {
-    activate(
-        Prepared::prepare(config_path, config, repeat, options, None)?,
-        output,
-        warnings,
-    )
+    let prepared = Prepared::prepare(config_path, config, repeat, options, None)?;
+    let report_source = prepared.root.join("plan.json");
+    let retained_logs = prepared
+        .plan
+        .slots
+        .iter()
+        .map(|slot| prepared.root.join(&slot.log))
+        .collect::<Vec<_>>();
+    let result = activate(prepared, output, warnings);
+    if retained_logs.iter().any(|path| path.is_file()) {
+        super::record_report_source(options, report_source);
+    }
+    result
 }
 
 /// Own frozen planning facts and opened sources, never an active process/lock.
@@ -810,8 +818,8 @@ pub(crate) fn execute_with_sweep_settlement(
             sweep_settlement,
             reused: None,
         }
-        .execute(dispatch, output, warnings)
-        .map_err(|error| {
+        .execute(dispatch, output, warnings);
+        let settled = settled.map_err(|error| {
             if options.quiet_output {
                 append_failure_evidence(error, &root, &plan.slots, number)
             } else {

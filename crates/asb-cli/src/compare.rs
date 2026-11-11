@@ -128,7 +128,8 @@ pub(crate) fn run_links_at(
     invocation: &Path,
     output: &mut dyn Write,
 ) -> Result<(), Error> {
-    let (_, links) = generate_at_with_links(path, invocation, &mut std::io::sink(), false)?;
+    let (report, links) = generate_at_with_links(path, invocation, &mut std::io::sink(), false)?;
+    writeln!(output, "HTML report path: {}", report.display()).map_err(crate::io_error)?;
     write_public_links(links, output)
 }
 
@@ -151,13 +152,14 @@ pub(crate) fn run_links_in_sweep(
     output: &mut dyn Write,
     _owner: &crate::sweep::lock::OutputLock,
 ) -> Result<(), Error> {
-    let (_, links) = generate_owned_with_links(
+    let (report, links) = generate_owned_with_links(
         path,
         Some(output_parent),
         invocation,
         &mut std::io::sink(),
         false,
     )?;
+    writeln!(output, "HTML report path: {}", report.display()).map_err(crate::io_error)?;
     write_public_links(links, output)
 }
 
@@ -180,7 +182,9 @@ pub(crate) fn generate_at(
     output: &mut dyn Write,
     parquet: bool,
 ) -> Result<PathBuf, Error> {
-    generate_at_with_links(path, invocation, output, parquet).map(|(report, _)| report)
+    let (report, _) = generate_at_with_links(path, invocation, output, parquet)?;
+    writeln!(output, "HTML report path: {}", report.display()).map_err(crate::io_error)?;
+    Ok(report)
 }
 
 fn generate_at_with_links(
