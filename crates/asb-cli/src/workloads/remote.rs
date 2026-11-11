@@ -1130,6 +1130,14 @@ impl Session {
         &mut self,
         context: &mut ExecutionContext<'_>,
     ) -> Result<(), String> {
+        // First synchronize every verified, still-stopped target.  Starting
+        // PID-bound collectors before this rendezvous can block on shared
+        // host resources and prevent the final peer from ever releasing the
+        // cohort.  Once released, each worker attaches its collectors while
+        // its own target remains stopped, then resumes it.
+        if let Some(launch) = context.launch {
+            launch.ready()?;
+        }
         if let Some(session) = context.measurements.as_deref_mut() {
             session.event(crate::collectors::LifecycleEvent::PhaseBegin(
                 crate::collectors::LifecyclePhase::AgentPreparation,
@@ -1473,9 +1481,6 @@ impl Session {
                 session.event(Event::AgentAttachFailed)?;
                 return Err(error);
             }
-        }
-        if let Some(launch) = context.launch {
-            launch.ready()?;
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
