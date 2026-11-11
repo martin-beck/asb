@@ -72,12 +72,13 @@ class Container:
     def reload(self):
         pass
     def exec_run(self, argv):
-        if "asb-resume" in argv:
-            self.events.append("resume")
-            self.resumed = True
-        else:
-            self.events.append("stopped")
+        self.events.append("stopped")
         return SimpleNamespace(exit_code=0, output=b"")
+    def pause(self):
+        self.events.append("pause")
+    def unpause(self):
+        self.events.append("resume")
+        self.resumed = True
     def kill(self):
         self.events.append("kill")
         self.killed.set()
@@ -512,7 +513,7 @@ class ExecutionTests(unittest.TestCase):
         with workspace:
             def attach(target):
                 self.assertFalse(container.resumed)
-                self.assertEqual(container.events[-1], "stopped")
+                self.assertEqual(container.events[-1], "pause")
                 self.assertEqual(target["daemon_pid"], 9001)
                 self.assertEqual(target["namespace_pid"], 42)
                 self.assertEqual(target["pid_scope"], "docker-daemon-host")
@@ -552,21 +553,18 @@ class ExecutionTests(unittest.TestCase):
 
     def test_gate_resume_retries_one_transient_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()
-        original = container.exec_run
+        original = container.unpause
         resume_attempts = 0
 
-        def exec_run(argv):
+        def unpause():
             nonlocal resume_attempts
-            if "asb-resume" not in argv:
-                return original(argv)
             resume_attempts += 1
-            container.events.append("resume")
             if resume_attempts == 1:
-                return SimpleNamespace(exit_code=1, output=b"")
-            container.resumed = True
-            return SimpleNamespace(exit_code=0, output=b"")
+                container.events.append("resume")
+                raise RuntimeError("transient daemon refusal")
+            return original()
 
-        container.exec_run = exec_run
+        container.unpause = unpause
         with workspace:
             result = workspace.execute(["agent"])
         self.assertEqual(result["exit_code"], 0)
@@ -576,28 +574,24 @@ class ExecutionTests(unittest.TestCase):
 
     def test_gate_resume_uses_bounded_backoff_for_sustained_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()
-        original = container.exec_run
+        original = container.unpause
         resume_attempts = 0
 
-        def exec_run(argv):
+        def unpause():
             nonlocal resume_attempts
-            if "asb-resume" not in argv:
-                return original(argv)
             resume_attempts += 1
-            container.events.append("resume")
             if resume_attempts < 9:
-                return SimpleNamespace(exit_code=1, output=b"")
-            container.resumed = True
-            return SimpleNamespace(exit_code=0, output=b"")
+                container.events.append("resume")
+                raise RuntimeError("transient daemon refusal")
+            return original()
 
-        container.exec_run = exec_run
+        container.unpause = unpause
         with patch.object(RUNTIME.time, "sleep") as sleep:
             with workspace:
                 result = workspace.execute(["agent"])
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(resume_attempts, 9)
         self.assertIn(call(2.0), sleep.call_args_list)
-        self.assertIn(call(0.25), sleep.call_args_list)
         self.assertTrue(api.completed)
 
     @unittest.skipIf(
