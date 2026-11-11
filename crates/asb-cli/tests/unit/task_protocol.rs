@@ -457,6 +457,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
     let events = [
         "ready",
         "paused",
+        "release_accepted",
         "output",
         "execution_ended",
         "completed",

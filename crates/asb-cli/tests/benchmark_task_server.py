@@ -26,7 +26,9 @@ class Task:
         self.workspace.cleanup_status = "removed"
     def execute(self, argv, environment, **kwargs):
         self.commands.append((argv, environment))
-        kwargs["before_resume"]({"exec_id": "owned-exec", "daemon_pid": 9001})
+        target = {"exec_id": "owned-exec", "daemon_pid": 9001}
+        kwargs["before_resume"](target)
+        kwargs["on_release_accepted"](target)
         kwargs["on_output"]("stdout", b"live\x00stdout")
         return {"exit_code": 7, "stdout": b"live\x00stdout", "stderr": b"warning", "timed_out": False}
     def capture_submission(self):
@@ -92,7 +94,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([item.value for item in Operation],
                          ["execute", "agent", "resume", "capture", "evaluate", "close", "cancel", "initial-material"])
         self.assertEqual(json.loads(json.dumps(list(Event))),
-                         ["ready", "paused", "output", "execution_ended", "completed",
+                         ["ready", "paused", "release_accepted", "output", "execution_ended", "completed",
                           "submission", "evaluated", "error", "closed", "initial-material", "preparation_failed"])
         for unknown in [None, 1, [], {}, "private-unknown-operation"]:
             with self.subTest(operation=unknown):
@@ -120,6 +122,7 @@ class ProtocolTests(unittest.TestCase):
             waiting[0] = True
             attach(dict(exec_id="owned-exec"))
             self.assertEqual(now[0],120)
+            options["on_release_accepted"](dict(exec_id="owned-exec"))
             return dict(stdout=b"",stderr=b"",exit_code=0)
         with patch("asb_task_server.queue.Queue",VirtualQueue), \
                 patch("asb_task_server.time.monotonic",side_effect=lambda:now[0]), \
@@ -127,7 +130,7 @@ class ProtocolTests(unittest.TestCase):
             status,events,_ = self.run_protocol([dict(op="agent",preparation_seconds=1800),
                 dict(op="resume",exec_id="owned-exec"),dict(op="close")])
         self.assertEqual(status,0)
-        self.assertEqual([event["event"] for event in events],["ready","paused","completed","closed"])
+        self.assertEqual([event["event"] for event in events],["ready","paused","release_accepted","completed","closed"])
 
     def test_material_capture_is_explicit_offline_and_never_starts_execution(self):
         class MaterialTask(Task):
@@ -181,12 +184,12 @@ class ProtocolTests(unittest.TestCase):
             {"op": "resume", "exec_id": "owned-exec"}, {"op": "capture"}, {"op": "evaluate", "timeout": 60}, {"op": "close"},
         ])
         self.assertEqual(status, 0)
-        self.assertEqual([event["event"] for event in events], ["ready", "paused", "output", "completed", "submission", "evaluated", "closed"])
+        self.assertEqual([event["event"] for event in events], ["ready", "paused", "release_accepted", "output", "completed", "submission", "evaluated", "closed"])
         self.assertEqual(task.commands, [(["selected-agent", "literal ; argument"], {"API_KEY": "fixture-key"})])
         self.assertNotIn("fixture-key", json.dumps(events))
-        self.assertEqual(base64.b64decode(events[2]["data"]), b"live\x00stdout")
-        self.assertEqual(base64.b64decode(events[3]["result"]["stderr"]), b"warning")
-        self.assertEqual(events[3]["result"]["exit_code"], 7)
+        self.assertEqual(base64.b64decode(events[3]["data"]), b"live\x00stdout")
+        self.assertEqual(base64.b64decode(events[4]["result"]["stderr"]), b"warning")
+        self.assertEqual(events[4]["result"]["exit_code"], 7)
         self.assertEqual(events[-1]["cleanup"], "removed")
 
     def test_wrong_resume_identity_is_rejected_and_cleanup_remains_available(self):

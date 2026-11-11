@@ -480,19 +480,20 @@ class ManagedDockerWorkspace:
 
     def execute(self, argv, environment=None, timeout=900, output_limit=256 * 1024, before_resume=None,
                 on_output=None, cancelled=None, gate="shell", preparation_timeout=None,
-                workload_owner=None, on_execution_end=None, transport_factory=None, on_preparation_failure=None):
+                workload_owner=None, on_execution_end=None, transport_factory=None, on_preparation_failure=None,
+                on_release_accepted=None):
         if self.container is None:
             raise ExecutionError("workspace is not running")
         if not self.active.acquire(blocking=False):
             raise ExecutionError("one command is already running in this task workspace")
         try:
             return self._execute(argv, environment or {}, timeout, output_limit, before_resume, on_output, cancelled, gate, preparation_timeout,
-                                 workload_owner, on_execution_end, transport_factory, on_preparation_failure)
+                                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted)
         finally:
             self.active.release()
 
     def _execute(self, argv, environment, timeout, output_limit, before_resume, on_output, cancelled, gate, preparation_timeout,
-                 workload_owner, on_execution_end, transport_factory, on_preparation_failure):
+                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted):
         if (not isinstance(argv, list) or not argv or len(argv) > 10000
                 or any(not isinstance(value, str) or "\x00" in value for value in argv)
                 or not isinstance(environment, dict)
@@ -667,6 +668,11 @@ class ManagedDockerWorkspace:
                         time.sleep(min(2.0, 0.05 * (2 ** resume_attempt)))
             if resume_error is not None:
                 raise ExecutionError("container execution gate could not be resumed after bounded retry")
+            # Docker accepting the archive proves only that the daemon took
+            # the release request. The Rust controller separately proves the
+            # stopped host PID has resumed before admitting execution output.
+            if on_release_accepted is not None:
+                on_release_accepted(target)
             stdout, stderr = bytearray(), gate_stderr
             truncated = False
             frames = WorkloadFrames(namespace_pid, workload_owner, on_execution_end) if workload_owner else None

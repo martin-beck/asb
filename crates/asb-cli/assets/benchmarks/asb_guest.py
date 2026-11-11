@@ -598,7 +598,8 @@ def propagate_guest_timeout(result, observation):
             result["metadata"]["execution_failure"] = "agent execution exceeded its time budget"
 
 
-def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=None, preparation_budget=None, on_preparation_failure=None):
+def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=None, preparation_budget=None, on_preparation_failure=None,
+                  on_release_accepted=None):
     # The relay spans package installation AND agent execution and is closed
     # on success, cancellation and every preparation/execution exception.
     seconds = request.get("preparation_seconds")
@@ -612,7 +613,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
             (upstream.is_set() if upstream is not None else False), [])
     with ExitStack() as resources:
         try:
-            return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget)
+            return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted)
         except BaseException:
             if preparation_budget is not None:preparation_budget.fail()
             raise
@@ -643,7 +644,7 @@ def isolate_snapshot_replay_network(task):
         raise ExecutionError('snapshot replay container still has a routed address')
 
 
-def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget):
+def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget, on_release_accepted):
     if request.get("network") and getattr(task, 'tool_mode', None) == 'replay':
         raise ExecutionError('replay cannot attach an external task network')
     guest,environment = prepare_agent(task,request,cancelled,resources,relays,preparation_budget)
@@ -754,7 +755,7 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
                                     preparation_timeout=preparation_budget.remaining() if preparation_budget else 90,
                                     on_preparation_failure=preparation_budget.fail if preparation_budget else None,
                                     on_output=agent_output, cancelled=ForwardingCancellation(cancelled, relays),
-                                    transport_factory=transport,
+                                    transport_factory=transport, on_release_accepted=on_release_accepted,
                                     **lifetime_options)
     finish_execution(result)
     # A timed-out/cancelled owned guest is torn down together with its private

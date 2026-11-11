@@ -22,6 +22,8 @@ const MAX_EXPORTED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) enum EventKind {
     Ready,
     Paused,
+    #[serde(rename = "release_accepted")]
+    ReleaseAccepted,
     PreparationFailed,
     Output,
     ExecutionEnded,
