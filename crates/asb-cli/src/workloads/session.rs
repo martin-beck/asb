@@ -270,12 +270,19 @@ pub(crate) trait LaunchReadiness {
     fn remaining(&self) -> Result<std::time::Duration, String>;
 }
 
-/// Declare after owned execution state so peers are notified before teardown.
-pub(crate) struct LaunchFailureGuard<'a>(pub Option<&'a dyn LaunchReadiness>);
+/// Declare after owned execution state so every pending cohort boundary is
+/// notified before teardown.
+pub(crate) struct LaunchFailureGuard<'a> {
+    pub launch: Option<&'a dyn LaunchReadiness>,
+    pub collector_ready: Option<&'a dyn LaunchReadiness>,
+}
 impl Drop for LaunchFailureGuard<'_> {
     fn drop(&mut self) {
-        if let Some(launch) = self.0 {
+        if let Some(launch) = self.launch {
             launch.abort();
+        }
+        if let Some(collector_ready) = self.collector_ready {
+            collector_ready.abort();
         }
     }
 }
@@ -283,6 +290,9 @@ impl Drop for LaunchFailureGuard<'_> {
 /// The runner provides negotiated connections, never workload/agent dispatch.
 pub(crate) struct ExecutionContext<'a> {
     pub launch: Option<&'a dyn LaunchReadiness>,
+    /// The final pre-Resume cohort boundary. It is reached only after the
+    /// selected collector set has attached to this stopped target.
+    pub collector_ready: Option<&'a dyn LaunchReadiness>,
     pub config: &'a crate::benchmark::BenchmarkConfig,
     pub connection: Option<&'a crate::endpoint::Connection>,
     pub project_root: &'a Path,

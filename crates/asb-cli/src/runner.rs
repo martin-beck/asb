@@ -260,6 +260,9 @@ pub(crate) struct RunOptions<'a> {
     pub architecture_confirmed: bool,
     pub preparation_gate: Option<&'a batch::Gate>,
     pub launch_gate: Option<&'a batch::Gate>,
+    /// Releases isolated targets only after every admitted replica has
+    /// attached its selected collector set successfully.
+    pub collector_gate: Option<&'a batch::Gate>,
     /// Holds official grading and post-processing until every admitted peer
     /// has settled its agent execution and measurement collection.
     pub settlement_barrier: Option<&'a batch::SettlementBarrier>,
@@ -832,6 +835,7 @@ fn public_direct_run(options: &RunOptions<'_>) -> bool {
         && options.execution_cohort.is_none()
         && options.preparation_gate.is_none()
         && options.launch_gate.is_none()
+        && options.collector_gate.is_none()
         && options.settlement_barrier.is_none()
         && options.sweep_settlement.is_none()
         && options.batch.is_none()
@@ -855,6 +859,7 @@ fn run_admitted_batch(
         || options.execution_cohort.is_some()
         || options.preparation_gate.is_some()
         || options.launch_gate.is_some()
+        || options.collector_gate.is_some()
         || options.settlement_barrier.is_some()
     {
         return Err(Error::Input(
@@ -866,6 +871,7 @@ fn run_admitted_batch(
         execution_cohort: Some(admission.cohort()),
         preparation_gate: Some(admission.material()),
         launch_gate: Some(admission.launch()),
+        collector_gate: Some(admission.collectors()),
         settlement_barrier: Some(admission.settlement()),
         verify_initial_material: true,
         ..options
@@ -1189,6 +1195,9 @@ fn abort_replica_gates(options: RunOptions<'_>, reason: &str) {
         gate.abort(reason);
     }
     if let Some(gate) = options.launch_gate {
+        gate.abort(reason);
+    }
+    if let Some(gate) = options.collector_gate {
         gate.abort(reason);
     }
     if let Some(barrier) = options.settlement_barrier {
@@ -1568,7 +1577,10 @@ fn run_measured_agent_with_launch_progress(
             }
         }
     };
-    let _launch_failure = workloads::session::LaunchFailureGuard(launch);
+    let _launch_failure = workloads::session::LaunchFailureGuard {
+        launch,
+        collector_ready: None,
+    };
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
             return Err(native_launch_failure(

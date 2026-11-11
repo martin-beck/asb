@@ -273,6 +273,7 @@ fn actual_python_producer_and_rust_session_keep_both_grades_and_consume_close_pe
             show_output: true,
             progress: Some(&mut progress),
             launch: None,
+            collector_ready: None,
         };
         let mut output = Vec::new();
         let result =
@@ -355,6 +356,7 @@ fn actual_python_task_loop_forwards_declared_termination_without_changing_grade_
                 show_output: false,
                 progress: None,
                 launch: None,
+                collector_ready: None,
             };
             let result = session.run_prepared(
                 &mut context,
@@ -480,6 +482,7 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
         "missing-target",
         "preparation-failed",
         "ready-failure",
+        "collector-ready-failure",
     ] {
         let fixture = Fixture::new();
         let mut target = json!({"container_id":"a".repeat(64),"exec_id":"b".repeat(64),
@@ -505,10 +508,17 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             ready: Cell::new(0),
             aborted: Cell::new(false),
         };
+        let collector_ready = Launch {
+            fixture: &fixture,
+            fail_ready: fault == "collector-ready-failure",
+            ready: Cell::new(0),
+            aborted: Cell::new(false),
+        };
         let mut context = ExecutionContext {
             ignore_tool_mismatch: false,
             ignore_mcp_mismatch: false,
             launch: Some(&launch),
+            collector_ready: Some(&collector_ready),
             config: &config,
             connection: Some(&connection),
             project_root: &fixture.0,
@@ -546,10 +556,19 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
         }
         assert_eq!(
             launch.ready.get(),
-            usize::from(matches!(fault, "none" | "ready-failure")),
+            usize::from(matches!(
+                fault,
+                "none" | "ready-failure" | "collector-ready-failure"
+            )),
+            "{fault}"
+        );
+        assert_eq!(
+            collector_ready.ready.get(),
+            usize::from(matches!(fault, "none" | "collector-ready-failure")),
             "{fault}"
         );
         assert_eq!(launch.aborted.get(), fault != "none", "{fault}");
+        assert_eq!(collector_ready.aborted.get(), fault != "none", "{fault}");
         assert_eq!(
             fs::read_to_string(fixture.0.join("preparation-seconds")).unwrap(),
             "1800.0",
@@ -611,6 +630,7 @@ fn completed_guest_survives_capture_end_errors_and_still_grades_then_closes() {
             measurements: Some(&mut measurements),
             show_output: false,
             progress: None,
+            collector_ready: None,
         };
         let result = session.run_prepared(
             &mut context,
@@ -671,6 +691,7 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
             measurements: None,
             show_output,
             progress: None,
+            collector_ready: None,
         };
         let mut output = Vec::new();
         session.begin_agent_preparation(&mut context).unwrap();
@@ -728,6 +749,7 @@ fn unknown_grade_settlement_never_repeats_evaluation_or_cancellation() {
         measurements: None,
         show_output: false,
         progress: None,
+        collector_ready: None,
     };
     session.begin_agent_preparation(&mut context).unwrap();
     let result = session.run_prepared(
@@ -788,6 +810,7 @@ fn protocol_errors_preserve_original_reason_and_cancel_instead_of_grading() {
             measurements: None,
             show_output: false,
             progress: None,
+            collector_ready: None,
         };
         let result = session.run_prepared(
             &mut context,
@@ -855,6 +878,7 @@ fn broken_human_output_does_not_cancel_a_completed_guest_submission_or_grader() 
         measurements: None,
         show_output: true,
         progress: None,
+        collector_ready: None,
     };
     let result = session.run_prepared(
         &mut context,
@@ -909,6 +933,7 @@ fn broken_output_and_deadline_use_same_preserving_error_envelope() {
             measurements: None,
             show_output: true,
             progress: None,
+            collector_ready: None,
         };
         session
             .dispatch_agent(
@@ -964,6 +989,7 @@ fn production_preparation_still_rejects_unregistered_agent_without_protocol_disp
         measurements: None,
         show_output: false,
         progress: None,
+        collector_ready: None,
     };
     let result = session.execute(&mut context, &mut Vec::new()).unwrap();
     let Err(error) = result else {
@@ -1017,6 +1043,7 @@ fn measured_protocol_rejects_unverified_target_and_execution_end_before_start() 
             measurements: Some(&mut measurements),
             show_output: false,
             progress: None,
+            collector_ready: None,
         };
         session.begin_agent_preparation(&mut context).unwrap();
         let result = session.run_prepared(
@@ -1082,6 +1109,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
             measurements: None,
             show_output: false,
             progress: None,
+            collector_ready: None,
         };
         let result = session
             .run_prepared(
@@ -1142,6 +1170,7 @@ fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff(
             measurements: None,
             show_output: false,
             progress: None,
+            collector_ready: None,
         };
         let result = session.run_prepared(
             &mut context,

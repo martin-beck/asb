@@ -386,6 +386,7 @@ fn launch_validates_preparation_before_exposing_a_session_and_preserves_on_failu
         ignore_tool_mismatch: false,
         ignore_mcp_mismatch: false,
         launch: None,
+        collector_ready: None,
         config: &config,
         connection: Some(&connection),
         project_root: &fixture.root,

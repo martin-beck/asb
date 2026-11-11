@@ -1374,9 +1374,7 @@ impl Session {
                     }
                 }
                 Some(EventKind::PreparationFailed) => {
-                    if let Some(launch) = context.launch {
-                        launch.abort();
-                    }
+                    abort_launch_boundaries(context);
                     preparation_failed = true;
                     // Peers are already cancelled. Retain the adapter's bounded
                     // failure reason after its transport finalizers return,
@@ -1493,6 +1491,12 @@ impl Session {
             self.measurement_active = true;
             session.event(Event::AgentStarted)?;
         }
+        // The target remains stopped through collector attachment. Resume is
+        // the final common release: every admitted peer now has an equivalent
+        // verified target and active collector set.
+        if let Some(collector_ready) = context.collector_ready {
+            collector_ready.ready()?;
+        }
         self.controller.send(
             &Request::Resume {
                 exec_id: &event["target"]["exec_id"],
@@ -1542,10 +1546,8 @@ impl Session {
         context: &mut ExecutionContext<'_>,
         mut result: Result<ExecutionResult, String>,
     ) -> Result<ExecutionResult, String> {
-        if result.is_err()
-            && let Some(launch) = context.launch
-        {
-            launch.abort();
+        if result.is_err() {
+            abort_launch_boundaries(context);
         }
         if result.is_err() && self.preparation_active {
             self.preparation_active = false;
@@ -1570,6 +1572,15 @@ impl Session {
             ));
         }
         result
+    }
+}
+
+fn abort_launch_boundaries(context: &ExecutionContext<'_>) {
+    if let Some(launch) = context.launch {
+        launch.abort();
+    }
+    if let Some(collector_ready) = context.collector_ready {
+        collector_ready.abort();
     }
 }
 
