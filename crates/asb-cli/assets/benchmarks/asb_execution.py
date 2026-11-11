@@ -5,14 +5,22 @@ gate reports both namespace and daemon-host PIDs before the caller attaches
 collectors and resumes execution. Docker-daemon PIDs are deliberately not
 claimed to be local-host PIDs: the caller must establish that separately.
 """
+from contextlib import contextmanager
 import json
 import math
 import os
 import platform
 from pathlib import Path
 import re
+import stat
 import threading
 import time
+import tempfile
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Docker Desktop does not expose POSIX locks.
+    fcntl = None
 
 
 class ExecutionError(RuntimeError):
@@ -20,12 +28,68 @@ class ExecutionError(RuntimeError):
 
 
 # Docker can briefly refuse an exec request while several independently
-# prepared guest gates are resumed together.  A resume request is idempotent
+# prepared guest gates are resumed together. A resume request is idempotent
 # for a stopped gate, but issuing every request to the daemon at precisely the
-# same instant is not required for a concurrent benchmark.  Keep this lock
-# process-local: it bounds only the tiny control-plane request, never agent or
-# evaluator execution.
+# same instant is not required for a concurrent benchmark. The local mutex
+# handles a multi-threaded caller; POSIX advisory locking extends the same
+# tiny control-plane critical section across the independently launched host
+# Python processes used by a sweep. Agent and evaluator execution remain fully
+# concurrent.
 _GATE_RESUME_LOCK = threading.Lock()
+
+
+def _gate_resume_lock_path():
+    """Return a user-private, host-wide advisory-lock path for Docker resumes."""
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return Path(tempfile.gettempdir()) / f"asb-docker-gate-resume-{uid}.lock"
+
+
+@contextmanager
+def _gate_resume_section(aborted):
+    """Serialize a bounded Docker control-plane operation across sweep workers."""
+    with _GATE_RESUME_LOCK:
+        # Windows Docker hosts have no fcntl module. Preserve the existing
+        # in-process protection there; the concurrent-daemon refusal repaired
+        # here was observed on a native Linux Docker daemon.
+        if fcntl is None:
+            yield
+            return
+        path = _gate_resume_lock_path()
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise ExecutionError("cannot safely coordinate concurrent Docker gate resumes")
+        flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError as error:
+            raise ExecutionError("cannot open Docker gate-resume coordination lock") from error
+        try:
+            metadata = os.fstat(fd)
+            expected_uid = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
+                raise ExecutionError("Docker gate-resume coordination lock is not a private regular file")
+            os.fchmod(fd, 0o600)
+            wait_deadline = time.monotonic() + 15
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if aborted():
+                        raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
+                    if time.monotonic() >= wait_deadline:
+                        raise ExecutionError("timed out waiting to coordinate container execution gate resume")
+                    time.sleep(0.01)
+                except OSError as error:
+                    raise ExecutionError("cannot coordinate container execution gate resume") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _parse_cpu_list(value):
@@ -542,31 +606,32 @@ class ManagedDockerWorkspace:
                 phase_deadline[0] = execution_started + timeout + (30 if gate == "application" else 0)
             # Minimal official task images may have only the POSIX shell's
             # kill builtin, not a standalone /bin/kill executable.
+            def resume_aborted():
+                with phase_lock:
+                    return (expired.is_set() or interrupted.is_set()
+                            or time.monotonic() >= phase_deadline[0]
+                            or (cancelled is not None and cancelled.is_set()))
+
             resume_error = None
-            for resume_attempt in range(3):
-                # Concurrent replicas may share one Docker daemon. Serialize
-                # only this idempotent SIGCONT request, then make a bounded
-                # retry for a transient daemon-side refusal while the gate is
-                # still stopped. Agent execution remains fully concurrent.
-                try:
-                    with _GATE_RESUME_LOCK:
+            # Hold the interprocess lock through the bounded retry sequence.
+            # Releasing it between attempts recreates the same Docker-daemon
+            # burst that this section is intended to prevent.
+            with _gate_resume_section(resume_aborted):
+                for resume_attempt in range(3):
+                    try:
                         resumed = container.exec_run(
                             ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
                         )
-                    if resumed.exit_code == 0:
-                        resume_error = None
-                        break
-                    resume_error = "nonzero"
-                except Exception:
-                    resume_error = "unavailable"
-                with phase_lock:
-                    expired_or_cancelled = (expired.is_set() or interrupted.is_set()
-                                            or time.monotonic() >= phase_deadline[0]
-                                            or (cancelled is not None and cancelled.is_set()))
-                if expired_or_cancelled:
-                    raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
-                if resume_attempt < 2:
-                    time.sleep(0.05 * (resume_attempt + 1))
+                        if resumed.exit_code == 0:
+                            resume_error = None
+                            break
+                        resume_error = "nonzero"
+                    except Exception:
+                        resume_error = "unavailable"
+                    if resume_aborted():
+                        raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
+                    if resume_attempt < 2:
+                        time.sleep(0.05 * (resume_attempt + 1))
             if resume_error is not None:
                 raise ExecutionError("container execution gate could not be resumed after bounded retry")
             stdout, stderr = bytearray(), gate_stderr
