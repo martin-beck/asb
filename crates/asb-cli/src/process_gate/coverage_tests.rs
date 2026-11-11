@@ -78,6 +78,41 @@ fn cancellation_resumes_a_stopped_owned_child_so_term_can_complete() {
 }
 
 #[test]
+fn archive_release_is_consumed_before_the_target_can_inherit_it() {
+    const CASE: &str = "ASB_GATE_ARCHIVE_RELEASE_CASE";
+    if std::env::var_os(CASE).is_some() {
+        await_archive_gate_release().unwrap();
+        assert!(std::env::var_os(GATE_RELEASE).is_none());
+        return;
+    }
+    // The release capability is intentionally restricted to the guest's
+    // private /tmp mount; CI redirects TMPDIR, so do not use temp_dir here.
+    let release = Path::new("/tmp").join(format!(
+        ".asb-gate-release-{:032x}",
+        crate::workloads::TaskIdentity::local("archive-release", None)
+            .attempt_id
+            .as_bytes()
+            .iter()
+            .fold(0u128, |value, byte| value
+                .wrapping_mul(31)
+                .wrapping_add(*byte as u128))
+    ));
+    fs::write(&release, []).unwrap();
+    let name = format!(
+        "{}::archive_release_is_consumed_before_the_target_can_inherit_it",
+        module_path!().split_once("::").unwrap().1
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(CASE, "1")
+        .env(GATE_RELEASE, &release)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert!(!release.exists());
+}
+
+#[test]
 fn launcher_selection_validates_explicit_override_in_a_private_subprocess() {
     const CASE: &str = "ASB_GATE_COVERAGE_CASE";
     if let Ok(case) = std::env::var(CASE) {
