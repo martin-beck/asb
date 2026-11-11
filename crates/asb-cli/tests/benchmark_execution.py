@@ -1,6 +1,8 @@
 """Provider-free managed execution tests using a deterministic Docker API fixture."""
 import importlib.util
 import json
+import multiprocessing
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -15,6 +17,15 @@ SOURCE = Path(__file__).parents[1] / "assets/benchmarks/asb_execution.py"
 SPEC = importlib.util.spec_from_file_location("asb_execution", SOURCE)
 RUNTIME = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNTIME)
+
+
+def _hold_gate_resume_lock(lock_path, entered, release):
+    """Fork target proving the Docker gate lock crosses Python processes."""
+    RUNTIME._GATE_RESUME_LOCK = threading.Lock()
+    RUNTIME._gate_resume_lock_path = lambda: Path(lock_path)
+    with RUNTIME._gate_resume_section(lambda: False):
+        entered.set()
+        release.wait(5)
 
 
 class Stream:
@@ -546,6 +557,36 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(resume_attempts, 2)
         self.assertEqual(container.events.count("resume"), 2)
         self.assertTrue(api.completed)
+
+    @unittest.skipIf(
+        RUNTIME.fcntl is None or "fork" not in multiprocessing.get_all_start_methods(),
+        "requires POSIX advisory locks and fork",
+    )
+    def test_gate_resume_lock_serializes_independent_host_processes(self):
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "gate-resume.lock"
+            original_path = RUNTIME._gate_resume_lock_path
+            RUNTIME._gate_resume_lock_path = lambda: lock_path
+            entered, release = context.Event(), context.Event()
+            process = None
+            try:
+                with RUNTIME._gate_resume_section(lambda: False):
+                    process = context.Process(
+                        target=_hold_gate_resume_lock,
+                        args=(str(lock_path), entered, release),
+                    )
+                    process.start()
+                    self.assertFalse(entered.wait(0.2))
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(os.stat(lock_path).st_mode & 0o777, 0o600)
+            finally:
+                release.set()
+                if process is not None:
+                    process.join(5)
+                    self.assertFalse(process.is_alive())
+                    self.assertEqual(process.exitcode, 0)
+                RUNTIME._gate_resume_lock_path = original_path
 
     def test_gate_accepts_reordered_installer_stderr_before_readiness(self):
         workspace, _, api, _ = self.workspace()
