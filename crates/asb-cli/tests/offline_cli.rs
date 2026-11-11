@@ -3473,7 +3473,7 @@ fn offline_replay_writes_ordered_lifecycle_events_for_all_executed_phases() {
 
 #[cfg(unix)]
 #[test]
-fn failed_agent_spawn_persists_failure_lifecycle_events() {
+fn failed_agent_preflight_persists_failure_lifecycle_events() {
     let project = replay_project(1);
     project.write(
         ".asb-tools/pi/bin/pi",
@@ -3491,15 +3491,12 @@ fn failed_agent_spawn_persists_failure_lifecycle_events() {
         .iter()
         .map(|record| record["event"]["kind"].as_str().unwrap())
         .collect::<Vec<_>>();
+    assert_eq!(kinds.last(), Some(&"run_failed"));
+    assert!(!kinds.contains(&"agent_spawn"), "{kinds:?}");
     assert!(
-        kinds.ends_with(&[
-            "agent_spawn",
-            "agent_execute_begin",
-            "agent_execute_end",
-            "agent_spawn_failed",
-            "run_failed"
-        ]),
-        "{kinds:?}"
+        stderr(&result).contains("shared launch requires a verifiable stopped native process gate"),
+        "{}",
+        stderr(&result)
     );
 }
 
@@ -3790,6 +3787,20 @@ fn pi_terminal_refusal_is_reported_without_using_tool_output() {
 
 #[cfg(unix)]
 #[test]
+fn successful_replay_reports_html_path() {
+    let project = replay_project(1);
+    let result = replay(&project, "success", &[]);
+    expect_success(&result);
+    let output = stdout(&result);
+    let report = output
+        .lines()
+        .find_map(|line| line.strip_prefix("HTML report path: "))
+        .expect("successful run should publish a report");
+    assert!(std::path::Path::new(report).is_file(), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
 fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
     for behavior in ["exit", "fatal"] {
         let project = replay_project(1);
@@ -3835,8 +3846,20 @@ fn replay_reports_agent_exit_and_zero_exit_fatal_output() {
             log["benchmark_outcome"]["lineage"]["execution_attempt"],
             log["task"]["attempt_id"]
         );
+        let output = stdout(&result);
+        let report = output
+            .lines()
+            .find_map(|line| line.strip_prefix("HTML report path: "))
+            .expect("failed retained run should publish a report");
+        assert!(std::path::Path::new(report).is_file(), "{output}");
         assert_tape_scratch_cleaned(&project);
     }
+    let project = replay_project(1);
+    let result = replay(&project, "exit", &["--verbose"]);
+    expect_failure(&result, "agent exited unsuccessfully (exit status: 7)");
+    let output = stdout(&result);
+    assert!(output.contains("Compared 1 benchmarks"), "{output}");
+    assert!(output.contains("HTML report path: "), "{output}");
 }
 
 #[cfg(unix)]
@@ -6450,6 +6473,7 @@ fn run_reports_catalog_http_failure_before_agent_starts() {
     );
     assert!(!error.contains("fixture-secret") && !error.contains("secret-proxy-response"));
     assert!(!project.0.join("agent-started").exists());
+    assert!(!stdout(&output).contains("HTML report path:"));
 }
 
 #[test]

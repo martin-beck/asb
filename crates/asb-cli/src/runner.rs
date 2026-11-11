@@ -306,6 +306,11 @@ pub(crate) struct RunOptions<'a> {
     pub ignore_compatibility: bool,
     pub(crate) replay_expected_compatibility: Option<&'a crate::cassette::Compatibility>,
     pub(crate) compatibility_warning_dir: Option<&'a Path>,
+    /// Set only after this public invocation has retained attempt evidence that
+    /// the offline comparison can read.  The CLI uses the source to publish a
+    /// report after an otherwise failed run without treating preflight errors
+    /// or stale output from an earlier invocation as new evidence.
+    pub(crate) report_source: Option<&'a Mutex<Option<PathBuf>>>,
     pub replica: replica::Identity,
     pub on_completion: Option<&'a dyn replica::CompletionObserver>,
     pub reused: Option<&'a std::collections::BTreeMap<usize, serde_json::Value>>,
@@ -730,12 +735,35 @@ fn run_loaded(
             concurrency,
         )?;
     }
+    if direct && retained_direct_logs(&generated_log, concurrency) {
+        record_report_source(options, runtime_anchor.clone());
+    }
     if direct {
         result.map_err(|error| {
             direct_failure_evidence(error, &runtime_anchor, &generated_log, concurrency)
         })
     } else {
         result
+    }
+}
+
+fn retained_direct_logs(generated: &str, concurrency: usize) -> bool {
+    (1..=concurrency).any(|index| {
+        let path = if concurrency == 1 {
+            generated.to_owned()
+        } else {
+            parallel_path(generated, index)
+        };
+        Path::new(&path).is_file()
+    })
+}
+
+pub(crate) fn record_report_source(options: RunOptions<'_>, source: PathBuf) {
+    if let Some(destination) = options.report_source
+        && let Ok(mut destination) = destination.lock()
+        && destination.is_none()
+    {
+        *destination = Some(source);
     }
 }
 
