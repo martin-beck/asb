@@ -8,6 +8,11 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::time::{Duration, Instant};
 
 const STARTUP: Duration = Duration::from_secs(5);
+// A measured principal can be preceded by bounded guest setup (for example
+// a project-local runtime handoff).  Under a large replay cohort that setup
+// can legitimately exceed the short guardian-admission window, while still
+// being far below the benchmark execution budget.
+const MEASURED_PRINCIPAL_STARTUP: Duration = Duration::from_secs(60);
 const CLEANUP: Duration = Duration::from_secs(6);
 
 /// Create fallback custody and the private channel before admitting a child.
@@ -199,7 +204,7 @@ impl ManagedGate {
     /// before exec. The caller may attach collectors and externally resume it.
     pub(crate) fn start_measured_principal(&mut self) -> io::Result<u32> {
         self.resume()?;
-        let deadline = Instant::now() + STARTUP;
+        let deadline = Instant::now() + MEASURED_PRINCIPAL_STARTUP;
         loop {
             let gate = self.id();
             let control = self
