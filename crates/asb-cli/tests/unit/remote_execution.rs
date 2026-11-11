@@ -1082,6 +1082,42 @@ fn measured_protocol_rejects_unverified_target_and_execution_end_before_start() 
 }
 
 #[test]
+fn cohort_release_receipts_are_bounded_public_target_evidence() {
+    let fixture = Fixture::new();
+    let directory = fixture.0.join("cohort-release-receipts");
+    let measurements =
+        crate::measurements::Session::start_with_collectors(&directory, &[], None).unwrap();
+    let target_sha256 = "a".repeat(64);
+    for stage in ["collector_attached", "collector_released", "resume_sent"] {
+        write_cohort_release_receipt(&measurements, &target_sha256, stage).unwrap();
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(directory.join(format!("cohort-{stage}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["schema_version"], 1);
+        assert_eq!(receipt["kind"], "cohort_release");
+        assert_eq!(receipt["stage"], stage);
+        assert_eq!(receipt["scope"], "verified-local-isolated-process-tree");
+        assert_eq!(receipt["execution_target_sha256"], target_sha256);
+        assert_eq!(receipt.as_object().unwrap().len(), 5);
+    }
+    let target = json!({
+        "schema_version": 1,
+        "scope": "verified-local-isolated-process-tree",
+        "host_pid": 42,
+        "namespace_pid": 7,
+        "start_time_ticks": 11,
+        "cgroup": "/fixture",
+        "cgroup_membership": "preserved",
+    });
+    crate::measurements::write_json(&directory.join("execution-target.json"), &target).unwrap();
+    assert_eq!(
+        target_evidence_digest(&target).unwrap(),
+        crate::cassette::digest(&fs::read(directory.join("execution-target.json")).unwrap())
+    );
+}
+
+#[test]
 fn completed_metadata_retains_unknown_timing_and_requires_valid_service_handoff() {
     for seconds in [Value::Null, json!(-1), json!(86411)] {
         let fixture = Fixture::new();

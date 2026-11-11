@@ -77,6 +77,11 @@ fn encode<T: Serialize>(value: &T, pretty: bool) -> Result<Vec<u8>, String> {
     }
     Ok(output.bytes)
 }
+
+/// Return the exact bounded, pretty JSON bytes used by `write_json`.
+pub(crate) fn json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    encode(value, true)
+}
 pub(crate) fn append_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     // One prepared record, not the whole history, is retained in memory.
     let mut bytes = encode(value, false)?;
@@ -116,7 +121,7 @@ pub(crate) fn append_json<T: Serialize>(path: &Path, value: &T) -> Result<(), St
     })
 }
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let bytes = encode(value, true)?;
+    let bytes = json_bytes(value)?;
     publish(path, |_, stage| write_stage(stage, &bytes))
 }
 /// Keep domain-owned read/modify/write under the same lock and opened snapshot.

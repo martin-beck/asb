@@ -65,11 +65,18 @@ pub(crate) fn replay_protocol_with_normalizer_digest(
     .map_err(|error| Error::Run(error.to_string()))
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum GatePhase {
+    Preparation,
+    Collector,
+}
+
 pub(crate) struct Gate {
     state: Mutex<State>,
     changed: Condvar,
     timeout: Duration,
     observer: Option<Arc<PreparationObserver>>,
+    phase: GatePhase,
 }
 
 type PreparationObserver = dyn Fn(&Compatibility) -> Result<(), Error> + Send + Sync;
@@ -170,7 +177,8 @@ impl Admission {
         let launch = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
         // A stopped target has joined `launch`; this second boundary admits
         // only replicas whose selected collectors have attached successfully.
-        let collectors = Gate::deferred_selected(total, &cohort.admitted_slots, collector_timeout)?;
+        let collectors =
+            Gate::deferred_collector_selected(total, &cohort.admitted_slots, collector_timeout)?;
         let settlement =
             SettlementBarrier::selected(total, &cohort.admitted_slots, launch_timeout)?;
         Ok(Self {
@@ -457,6 +465,11 @@ pub(crate) struct Arrival<'a> {
 
 impl Gate {
     fn arm_deadline(&self) -> Result<(), Error> {
+        if self.phase != GatePhase::Collector {
+            return Err(Error::Run(
+                "only the final collector barrier may arm a deferred deadline".into(),
+            ));
+        }
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         if let Some(reason) = &state.aborted {
             return Err(Error::Run(reason.clone()));
@@ -466,7 +479,8 @@ impl Gate {
                 "shared readiness gate was already released".into(),
             ));
         }
-        if state.deadline.is_none() {
+        let armed = state.deadline.is_none();
+        if armed {
             state.deadline = Some(
                 Instant::now()
                     .checked_add(self.timeout)
@@ -475,6 +489,56 @@ impl Gate {
             self.changed.notify_all();
         }
         Ok(())
+    }
+
+    pub(crate) fn watch_collector_deadline(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if state.released || state.aborted.is_some() {
+                return;
+            }
+            let Some(deadline) = state.deadline else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                continue;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                state.aborted = Some(self.timeout_reason(&state));
+                self.changed.notify_all();
+                return;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_secs(1)))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+        }
+    }
+
+    fn timeout_reason(&self, state: &State) -> String {
+        if self.phase == GatePhase::Collector {
+            let missing = state
+                .participants
+                .iter()
+                .zip(&state.ready)
+                .enumerate()
+                .filter_map(|(index, (selected, ready))| {
+                    (*selected && !*ready).then_some(index + 1)
+                })
+                .map(|index| index.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!(
+                "shared collector readiness timed out; collector attachment or release missing for replica(s) {missing}"
+            );
+        }
+        "batch preparation timed out; no agent was admitted".into()
     }
 
     pub(crate) fn expected_material(&self) -> Result<Option<String>, Error> {
@@ -551,6 +615,7 @@ impl Gate {
             changed: Condvar::new(),
             timeout,
             observer: None,
+            phase: GatePhase::Preparation,
         })
     }
 
@@ -570,6 +635,16 @@ impl Gate {
     ) -> Result<Self, Error> {
         let mut gate = Self::selected(total, admitted, None, timeout)?;
         gate.state.get_mut().map_err(|_| unavailable())?.deadline = None;
+        Ok(gate)
+    }
+
+    fn deferred_collector_selected(
+        total: usize,
+        admitted: &[usize],
+        timeout: Duration,
+    ) -> Result<Self, Error> {
+        let mut gate = Self::deferred_selected(total, admitted, timeout)?;
+        gate.phase = GatePhase::Collector;
         Ok(gate)
     }
 
@@ -657,7 +732,7 @@ impl Arrival<'_> {
         }
         let deadline = state.deadline.ok_or_else(unavailable)?;
         if Instant::now() >= deadline && !state.released {
-            state.aborted = Some("batch preparation timed out; no agent was admitted".into());
+            state.aborted = Some(self.gate.timeout_reason(&state));
         } else if self.settled || state.ready[self.index] {
             state.aborted = Some("preparation slot arrived more than once".into());
         } else if let Err(error) = identity.validate() {
@@ -694,8 +769,7 @@ impl Arrival<'_> {
                         state.aborted =
                             Some(format!("cannot publish prepared batch identity: {error}"));
                     } else if Instant::now() >= deadline {
-                        state.aborted =
-                            Some("batch preparation timed out; no agent was admitted".into());
+                        state.aborted = Some(self.gate.timeout_reason(&state));
                     } else {
                         state.released = true;
                     }
@@ -713,7 +787,7 @@ impl Arrival<'_> {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                state.aborted = Some("batch preparation timed out; no agent was admitted".into());
+                state.aborted = Some(self.gate.timeout_reason(&state));
                 self.gate.changed.notify_all();
                 continue;
             }
@@ -1395,7 +1469,7 @@ mod tests {
     #[test]
     fn collector_deadline_starts_after_verified_targets_before_attachment() {
         use crate::workloads::session::LaunchReadiness;
-        let gate = Gate::deferred(2, Duration::from_secs(3)).unwrap();
+        let gate = Gate::deferred_collector_selected(2, &[1, 2], Duration::from_secs(3)).unwrap();
         let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
         let second = CollectorAdmission::new(&gate, Identity { index: 2, total: 2 }, material());
         assert!(gate.state.lock().unwrap().deadline.is_none());
@@ -1420,12 +1494,29 @@ mod tests {
     #[test]
     fn collector_attachment_deadline_rejects_a_replica_that_never_arrives() {
         use crate::workloads::session::LaunchReadiness;
-        let gate = Gate::deferred(2, Duration::from_millis(40)).unwrap();
+        let gate =
+            Gate::deferred_collector_selected(2, &[1, 2], Duration::from_millis(40)).unwrap();
         let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
         let _second = CollectorAdmission::new(&gate, Identity { index: 2, total: 2 }, material());
         first.arm().unwrap();
         let error = first.ready().unwrap_err();
         assert!(error.contains("timed out"));
+    }
+
+    #[test]
+    fn collector_watchdog_aborts_when_every_replica_stalls_before_arrival() {
+        use crate::workloads::session::LaunchReadiness;
+        let gate =
+            Gate::deferred_collector_selected(2, &[1, 2], Duration::from_millis(40)).unwrap();
+        let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
+        std::thread::scope(|scope| {
+            scope.spawn(|| gate.watch_collector_deadline());
+            first.arm().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            let error = first.remaining().unwrap_err();
+            assert!(error.contains("shared collector readiness timed out"));
+            assert!(error.contains("replica(s) 1, 2"));
+        });
     }
 
     #[test]
@@ -1685,7 +1776,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn runner_single_unsupported_and_multi_mismatch_stop_before_proxy_or_agent_launch() {
+    fn runner_single_and_multi_errors_abort_scoped_collector_watchdogs() {
         use std::fs;
         use std::os::unix::fs::symlink;
         let _disk = crate::disk_space::test_available_mib(100_000);
@@ -1726,6 +1817,7 @@ mod tests {
                 "{\"request\":{\"body\":{\"model\":\"fixture\",\"tools\":[{}]}}}\n",
             )
             .unwrap();
+            let started = Instant::now();
             let error = super::super::run_with_tape(
                 config.to_str().unwrap(),
                 super::super::RunOptions {
@@ -1739,6 +1831,10 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{concurrency}: early dispatch failure left the scoped collector watchdog waiting"
+            );
             let expected = if concurrency == 1 {
                 "unsupported symlink"
             } else {

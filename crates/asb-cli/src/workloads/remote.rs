@@ -1435,6 +1435,7 @@ impl Session {
         event: &Value,
         deadline: Instant,
     ) -> Result<(), String> {
+        let mut verified_target = None;
         if let Some(launch) = context.launch {
             let target = &event["target"];
             let valid_hex = |value: &Value| {
@@ -1473,19 +1474,23 @@ impl Session {
                 return Err("isolated execution returned a second measurement target".into());
             }
             let target = super::target::verify(&event["target"])?;
+            let target_evidence = json!({
+                "schema_version":1,"scope":"verified-local-isolated-process-tree",
+                "host_pid":target.pid,"namespace_pid":target.namespace_pid,
+                "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
+                "cgroup_membership":"preserved"
+            });
+            let target_sha256 = target_evidence_digest(&target_evidence)?;
             crate::measurements::write_json(
                 &session.dir.join("execution-target.json"),
-                &json!({
-                    "schema_version":1,"scope":"verified-local-isolated-process-tree",
-                    "host_pid":target.pid,"namespace_pid":target.namespace_pid,
-                    "start_time_ticks":target.start_time_ticks,"cgroup":target.cgroup,
-                    "cgroup_membership":"preserved"
-                }),
+                &target_evidence,
             )?;
             if let Err(error) = session.attach_isolated_pid(target.pid, target.start_time_ticks) {
                 session.event(Event::AgentAttachFailed)?;
                 return Err(error);
             }
+            write_cohort_release_receipt(session, &target_sha256, "collector_attached")?;
+            verified_target = Some(target_sha256);
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
@@ -1505,13 +1510,26 @@ impl Session {
         if let Some(collector_ready) = context.collector_ready {
             collector_ready.ready()?;
         }
+        if let (Some(session), Some(target_sha256)) = (
+            context.measurements.as_deref_mut(),
+            verified_target.as_ref(),
+        ) {
+            write_cohort_release_receipt(session, target_sha256, "collector_released")?;
+        }
         self.controller.send(
             &Request::Resume {
                 exec_id: &event["target"]["exec_id"],
             }
             .value()?,
             deadline,
-        )
+        )?;
+        if let (Some(session), Some(target_sha256)) = (
+            context.measurements.as_deref_mut(),
+            verified_target.as_ref(),
+        ) {
+            write_cohort_release_receipt(session, target_sha256, "resume_sent")?;
+        }
+        Ok(())
     }
 
     fn completed_execution(
@@ -1581,6 +1599,27 @@ impl Session {
         }
         result
     }
+}
+
+fn write_cohort_release_receipt(
+    session: &crate::measurements::Session,
+    target_sha256: &str,
+    stage: &'static str,
+) -> Result<(), String> {
+    crate::measurements::write_json(
+        &session.dir.join(format!("cohort-{stage}.json")),
+        &json!({
+            "schema_version": 1,
+            "kind": "cohort_release",
+            "stage": stage,
+            "scope": "verified-local-isolated-process-tree",
+            "execution_target_sha256": target_sha256,
+        }),
+    )
+}
+
+fn target_evidence_digest(target: &Value) -> Result<String, String> {
+    crate::evidence::json_bytes(target).map(|bytes| crate::cassette::digest(&bytes))
 }
 
 fn abort_launch_boundaries(context: &ExecutionContext<'_>) {
