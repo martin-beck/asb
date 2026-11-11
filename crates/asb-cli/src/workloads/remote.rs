@@ -1130,14 +1130,9 @@ impl Session {
         &mut self,
         context: &mut ExecutionContext<'_>,
     ) -> Result<(), String> {
-        // First synchronize every verified, still-stopped target.  Starting
-        // PID-bound collectors before this rendezvous can block on shared
-        // host resources and prevent the final peer from ever releasing the
-        // cohort.  Once released, each worker attaches its collectors while
-        // its own target remains stopped, then resumes it.
-        if let Some(launch) = context.launch {
-            launch.ready()?;
-        }
+        // Launch admission belongs to resume_measured_target: only a verified,
+        // still-stopped target may arrive at the shared release barrier.
+        // Preparation itself must not consume a launch-gate arrival.
         if let Some(session) = context.measurements.as_deref_mut() {
             session.event(crate::collectors::LifecycleEvent::PhaseBegin(
                 crate::collectors::LifecyclePhase::AgentPreparation,

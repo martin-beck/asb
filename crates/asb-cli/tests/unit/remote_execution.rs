@@ -524,6 +524,9 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             show_output: false,
             progress: None,
         };
+        // Agent preparation records lifecycle state only.  It must not consume
+        // the one launch admission reserved for the verified paused target.
+        session.begin_agent_preparation(&mut context).unwrap();
         let result = session.run_prepared(
             &mut context,
             &mut Vec::new(),
