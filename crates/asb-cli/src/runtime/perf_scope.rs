@@ -36,7 +36,8 @@ pub fn cpu_wide_record_args(cpus: &[u32]) -> Result<Vec<String>, String> {
     Ok(["record", "-e", "cpu-clock", "-g", "-F", "199", "-a", "-C"]
         .into_iter()
         .map(str::to_owned)
-        .chain(std::iter::once(list))
+        .chain([list, "--num-thread-synthesize".into(), "4".into()])
+        .chain(["--proc-map-timeout".into(), "3000".into()])
         .collect())
 }
 
@@ -56,7 +57,11 @@ mod tests {
                 "199",
                 "-a",
                 "-C",
-                "1,3,4"
+                "1,3,4",
+                "--num-thread-synthesize",
+                "4",
+                "--proc-map-timeout",
+                "3000"
             ]
         );
         assert!(cpu_wide_record_args(&[]).is_err());
