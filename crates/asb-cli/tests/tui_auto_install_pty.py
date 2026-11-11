@@ -83,6 +83,8 @@ try:
             os.write(master, b" \r")
             wait_for(b"Choose tool-capable models")
             os.write(master, b" \r")
+            wait_for(b"Choose default or explicit agent-owned reasoning effort levels")
+            os.write(master, b"\r")
             wait_for(b"Choose one or more workload prompts")
             # The setup workload pane has the same leading `[all]` control.
             os.write(master, b"\x1b[B \r")
