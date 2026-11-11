@@ -15,6 +15,7 @@ const UNPRIVILEGED_GID: u32 = 65_534;
 
 const REQUEST: &str = "ASB_GUEST_AGENT_REQUEST";
 const GATE_RELEASE: &str = "ASB_GATE_RELEASE";
+const GATE_ADMITTED: &str = "ASB_GATE_ADMITTED";
 /// Guest artifact bytes are copied by the owning workload controller rather
 /// than embedded in its bounded JSON control message.
 const MAX_EXPORTED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
@@ -108,21 +109,21 @@ fn consume_gate_release() -> Result<bool, Error> {
     }
 }
 
-/// Publish the direct application principal before consuming its Docker release.
+/// Consume the non-reusable result of the outer Docker shell gate.
 ///
-/// The workload controller creates the release marker only after it has read
-/// this frame and attached the requested collectors.  Keeping this ordering in
-/// one helper prevents an application driver from waiting for a marker whose
-/// producer is itself waiting for the driver's readiness frame.
-fn announce_application_gate_then_consume(
-    announce: bool,
-    output: &mut dyn Write,
-) -> Result<bool, Error> {
-    if announce {
-        writeln!(output, "__ASB_GATE__:{}", std::process::id()).map_err(crate::io_error)?;
-        output.flush().map_err(crate::io_error)?;
+/// The marker pathname itself is intentionally not forwarded.  The admitted
+/// bit is removed before adapter preparation so no nested process can inherit
+/// a false admission capability.
+#[allow(unsafe_code)]
+fn consume_gate_admission() -> Result<bool, Error> {
+    let Some(value) = std::env::var_os(GATE_ADMITTED) else {
+        return Ok(false);
+    };
+    if value != "1" {
+        return Err(Error::Run("invalid private guest gate admission".into()));
     }
-    consume_gate_release()
+    unsafe { std::env::remove_var(GATE_ADMITTED) }
+    Ok(true)
 }
 
 fn valid_gate_release_path(path: &Path) -> bool {
@@ -908,12 +909,8 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 }
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
-    // Do not consume the Docker release capability yet.  An application-mode
-    // driver is its own measured principal: it must first publish its stopped
-    // readiness frame so the workload controller can attach collectors and
-    // create that marker.  Consuming it before that frame deadlocks both sides
-    // of the protocol (the controller releases only after the frame).
-    let archive_gate_pending = std::env::var_os(GATE_RELEASE).is_some();
+    let archive_gate_admitted = consume_gate_admission()?;
+    let archive_gate_released = consume_gate_release()?;
     request.capsule.validate()?;
     validate_snapshot_marker(
         request.snapshot_private_mount,
@@ -1015,13 +1012,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &request.project_root,
         &request.runtime_dir,
     )?;
-    let application_archive_gate = archive_gate_pending && agent_route.is_none();
-    let archive_gate_released =
-        announce_application_gate_then_consume(application_archive_gate, &mut std::io::stdout())?;
-    if agent_route.is_none() && !application_archive_gate {
+    if agent_route.is_none() {
         println!("__ASB_GATE__:{}", std::process::id());
         std::io::stdout().flush().map_err(crate::io_error)?;
-        if !archive_gate_released {
+        if !archive_gate_admitted && !archive_gate_released {
             #[cfg(unix)]
             crate::process_gate::pause_current().map_err(|error| {
                 Error::Run(format!("cannot stop prepared guest agent: {error}"))
@@ -1368,16 +1362,10 @@ fn guest_gate_release_path_is_private_and_fixed_shape() {
 
 #[cfg(test)]
 #[test]
-fn application_gate_announces_before_consuming_the_archive_release() {
+fn guest_gate_release_is_consumed_before_nested_agent_gates() {
     const CASE: &str = "ASB_GUEST_GATE_RELEASE_CASE";
     if std::env::var_os(CASE).is_some() {
-        let mut ready = Vec::new();
-        assert!(announce_application_gate_then_consume(true, &mut ready).unwrap());
-        assert!(
-            String::from_utf8(ready)
-                .unwrap()
-                .starts_with("__ASB_GATE__:")
-        );
+        assert!(consume_gate_release().unwrap());
         assert!(std::env::var_os(GATE_RELEASE).is_none());
         return;
     }
@@ -1393,7 +1381,7 @@ fn application_gate_announces_before_consuming_the_archive_release() {
     ));
     fs::write(&release, []).unwrap();
     let name = format!(
-        "{}::application_gate_announces_before_consuming_the_archive_release",
+        "{}::guest_gate_release_is_consumed_before_nested_agent_gates",
         module_path!().split_once("::").unwrap().1
     );
     let output = Command::new(std::env::current_exe().unwrap())
@@ -1405,6 +1393,28 @@ fn application_gate_announces_before_consuming_the_archive_release() {
     assert!(output.status.success(), "{output:?}");
     assert!(release.exists());
     fs::remove_file(release).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn guest_gate_admission_is_consumed_before_adapter_preparation() {
+    const CASE: &str = "ASB_GUEST_GATE_ADMISSION_CASE";
+    if std::env::var_os(CASE).is_some() {
+        assert!(consume_gate_admission().unwrap());
+        assert!(std::env::var_os(GATE_ADMITTED).is_none());
+        return;
+    }
+    let name = format!(
+        "{}::guest_gate_admission_is_consumed_before_adapter_preparation",
+        module_path!().split_once("::").unwrap().1
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(CASE, "1")
+        .env(GATE_ADMITTED, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
 }
 
 // Successful broker settlement checks the complete selected native stream.
