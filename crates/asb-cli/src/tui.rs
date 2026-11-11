@@ -4923,6 +4923,31 @@ mod tests {
                 Some(crate::benchmark::ThinkingEffort::XHigh),
             ])
         );
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        record_last_setup_tui(
+            &root,
+            &Generated {
+                tests: 2,
+                sweep: sweep.clone(),
+                native_snapshot_record: false,
+            },
+        )
+        .unwrap();
+        let mut restored_last = App::new(root.clone(), ProjectConfig::default());
+        restored_last
+            .preselect(&last_setup_tui_config(&root).unwrap())
+            .unwrap();
+        assert_eq!(
+            restored_last
+                .pane(PaneKind::ThinkingEffort)
+                .selected_choices()
+                .filter_map(|choice| choice.key.thinking_effort())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                Some(crate::benchmark::ThinkingEffort::High),
+                Some(crate::benchmark::ThinkingEffort::XHigh),
+            ])
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
