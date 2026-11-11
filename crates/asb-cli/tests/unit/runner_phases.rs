@@ -2208,6 +2208,65 @@ fn runner_phase_completion_preparation_abort_precedes_owned_workload_cleanup() {
     }
 }
 
+#[test]
+fn runner_phase_unowned_preparation_failure_aborts_material_peers() {
+    for kind in ["input", "io", "run"] {
+        let replicas = 64;
+        let gate = batch::Gate::new(replicas, None, Duration::from_secs(2)).unwrap();
+        std::thread::scope(|scope| {
+            let mut arrival = Some(
+                gate.register(replica::Identity {
+                    index: 1,
+                    total: replicas,
+                })
+                    .unwrap(),
+            );
+            let peers = (2..=replicas)
+                .map(|index| {
+                    let mut peer = gate
+                        .register(replica::Identity {
+                            index,
+                            total: replicas,
+                        })
+                        .unwrap();
+                    scope.spawn(move || {
+                        let error = peer
+                            .ready(crate::cassette::Compatibility {
+                                agent: "fixture".into(),
+                                provider: "fixture".into(),
+                                model: "fixture".into(),
+                                workload: "fixture".into(),
+                                task: "fixture".into(),
+                                dataset_sha256: None,
+                                prompt_sha256: "a".repeat(64),
+                                material_sha256: "b".repeat(64),
+                                protocol_sha256: None,
+                                normalization_sha256: None,
+                            })
+                            .unwrap_err()
+                            .to_string();
+                        assert!(error.contains("unowned preparation failure"));
+                    })
+                })
+                .collect::<Vec<_>>();
+            let primary = match kind {
+                "input" => Error::Input("unowned preparation failure".into()),
+                "io" => Error::Io("unowned preparation failure".into()),
+                _ => Error::Run("unowned preparation failure".into()),
+            };
+            let error = super::super::attempt::abort_unprepared(primary, &mut arrival);
+            assert!(matches!(
+                (&error, kind),
+                (Error::Input(_), "input") | (Error::Io(_), "io") | (Error::Run(_), "run")
+            ));
+            assert_eq!(error.to_string(), "unowned preparation failure");
+            for peer in peers {
+                peer.join().unwrap();
+            }
+        });
+    }
+}
+
 fn repeated_provider_finish_child(
     case: &str,
     root: &Path,

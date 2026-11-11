@@ -516,6 +516,17 @@ pub(super) fn cancel_prepared(
     }
 }
 
+/// A workload factory can fail after registering its material-gate arrival but
+/// before returning an owned session. Wake the cohort in that case as well:
+/// there is no session to cancel, but peers must not wait for material that can
+/// never be published.
+pub(super) fn abort_unprepared(error: Error, arrival: &mut Option<batch::Arrival<'_>>) -> Error {
+    if let Some(arrival) = arrival.as_mut() {
+        arrival.abort(&error.to_string());
+    }
+    error
+}
+
 impl<'a> ReadyAttempt<'a> {
     fn prepare(
         configured: ConfiguredAttempt<'a>,
@@ -619,7 +630,7 @@ impl<'a> ReadyAttempt<'a> {
         if let Err(error) = preparation {
             return Err(match workload_session.as_mut() {
                 Some(workload) => cancel_prepared(error, arrival, workload.as_mut()),
-                None => error,
+                None => abort_unprepared(error, arrival),
             });
         }
         let mut workload_session = workload_session
