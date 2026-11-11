@@ -108,6 +108,23 @@ fn consume_gate_release() -> Result<bool, Error> {
     }
 }
 
+/// Publish the direct application principal before consuming its Docker release.
+///
+/// The workload controller creates the release marker only after it has read
+/// this frame and attached the requested collectors.  Keeping this ordering in
+/// one helper prevents an application driver from waiting for a marker whose
+/// producer is itself waiting for the driver's readiness frame.
+fn announce_application_gate_then_consume(
+    announce: bool,
+    output: &mut dyn Write,
+) -> Result<bool, Error> {
+    if announce {
+        writeln!(output, "__ASB_GATE__:{}", std::process::id()).map_err(crate::io_error)?;
+        output.flush().map_err(crate::io_error)?;
+    }
+    consume_gate_release()
+}
+
 fn valid_gate_release_path(path: &Path) -> bool {
     path.parent() == Some(Path::new("/tmp"))
         && path
@@ -891,7 +908,12 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 }
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
-    let archive_gate_released = consume_gate_release()?;
+    // Do not consume the Docker release capability yet.  An application-mode
+    // driver is its own measured principal: it must first publish its stopped
+    // readiness frame so the workload controller can attach collectors and
+    // create that marker.  Consuming it before that frame deadlocks both sides
+    // of the protocol (the controller releases only after the frame).
+    let archive_gate_pending = std::env::var_os(GATE_RELEASE).is_some();
     request.capsule.validate()?;
     validate_snapshot_marker(
         request.snapshot_private_mount,
@@ -993,7 +1015,10 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
         &request.project_root,
         &request.runtime_dir,
     )?;
-    if agent_route.is_none() {
+    let application_archive_gate = archive_gate_pending && agent_route.is_none();
+    let archive_gate_released =
+        announce_application_gate_then_consume(application_archive_gate, &mut std::io::stdout())?;
+    if agent_route.is_none() && !application_archive_gate {
         println!("__ASB_GATE__:{}", std::process::id());
         std::io::stdout().flush().map_err(crate::io_error)?;
         if !archive_gate_released {
@@ -1343,10 +1368,16 @@ fn guest_gate_release_path_is_private_and_fixed_shape() {
 
 #[cfg(test)]
 #[test]
-fn guest_gate_release_is_consumed_before_nested_agent_gates() {
+fn application_gate_announces_before_consuming_the_archive_release() {
     const CASE: &str = "ASB_GUEST_GATE_RELEASE_CASE";
     if std::env::var_os(CASE).is_some() {
-        assert!(consume_gate_release().unwrap());
+        let mut ready = Vec::new();
+        assert!(announce_application_gate_then_consume(true, &mut ready).unwrap());
+        assert!(
+            String::from_utf8(ready)
+                .unwrap()
+                .starts_with("__ASB_GATE__:")
+        );
         assert!(std::env::var_os(GATE_RELEASE).is_none());
         return;
     }
@@ -1362,7 +1393,7 @@ fn guest_gate_release_is_consumed_before_nested_agent_gates() {
     ));
     fs::write(&release, []).unwrap();
     let name = format!(
-        "{}::guest_gate_release_is_consumed_before_nested_agent_gates",
+        "{}::application_gate_announces_before_consuming_the_archive_release",
         module_path!().split_once("::").unwrap().1
     );
     let output = Command::new(std::env::current_exe().unwrap())
