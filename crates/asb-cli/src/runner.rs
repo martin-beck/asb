@@ -2137,6 +2137,15 @@ pub(crate) fn run_guest_process(
 ) -> Result<GuestProcessOutput, Error> {
     #[allow(unused_mut, unused_variables)]
     let (command, route, mut auxiliary) = launch;
+    // The Docker archive gate retains the measured native gate as the parent
+    // of the real agent process.  That is a valid process-tree principal, but
+    // it deliberately does not replace its own executable after attachment.
+    let archive_gate_release = route.is_some()
+        && std::env::var_os("ASB_GATE_RELEASE").is_some_and(|value| {
+            value
+                .to_str()
+                .is_some_and(|path| path.starts_with("/tmp/.asb-gate-release-") && path.len() == 55)
+        });
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
@@ -2173,7 +2182,9 @@ pub(crate) fn run_guest_process(
     };
     on_spawn(principal)?;
     #[cfg(target_os = "linux")]
-    if let Some(identity) = identity {
+    if let Some(identity) = identity
+        && !archive_gate_release
+    {
         wait_for_agent_exec(&mut child, identity)?;
     }
     if let Some(prompt) = stdin_prompt {
