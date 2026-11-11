@@ -2142,7 +2142,7 @@ pub(crate) fn run_guest_process(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
-    shared_launch_window: Option<Duration>,
+    _shared_launch_window: Option<Duration>,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
 ) -> Result<GuestProcessOutput, Error> {
     #[allow(unused_mut, unused_variables)]
@@ -2150,12 +2150,6 @@ pub(crate) fn run_guest_process(
     // The Docker archive gate retains the measured native gate as the parent
     // of the real agent process.  That is a valid process-tree principal, but
     // it deliberately does not replace its own executable after attachment.
-    let archive_gate_release = route.is_some()
-        && std::env::var_os("ASB_GATE_RELEASE").is_some_and(|value| {
-            value
-                .to_str()
-                .is_some_and(|path| path.starts_with("/tmp/.asb-gate-release-") && path.len() == 55)
-        });
     #[cfg(target_os = "linux")]
     let mut descendants = crate::process_gate::DescendantScope::new()
         .map_err(|error| Error::Run(format!("cannot retain guest agent descendants: {error}")))?;
@@ -2184,23 +2178,12 @@ pub(crate) fn run_guest_process(
     };
     #[cfg(not(target_os = "linux"))]
     let principal = child.id();
-    #[cfg(target_os = "linux")]
-    let identity = if gated {
-        Some(principal_identity(principal)?)
-    } else {
-        None
-    };
     on_spawn(principal)?;
-    #[cfg(target_os = "linux")]
-    if let Some(identity) = identity
-        && !archive_gate_release
-    {
-        wait_for_agent_exec_until(
-            &mut child,
-            identity,
-            shared_launch_window.unwrap_or(Duration::from_secs(120)),
-        )?;
-    }
+    // `on_spawn` synchronously lets the remote controller attach collectors
+    // to this stopped measured principal.  The controller sends `Resume` only
+    // after that callback returns.  Waiting here for the application image to
+    // replace the stopped gate would therefore deadlock every application-gated
+    // execution before its release.
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
             return Err(Error::Run(
