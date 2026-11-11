@@ -597,6 +597,14 @@ class ManagedDockerWorkspace:
                     time.sleep(0.01)
                 else:
                     raise ExecutionError("container gate never reached its stopped state")
+                try:
+                    # Freeze the owned container while collectors attach.  Its
+                    # later unpause is a Docker container operation, not a
+                    # second Docker exec request, which avoids the daemon's
+                    # concurrent-exec failure mode under dense cohorts.
+                    container.pause()
+                except Exception as error:
+                    raise ExecutionError("cannot pause container execution gate") from error
             try:
                 target = execution_target(stream,container,namespace_pid)
             except ExecutionError:
@@ -619,8 +627,6 @@ class ManagedDockerWorkspace:
                 # Its bounded post-exit cleanup and transport settlement must
                 # not be charged to that budget by this outer watchdog.
                 phase_deadline[0] = execution_started + timeout + (30 if gate == "application" else 0)
-            # Minimal official task images may have only the POSIX shell's
-            # kill builtin, not a standalone /bin/kill executable.
             def resume_aborted():
                 with phase_lock:
                     return (expired.is_set() or interrupted.is_set()
@@ -632,29 +638,21 @@ class ManagedDockerWorkspace:
             # Releasing it between attempts recreates the same Docker-daemon
             # burst that this section is intended to prevent.
             with _gate_resume_section(resume_aborted):
-                # A native Docker daemon can need several seconds to make a
-                # just-created paused task execable under cohort pressure.
+                # A native Docker daemon can need several seconds to unpause
+                # just-created task containers under cohort pressure.
                 # This sequence is process-serialized above, so exponential
-                # backoff recovers the daemon without recreating an exec storm.
+                # backoff recovers the daemon without a control-plane storm.
                 for resume_attempt in range(9):
                     try:
-                        resumed = container.exec_run(
-                            ["/bin/sh", "-c", 'kill -CONT "$1"', "asb-resume", str(namespace_pid)]
-                        )
-                        if resumed.exit_code == 0:
-                            resume_error = None
-                            break
-                        resume_error = "nonzero"
+                        container.unpause()
+                        resume_error = None
+                        break
                     except Exception:
                         resume_error = "unavailable"
                     if resume_aborted():
                         raise ExecutionError("container execution preparation was cancelled or exceeded its deadline")
                     if resume_attempt < 8:
                         time.sleep(min(2.0, 0.05 * (2 ** resume_attempt)))
-                if resume_error is None and resume_attempt:
-                    # Let Docker settle the accepted CONT before the next
-                    # independently prepared replica asks it to exec again.
-                    time.sleep(0.25)
             if resume_error is not None:
                 raise ExecutionError("container execution gate could not be resumed after bounded retry")
             stdout, stderr = bytearray(), gate_stderr
