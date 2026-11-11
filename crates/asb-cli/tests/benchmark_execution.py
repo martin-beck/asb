@@ -72,7 +72,11 @@ class Container:
     def reload(self):
         pass
     def exec_run(self, argv):
-        self.events.append("stopped")
+        if "asb-resume" in argv:
+            self.events.append("resume")
+            self.resumed = True
+        else:
+            self.events.append("stopped")
         return SimpleNamespace(exit_code=0, output=b"")
     def pause(self):
         self.events.append("pause")
@@ -96,6 +100,7 @@ class API:
         self.status = 0
         self.pid = 9001
         self.calls = []
+        self.releases = []
         self.completed = False
     def exec_create(self, container_id, **kwargs):
         assert container_id == self.container.id
@@ -103,6 +108,7 @@ class API:
         self.container.resumed = False
         self.container.killed.clear()
         self.calls.append(kwargs)
+        self.container.events.append("gate")
         return {"Id": "exec-1"}
     def exec_start(self, exec_id, stream, demux):
         assert exec_id == "exec-1" and stream and demux
@@ -112,6 +118,12 @@ class API:
         assert exec_id == "exec-1"
         return {"Pid": self.pid, "Running": not self.completed,
                 "ExitCode": (137 if self.hang else self.status) if self.completed else None}
+    def put_archive(self, container_id, path, data):
+        assert container_id == self.container.id and path == "/tmp" and isinstance(data, bytes)
+        self.releases.append(data)
+        self.container.events.append("release")
+        self.container.resumed = True
+        return True
 
 
 class ExecutionTests(unittest.TestCase):
@@ -513,7 +525,7 @@ class ExecutionTests(unittest.TestCase):
         with workspace:
             def attach(target):
                 self.assertFalse(container.resumed)
-                self.assertEqual(container.events[-1], "pause")
+                self.assertEqual(container.events[-1], "gate")
                 self.assertEqual(target["daemon_pid"], 9001)
                 self.assertEqual(target["namespace_pid"], 42)
                 self.assertEqual(target["pid_scope"], "docker-daemon-host")
@@ -524,8 +536,10 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(result["exit_code"], 0)
             self.assertFalse(result["timed_out"])
             self.assertEqual(api.calls[0]["cmd"][-2:], ["agent", "literal ; $value"])
-            self.assertEqual(api.calls[0]["environment"], {"FIXTURE_KEY": "fixture-only"})
-            self.assertLess(container.events.index("attached"), container.events.index("resume"))
+            environment = api.calls[0]["environment"]
+            self.assertEqual(environment["FIXTURE_KEY"], "fixture-only")
+            self.assertRegex(environment["ASB_GATE_RELEASE"], r"^/tmp/\.asb-gate-release-[0-9a-f]{32}$")
+            self.assertLess(container.events.index("attached"), container.events.index("release"))
             self.assertNotIn("volumes", creation[0])
             self.assertNotIn("network_mode", creation[0])
             self.assertNotIn("privileged", creation[0])
@@ -553,39 +567,39 @@ class ExecutionTests(unittest.TestCase):
 
     def test_gate_resume_retries_one_transient_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()
-        original = container.unpause
+        original = api.put_archive
         resume_attempts = 0
 
-        def unpause():
+        def put_archive(*args, **kwargs):
             nonlocal resume_attempts
             resume_attempts += 1
             if resume_attempts == 1:
-                container.events.append("resume")
+                container.events.append("release")
                 raise RuntimeError("transient daemon refusal")
-            return original()
+            return original(*args, **kwargs)
 
-        container.unpause = unpause
+        api.put_archive = put_archive
         with workspace:
             result = workspace.execute(["agent"])
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(resume_attempts, 2)
-        self.assertEqual(container.events.count("resume"), 2)
+        self.assertEqual(container.events.count("release"), 2)
         self.assertTrue(api.completed)
 
     def test_gate_resume_uses_bounded_backoff_for_sustained_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()
-        original = container.unpause
+        original = api.put_archive
         resume_attempts = 0
 
-        def unpause():
+        def put_archive(*args, **kwargs):
             nonlocal resume_attempts
             resume_attempts += 1
             if resume_attempts < 9:
-                container.events.append("resume")
+                container.events.append("release")
                 raise RuntimeError("transient daemon refusal")
-            return original()
+            return original(*args, **kwargs)
 
-        container.unpause = unpause
+        api.put_archive = put_archive
         with patch.object(RUNTIME.time, "sleep") as sleep:
             with workspace:
                 result = workspace.execute(["agent"])
