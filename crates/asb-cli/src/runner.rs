@@ -986,7 +986,14 @@ fn run_dispatched(
         cpu_affinity: allocation.map(|(_, mask)| mask),
         ..options
     };
-    run_mode(config_path, config, options, output, warnings)
+    std::thread::scope(|scope| {
+        if let Some(gate) = options.collector_gate {
+            // Single-replica admitted runs use the same final collector gate
+            // as cohorts and need the same bounded attachment watchdog.
+            scope.spawn(move || gate.watch_collector_deadline());
+        }
+        run_mode(config_path, config, options, output, warnings)
+    })
 }
 
 /// Execute identical replicas concurrently. Each replica gets an isolated
@@ -1032,7 +1039,14 @@ fn run_concurrent(
         jobs.push((index - 1, replica, measurement, cassette));
     }
 
+    let has_jobs = !jobs.is_empty();
     std::thread::scope(|scope| {
+        if has_jobs && let Some(gate) = options.collector_gate {
+            // This scoped worker owns the final collector deadline through
+            // every replica's settlement, including attachments that never
+            // reach the collector arrival barrier.
+            scope.spawn(move || gate.watch_collector_deadline());
+        }
         let mut handles = Vec::new();
         for (index, replica, measurement, cassette) in jobs {
             #[cfg(test)]
@@ -1299,6 +1313,11 @@ fn run_mode(
             attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?
                 .run(&mut arrival, output, warnings)
         })();
+    if let Err(error) = &result {
+        // Setup can fail before a workload session owns the launch or collector
+        // boundary. Wake every peer, including the scoped collector watchdog.
+        abort_replica_gates(options, &error.to_string());
+    }
     if let Err(error) = &result
         && let Some(barrier) = options.settlement_barrier
     {
