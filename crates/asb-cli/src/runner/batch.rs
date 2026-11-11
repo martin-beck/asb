@@ -453,6 +453,27 @@ pub(crate) struct Arrival<'a> {
 }
 
 impl Gate {
+    fn arm_deadline(&self) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|_| unavailable())?;
+        if let Some(reason) = &state.aborted {
+            return Err(Error::Run(reason.clone()));
+        }
+        if state.released {
+            return Err(Error::Run(
+                "shared readiness gate was already released".into(),
+            ));
+        }
+        if state.deadline.is_none() {
+            state.deadline = Some(
+                Instant::now()
+                    .checked_add(self.timeout)
+                    .ok_or_else(unavailable)?,
+            );
+            self.changed.notify_all();
+        }
+        Ok(())
+    }
+
     pub(crate) fn expected_material(&self) -> Result<Option<String>, Error> {
         let state = self.state.lock().map_err(|_| unavailable())?;
         Ok(state
@@ -777,6 +798,10 @@ impl<'a> CollectorAdmission<'a> {
 }
 
 impl crate::workloads::session::LaunchReadiness for CollectorAdmission<'_> {
+    fn arm(&self) -> Result<(), String> {
+        self.gate.arm_deadline().map_err(|error| error.to_string())
+    }
+
     fn ready(&self) -> Result<(), String> {
         let mut arrival = self.arrival.lock().map_err(|_| unavailable().to_string())?;
         if arrival.is_none() {
@@ -1365,12 +1390,14 @@ mod tests {
     }
 
     #[test]
-    fn collector_deadline_starts_only_when_attachment_is_ready() {
+    fn collector_deadline_starts_after_verified_targets_before_attachment() {
         use crate::workloads::session::LaunchReadiness;
         let gate = Gate::deferred(2, Duration::from_secs(3)).unwrap();
         let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
         let second = CollectorAdmission::new(&gate, Identity { index: 2, total: 2 }, material());
         assert!(gate.state.lock().unwrap().deadline.is_none());
+        first.arm().unwrap();
+        assert!(gate.state.lock().unwrap().deadline.is_some());
         let (entered_tx, entered_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::scope(|scope| {
@@ -1379,19 +1406,23 @@ mod tests {
                 done_tx.send(first.ready()).unwrap();
             });
             entered_rx.recv().unwrap();
-            for _ in 0..100 {
-                if gate.state.lock().unwrap().deadline.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(gate.state.lock().unwrap().deadline.is_some());
             second.ready().unwrap();
             done_rx
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap()
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn collector_attachment_deadline_rejects_a_replica_that_never_arrives() {
+        use crate::workloads::session::LaunchReadiness;
+        let gate = Gate::deferred(2, Duration::from_millis(40)).unwrap();
+        let first = CollectorAdmission::new(&gate, Identity { index: 1, total: 2 }, material());
+        let _second = CollectorAdmission::new(&gate, Identity { index: 2, total: 2 }, material());
+        first.arm().unwrap();
+        let error = first.ready().unwrap_err();
+        assert!(error.contains("timed out"));
     }
 
     #[test]
