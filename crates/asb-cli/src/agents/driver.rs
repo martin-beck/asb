@@ -185,6 +185,11 @@ pub(crate) struct GuestRequest {
     pub capsule: GuestCapsule,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: f64,
+    /// Bounded shared-cohort launch window supplied only by the owning remote
+    /// dispatcher.  Ordinary guest runs leave this absent and retain the
+    /// short local execution-observation guard.
+    #[serde(default)]
+    pub shared_launch_seconds: Option<f64>,
     #[serde(default)]
     pub namespace_collectors: Vec<String>,
 }
@@ -255,6 +260,30 @@ impl GuestCapsuleExport {
 
 fn default_timeout() -> f64 {
     900.0
+}
+
+fn shared_launch_window(seconds: Option<f64>) -> Result<Option<std::time::Duration>, Error> {
+    seconds
+        .map(|seconds| {
+            if !seconds.is_finite() || !(0.001..=7_200.0).contains(&seconds) {
+                return Err(Error::Input("shared launch window is invalid".into()));
+            }
+            Ok(std::time::Duration::from_secs_f64(seconds))
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+#[test]
+fn shared_launch_window_is_optional_and_bounded() {
+    assert_eq!(shared_launch_window(None).unwrap(), None);
+    assert_eq!(
+        shared_launch_window(Some(120.0)).unwrap(),
+        Some(std::time::Duration::from_secs(120))
+    );
+    for seconds in [0.0, -1.0, 7_200.001, f64::NAN, f64::INFINITY] {
+        assert!(shared_launch_window(Some(seconds)).is_err(), "{seconds:?}");
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -892,6 +921,7 @@ fn prepare(request: &GuestRequest) -> Result<PreparedGuest, Error> {
 
 fn run(request: GuestRequest) -> Result<u8, Error> {
     let archive_gate_released = consume_gate_release()?;
+    let shared_launch_window = shared_launch_window(request.shared_launch_seconds)?;
     request.capsule.validate()?;
     validate_snapshot_marker(
         request.snapshot_private_mount,
@@ -1094,6 +1124,7 @@ fn run(request: GuestRequest) -> Result<u8, Error> {
             #[cfg(not(unix))]
             &mut std::io::stderr(),
             std::time::Duration::from_secs_f64(request.timeout_seconds),
+            shared_launch_window,
             &mut |pid| {
                 if let Some(session) = capture.as_mut() {
                     if gated_agent {

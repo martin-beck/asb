@@ -111,6 +111,37 @@ class GuestBootstrapTests(unittest.TestCase):
         with self.assertRaises(ExecutionError):
             PreparationBudget(7201)
 
+    def test_shared_cohort_window_is_forwarded_only_when_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".asb").mkdir()
+            (root / ".asb/project.toml").write_text("tools_dir='tools'\n")
+            binary = root / "asb"
+            binary.write_bytes(elf())
+            captured = []
+            def execute(argv, **options):
+                if argv[-1] == "__asb-agent":
+                    captured.append(json.loads(options["environment"]["ASB_GUEST_AGENT_REQUEST"]))
+                    options["before_resume"]({"namespace_pid": 42})
+                return {"stdout": b"", "stderr": b"", "exit_code": 0,
+                        "timed_out": False, "cancelled": False}
+            task = SimpleNamespace(
+                artifacts=root, agent_timeout=12,
+                workspace=SimpleNamespace(container=Container(), execute=execute),
+                checked=lambda argv, **_: json.dumps({"schema_version": 1, "tree_quiesced": True,
+                                                       "token_usage": {}}).encode()
+                if argv[0] == "cat" else b"",
+            )
+            request = {"binary": str(binary), "project_root": str(root),
+                       "tools_root": str(root / "tools"), "measure_target": False,
+                       "bootstrap": {"runtime_tools": [], "assets": []},
+                       "request": {"config": {"agent": "pi"}}, "preparation_seconds": 1800}
+            execute_agent(task, request, None, None, None)
+            self.assertEqual(captured[-1]["shared_launch_seconds"], 1800)
+            request["preparation_seconds"] = 7201
+            with self.assertRaisesRegex(ExecutionError, "shared launch preparation budget"):
+                execute_agent(task, request, None, None, None)
+
     def test_replay_rejects_external_network_before_agent_preparation(self):
         task = SimpleNamespace(tool_mode='replay')
         with patch('asb_guest.prepare_agent') as prepare:

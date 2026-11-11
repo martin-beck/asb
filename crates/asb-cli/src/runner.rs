@@ -2094,8 +2094,17 @@ fn wait_for_agent_exec(
     child: &mut OwnedChild,
     identity: (measurements::ProcessIdentity, std::path::PathBuf),
 ) -> Result<(), Error> {
+    wait_for_agent_exec_until(child, identity, Duration::from_secs(120))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_agent_exec_until(
+    child: &mut OwnedChild,
+    identity: (measurements::ProcessIdentity, std::path::PathBuf),
+    window: Duration,
+) -> Result<(), Error> {
     let (identity, launcher) = identity;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + window;
     loop {
         if !identity.matches() {
             break;
@@ -2133,6 +2142,7 @@ pub(crate) fn run_guest_process(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     runtime: Duration,
+    shared_launch_window: Option<Duration>,
     on_spawn: &mut dyn FnMut(u32) -> Result<(), Error>,
 ) -> Result<GuestProcessOutput, Error> {
     #[allow(unused_mut, unused_variables)]
@@ -2185,7 +2195,11 @@ pub(crate) fn run_guest_process(
     if let Some(identity) = identity
         && !archive_gate_release
     {
-        wait_for_agent_exec(&mut child, identity)?;
+        wait_for_agent_exec_until(
+            &mut child,
+            identity,
+            shared_launch_window.unwrap_or(Duration::from_secs(120)),
+        )?;
     }
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
@@ -3301,6 +3315,7 @@ mod tests {
             &mut stdout,
             &mut stderr,
             std::time::Duration::from_secs(10),
+            None,
             &mut |_| Ok(()),
         )
         .unwrap();
