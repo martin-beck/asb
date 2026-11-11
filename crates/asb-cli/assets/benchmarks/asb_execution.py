@@ -212,7 +212,9 @@ def principal_observation(metadata):
     return result
 
 
-GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; rm -f "$ASB_GATE_RELEASE"; exec "$@"'
+# The archive-created marker is a container-lifetime admission capability.
+# Nested guest setup gates share it, so only container teardown reclaims it.
+GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; exec "$@"'
 MAX_ARGUMENT_BYTES = 1024 * 1024
 
 
