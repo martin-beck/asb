@@ -138,6 +138,16 @@ pub(crate) trait AgentAdapter: Sync {
     }
     /// Supported wire interfaces, in preference order.
     fn supported_endpoints(&self) -> &'static [Support];
+    /// Whether this adapter owns support for an explicit reasoning effort on
+    /// the negotiated interface. Generic runner code never translates this
+    /// setting into provider requests.
+    fn supports_thinking_effort(
+        &self,
+        _interface: crate::endpoint::Interface,
+        _effort: crate::benchmark::ThinkingEffort,
+    ) -> bool {
+        false
+    }
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec;
     /// Whether this adapter turns `--max-steps` into a client-enforced limit.
     fn supports_max_steps(&self) -> bool {
@@ -616,6 +626,7 @@ type PreferredExecutablesHook = fn(&Path) -> Vec<PathBuf>;
 type ResponseFailureHook = fn(Option<&str>) -> Option<String>;
 type WorkspaceCapsuleCaptureHook = fn(&Path) -> Result<Vec<u8>, Error>;
 type WorkspaceCapsuleApplyHook = fn(&Path, &[u8]) -> Result<(), Error>;
+type ThinkingEffortHook = fn(crate::endpoint::Interface, crate::benchmark::ThinkingEffort) -> bool;
 
 /// A narrowly-scoped cassette normalizer owned by an agent adapter.
 ///
@@ -651,6 +662,7 @@ pub(super) struct StaticAdapter {
     executable: &'static str,
     recipe: Recipe,
     supported_endpoints: &'static [Support],
+    thinking_effort: Option<ThinkingEffortHook>,
     command: CommandBuilder,
     prepare: PreparationHook,
     tool_replay: Option<ToolReplayHook>,
@@ -697,6 +709,10 @@ impl StaticAdapter {
         self.estimated_disk_mib = mib;
         self
     }
+    pub(super) const fn with_thinking_effort(mut self, hook: ThinkingEffortHook) -> Self {
+        self.thinking_effort = Some(hook);
+        self
+    }
     pub(super) const fn new(
         id: &'static str,
         executable: &'static str,
@@ -711,6 +727,7 @@ impl StaticAdapter {
             executable,
             recipe,
             supported_endpoints,
+            thinking_effort: None,
             command,
             prepare,
             tool_replay: None,
@@ -1038,6 +1055,14 @@ impl AgentAdapter for StaticAdapter {
     }
     fn supported_endpoints(&self) -> &'static [Support] {
         self.supported_endpoints
+    }
+    fn supports_thinking_effort(
+        &self,
+        interface: crate::endpoint::Interface,
+        effort: crate::benchmark::ThinkingEffort,
+    ) -> bool {
+        self.thinking_effort
+            .is_some_and(|hook| hook(interface, effort))
     }
     fn command(&self, context: &CommandContext<'_>) -> CommandSpec {
         (self.command)(context)
@@ -1541,6 +1566,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "cli2key".into(),
             model: "test-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,

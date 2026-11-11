@@ -22,6 +22,7 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         workload,
         provider,
         model,
+        thinking_effort,
         native_snapshot_record,
         concurrency,
         trial_set,
@@ -48,6 +49,9 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
     let _: &bool = &retention.compact_completed_attempts;
     for value in [agent, workload, provider, model, workspace, log_file] {
         string(value)?;
+    }
+    if let Some(effort) = thinking_effort {
+        string(effort.as_str())?;
     }
     for value in [trial_set, trial].into_iter().flatten() {
         string(value)?;
@@ -287,6 +291,7 @@ mod tests {
             workload: "bug-fix".into(),
             provider: "openrouter".into(),
             model: "fixture-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,

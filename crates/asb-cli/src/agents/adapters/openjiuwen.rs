@@ -712,6 +712,7 @@ for (const request of invalid) {
             workload: "bug-fix".into(),
             provider: "cli2key".into(),
             model: "test-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,

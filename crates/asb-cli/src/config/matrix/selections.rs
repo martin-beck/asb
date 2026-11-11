@@ -216,6 +216,7 @@ mod tests {
             measure: vec![ALL.into()],
             workload: vec!["bug-fix".into()],
             model: vec!["explicit-offline-model".into()],
+            thinking_effort: vec![],
             native_snapshot_record: false,
             trial: vec![],
             trial_count: vec![],

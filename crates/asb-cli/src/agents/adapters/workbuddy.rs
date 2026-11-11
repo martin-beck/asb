@@ -703,6 +703,7 @@ if (JSON.stringify(secondDate('Monday, Nov 10, 2026')) === JSON.stringify(second
             workload: "bug-fix".into(),
             provider: "openrouter".into(),
             model: "test-model".into(),
+            thinking_effort: None,
             concurrency: 1,
             trial_set: None,
             trial: None,

@@ -232,56 +232,68 @@ pub(super) fn setup_at(
             }
             for agent in unique(&options.agent) {
                 for model in &models {
-                    if filter_incompatible {
-                        let adapter = agents::find(agent).expect("expanded agent is registered");
-                        let compatible = crate::endpoint::choose_from(
+                    let adapter = agents::find(agent).expect("expanded agent is registered");
+                    let endpoint = if filter_incompatible {
+                        let endpoint = crate::endpoint::choose_from(
                             adapter.id(),
                             adapter.supported_endpoints(),
                             provider,
                             model,
                             &providers::offered_endpoints(provider, model),
-                        )
-                        .is_ok();
-                        if !compatible {
+                        );
+                        let Ok(endpoint) = endpoint else {
+                            continue;
+                        };
+                        Some(endpoint)
+                    } else {
+                        None
+                    };
+                    for effort in unique_efforts(&options.thinking_effort) {
+                        if endpoint.as_ref().is_some_and(|endpoint| {
+                            effort.is_some()
+                                && !adapter
+                                    .supports_thinking_effort(endpoint.interface, effort.unwrap())
+                        }) {
                             continue;
                         }
-                    }
-                    for trial in &trials {
-                        if configs.len() >= crate::sweep::MAX_CONFIGS {
-                            return Err(Error::Input(format!(
-                                "setup selection exceeds the {}-configuration sweep limit; select a smaller subset",
-                                crate::sweep::MAX_CONFIGS
-                            )));
+                        for trial in &trials {
+                            if configs.len() >= crate::sweep::MAX_CONFIGS {
+                                return Err(Error::Input(format!(
+                                    "setup selection exceeds the {}-configuration sweep limit; select a smaller subset",
+                                    crate::sweep::MAX_CONFIGS
+                                )));
+                            }
+                            let selection = SetupOptions {
+                                agent: vec![agent.clone()],
+                                provider: vec![provider.clone()],
+                                model: vec![model.clone()],
+                                thinking_effort: vec![effort],
+                                native_snapshot_record: options.native_snapshot_record,
+                                workload: vec![workload.clone()],
+                                trial: trial.iter().cloned().collect(),
+                                trial_count: Vec::new(),
+                                trial_set: set
+                                    .map(|(filename, _)| filename.clone())
+                                    .into_iter()
+                                    .collect(),
+                                measure: options.measure.clone(),
+                                concurrency: options.concurrency,
+                                workspace: options.workspace.clone(),
+                                output: options.output.clone(),
+                                retention: options.retention.clone(),
+                                repeat: None,
+                            };
+                            let config = configuration_at(selection, base)?;
+                            if validated_trials.insert(config.trial.clone()) {
+                                validate_selection(
+                                    &config,
+                                    &directory,
+                                    catalog.as_ref(),
+                                    enabled_trials.as_ref(),
+                                )?;
+                            }
+                            configs.push(config)?;
                         }
-                        let selection = SetupOptions {
-                            agent: vec![agent.clone()],
-                            provider: vec![provider.clone()],
-                            model: vec![model.clone()],
-                            native_snapshot_record: options.native_snapshot_record,
-                            workload: vec![workload.clone()],
-                            trial: trial.iter().cloned().collect(),
-                            trial_count: Vec::new(),
-                            trial_set: set
-                                .map(|(filename, _)| filename.clone())
-                                .into_iter()
-                                .collect(),
-                            measure: options.measure.clone(),
-                            concurrency: options.concurrency,
-                            workspace: options.workspace.clone(),
-                            output: options.output.clone(),
-                            retention: options.retention.clone(),
-                            repeat: None,
-                        };
-                        let config = configuration_at(selection, base)?;
-                        if validated_trials.insert(config.trial.clone()) {
-                            validate_selection(
-                                &config,
-                                &directory,
-                                catalog.as_ref(),
-                                enabled_trials.as_ref(),
-                            )?;
-                        }
-                        configs.push(config)?;
                     }
                 }
             }
@@ -374,13 +386,16 @@ fn validate_before_install(options: &SetupOptions) -> Result<(), Error> {
                 Error::Input(format!("unknown provider `{provider}`{suggestion}"))
             })?;
             for model in scoped(&options.model, provider) {
-                crate::endpoint::choose_from(
+                let endpoint = crate::endpoint::choose_from(
                     adapter.id(),
                     adapter.supported_endpoints(),
                     provider,
                     &model,
                     &providers::offered_endpoints(provider, &model),
                 )?;
+                for effort in unique_efforts(&options.thinking_effort) {
+                    crate::config::validate_thinking_effort(adapter, endpoint.interface, effort)?;
+                }
             }
         }
     }
@@ -501,17 +516,14 @@ fn collector_installables(selected: &[String]) -> Vec<String> {
 }
 
 fn repeated(options: &SetupOptions) -> bool {
-    [
-        &options.agent,
-        &options.provider,
-        &options.model,
-        &options.workload,
-        &options.trial,
-        &options.trial_set,
-        &options.measure,
-    ]
-    .iter()
-    .any(|values| values.len() > 1)
+    options.agent.len() > 1
+        || options.provider.len() > 1
+        || options.model.len() > 1
+        || unique_efforts(&options.thinking_effort).len() > 1
+        || options.workload.len() > 1
+        || options.trial.len() > 1
+        || options.trial_set.len() > 1
+        || options.measure.len() > 1
 }
 
 fn unique(values: &[String]) -> Vec<&String> {
@@ -519,6 +531,23 @@ fn unique(values: &[String]) -> Vec<&String> {
     for value in values {
         if !result.contains(&value) {
             result.push(value);
+        }
+    }
+    result
+}
+
+fn unique_efforts(
+    values: &[Option<crate::benchmark::ThinkingEffort>],
+) -> Vec<Option<crate::benchmark::ThinkingEffort>> {
+    let values = if values.is_empty() {
+        &[None][..]
+    } else {
+        values
+    };
+    let mut result = Vec::new();
+    for value in values {
+        if !result.contains(value) {
+            result.push(*value);
         }
     }
     result
@@ -647,7 +676,7 @@ fn publish_sweep_with_progress_and_repeat(
 
 #[cfg(test)]
 mod tests {
-    use super::collector_installables;
+    use super::{collector_installables, repeated, unique_efforts};
 
     #[test]
     fn sweep_publication_preserves_snapshot_recording_in_every_config() {
@@ -700,5 +729,35 @@ mod tests {
             !tools.contains(&"bpftrace".to_owned()),
             "bpftrace is only installed when explicitly selected"
         );
+    }
+
+    #[test]
+    fn thinking_effort_matrix_selection_deduplicates_and_requires_a_sweep() {
+        let mut options = crate::config::SetupOptions {
+            agent: vec!["pi".into()],
+            workload: vec!["bug-fix".into()],
+            trial: Vec::new(),
+            trial_count: Vec::new(),
+            trial_set: Vec::new(),
+            provider: vec!["openai".into()],
+            model: vec!["gpt-6-sol".into()],
+            thinking_effort: vec![
+                Some(crate::benchmark::ThinkingEffort::High),
+                Some(crate::benchmark::ThinkingEffort::High),
+                Some(crate::benchmark::ThinkingEffort::XHigh),
+            ],
+            native_snapshot_record: false,
+            measure: Vec::new(),
+            concurrency: None,
+            workspace: None,
+            output: None,
+            retention: Default::default(),
+            repeat: None,
+        };
+        assert_eq!(unique_efforts(&options.thinking_effort).len(), 2);
+        assert!(repeated(&options));
+        options.thinking_effort.clear();
+        assert_eq!(unique_efforts(&options.thinking_effort), vec![None]);
+        assert!(!repeated(&options));
     }
 }

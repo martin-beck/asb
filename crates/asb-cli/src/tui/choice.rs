@@ -17,6 +17,7 @@ pub(super) enum ChoiceKey {
         provider: String,
         model: String,
     },
+    ThinkingEffort(Option<crate::benchmark::ThinkingEffort>),
     Prompt(String),
     TrialSet {
         workload: String,
@@ -66,7 +67,8 @@ impl ChoiceKey {
             | Self::AllWorkloads
             | Self::AllCollectors
             | Self::RuntimeNone
-            | Self::RuntimeCpuPool => true,
+            | Self::RuntimeCpuPool
+            | Self::ThinkingEffort(_) => true,
             Self::AllCollectorOptions(collector) => valid(collector),
             Self::AllExtension {
                 workload,
@@ -150,6 +152,13 @@ impl ChoiceKey {
             None
         }
     }
+    pub fn thinking_effort(&self) -> Option<Option<crate::benchmark::ThinkingEffort>> {
+        if let Self::ThinkingEffort(value) = self {
+            Some(*value)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +166,7 @@ pub(super) enum PaneKind {
     Agents,
     Providers,
     Models,
+    ThinkingEffort,
     Workloads,
     Measurements,
     Concurrency,
@@ -166,10 +176,11 @@ pub(super) enum PaneKind {
 }
 
 impl PaneKind {
-    pub const ORDER: [Self; 7] = [
+    pub const ORDER: [Self; 8] = [
         Self::Agents,
         Self::Providers,
         Self::Models,
+        Self::ThinkingEffort,
         Self::Workloads,
         Self::Measurements,
         Self::Concurrency,
@@ -202,6 +213,7 @@ impl PaneKind {
             Self::Agents => "agent",
             Self::Providers => "provider",
             Self::Models => "model",
+            Self::ThinkingEffort => "thinking effort",
             Self::Workloads => "workload",
             Self::Measurements => "measurement",
             Self::Concurrency => "concurrency",
@@ -216,6 +228,9 @@ impl PaneKind {
             Self::CollectorOptions => "Choose adapter-owned collector options.",
             Self::Runtime => {
                 "Choose None (portable) or a CPU pool. Ctrl-P edits CPUs, Ctrl-G edits group size, Ctrl-W toggles CPU-wide perf."
+            }
+            Self::ThinkingEffort => {
+                "Choose default or explicit agent-owned reasoning effort levels."
             }
             _ => DESCRIPTIONS[self.index()],
         }

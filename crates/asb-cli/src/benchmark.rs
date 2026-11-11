@@ -1,6 +1,7 @@
 //! Shared benchmark configuration.
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Upper bound for a single execution cohort.  This remains deliberately
 /// finite: it bounds replica paths, gate state, and retained campaign records
@@ -16,6 +17,56 @@ pub(crate) const MAX_CONFIG_BYTES: usize = 64 * 1024;
 /// configuration, and report files.
 pub(crate) const DEFAULT_LOG_DIRECTORY: &str = ".asb-logs";
 
+/// Explicit reasoning budget requested from an agent that owns support for it.
+///
+/// An absent value deliberately preserves the selected client's default.  The
+/// setting is separate from `model`: it is an execution choice, not part of a
+/// provider model identifier.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl ThinkingEffort {
+    pub const ALL: [Self; 4] = [Self::Low, Self::Medium, Self::High, Self::XHigh];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+impl std::fmt::Display for ThinkingEffort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ThinkingEffort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            _ => Err(format!(
+                "thinking effort `{value}` is invalid; use low, medium, high, or xhigh"
+            )),
+        }
+    }
+}
+
 /// Small, extensible benchmark configuration written by `asb setup`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +79,10 @@ pub struct BenchmarkConfig {
     pub workload: String,
     pub provider: String,
     pub model: String,
+    /// Optional adapter-owned reasoning effort.  Omission preserves the
+    /// selected agent's normal default behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<ThinkingEffort>,
     /// Opt in to experimental native snapshot capture when recording.
     #[serde(default, skip_serializing_if = "is_false")]
     pub native_snapshot_record: bool,
@@ -213,7 +268,32 @@ fn validate_mcp_servers(servers: &[McpServerConfig]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkConfig, MAX_MCP_ARGUMENTS, MAX_MCP_SERVERS, default_log_path};
+    use super::{
+        BenchmarkConfig, MAX_MCP_ARGUMENTS, MAX_MCP_SERVERS, ThinkingEffort, default_log_path,
+    };
+
+    #[test]
+    fn thinking_effort_is_typed_optional_and_strict() {
+        let base = "agent='pi'\nworkload='bug-fix'\nprovider='openai'\nmodel='gpt-6-sol'\n";
+        let default: BenchmarkConfig = toml::from_str(base).unwrap();
+        assert_eq!(default.thinking_effort, None);
+        assert!(
+            !toml::to_string(&default)
+                .unwrap()
+                .contains("thinking_effort")
+        );
+        let explicit: BenchmarkConfig =
+            toml::from_str(&format!("{base}thinking_effort='xhigh'\n")).unwrap();
+        assert_eq!(explicit.thinking_effort, Some(ThinkingEffort::XHigh));
+        assert_eq!(
+            toml::from_str::<BenchmarkConfig>(&toml::to_string(&explicit).unwrap()).unwrap(),
+            explicit
+        );
+        assert!(
+            toml::from_str::<BenchmarkConfig>(&format!("{base}thinking_effort='maximum'\n"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn runtime_settings_roundtrip_and_validate_capacity() {
