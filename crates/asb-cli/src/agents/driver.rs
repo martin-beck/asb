@@ -80,14 +80,19 @@ fn await_gate_release() -> Result<bool, Error> {
         return Err(Error::Run("invalid private guest gate release path".into()));
     }
     loop {
-        match fs::remove_file(&path) {
-            Ok(()) => return Ok(true),
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(true),
+            Ok(_) => {
+                return Err(Error::Run(
+                    "guest gate release is not a regular file".into(),
+                ));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(error) => {
                 return Err(Error::Run(format!(
-                    "cannot consume guest gate release: {error}"
+                    "cannot inspect guest gate release: {error}"
                 )));
             }
         }
