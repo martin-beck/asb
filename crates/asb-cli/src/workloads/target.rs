@@ -21,7 +21,7 @@ struct Target {
     process_identity: Identity,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct LocalTarget {
     pub pid: u32,
     pub namespace_pid: u32,
@@ -136,6 +136,49 @@ fn verify_at(value: &serde_json::Value, proc: &Path) -> Result<LocalTarget, Stri
 
 pub(crate) fn verify(value: &serde_json::Value) -> Result<LocalTarget, String> {
     verify_descendant_at(value, Path::new("/proc"))
+}
+
+/// Prove that the exact stopped target previously admitted to the cohort has
+/// actually resumed.  Docker accepting a control archive only proves delivery
+/// to the daemon; it does not prove that the stopped process consumed it.
+pub(crate) fn verify_resumed(target: &LocalTarget) -> Result<(), String> {
+    verify_resumed_at(target, Path::new("/proc"))
+}
+
+fn verify_resumed_at(target: &LocalTarget, proc: &Path) -> Result<(), String> {
+    let process = proc.join(target.pid.to_string());
+    let before = start_time(&read(&process.join("stat"))?)?;
+    let status = read(&process.join("status"))?;
+    let state = status
+        .lines()
+        .find(|line| line.starts_with("State:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or("isolated target lacks process-state evidence")?;
+    let pids = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:"))
+        .ok_or("isolated target lacks namespace PID evidence")?
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "isolated target has invalid namespace PID evidence")?;
+    let membership = read(&process.join("cgroup"))?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or("isolated measurement requires identifiable cgroup-v2 membership")?;
+    let cgroup = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    if before != target.start_time_ticks
+        || pids.len() < 2
+        || pids.first() != Some(&target.pid)
+        || pids.last() != Some(&target.namespace_pid)
+        || cgroup != target.cgroup
+        || !matches!(state, "R" | "S" | "D" | "I")
+        || start_time(&read(&process.join("stat"))?)? != before
+    {
+        return Err("isolated target did not effectively resume with its verified PID generation and cgroup".into());
+    }
+    Ok(())
 }
 
 /// Resolve the guest's stopped agent beneath the owned Docker exec driver.
@@ -514,6 +557,25 @@ mod tests {
             (9001, 42, 123456)
         );
         assert!(target.cgroup.to_string_lossy().contains(&"a".repeat(64)));
+        std::fs::write(root.join("9001/status"), "State: S\nNSpid: 9001 42\n").unwrap();
+        assert!(verify_resumed_at(&target, &root).is_ok());
+        std::fs::write(root.join("9001/status"), "State: T\nNSpid: 9001 42\n").unwrap();
+        assert!(verify_resumed_at(&target, &root).is_err());
+        std::fs::write(root.join("9001/status"), "State: Z\nNSpid: 9001 42\n").unwrap();
+        assert!(verify_resumed_at(&target, &root).is_err());
+        std::fs::write(root.join("9001/status"), "State: S\nNSpid: 9001 42\n").unwrap();
+        std::fs::write(
+            root.join("9001/cgroup"),
+            "0::/system.slice/unrelated.scope\n",
+        )
+        .unwrap();
+        assert!(verify_resumed_at(&target, &root).is_err());
+        std::fs::write(
+            root.join("9001/cgroup"),
+            format!("0::/system.slice/docker-{}.scope\n", "a".repeat(64)),
+        )
+        .unwrap();
+        std::fs::write(root.join("9001/status"), "State: T\nNSpid: 9001 42\n").unwrap();
         let mut request = value.clone();
         request.as_object_mut().unwrap().remove("daemon_pid");
         request.as_object_mut().unwrap().remove("pid_scope");

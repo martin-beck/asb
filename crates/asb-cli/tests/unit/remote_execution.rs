@@ -41,10 +41,22 @@ impl Fixture {
         self.session_with_grade(events, cleanup, json!(false))
     }
     fn session_with_grade(&self, events: &[Value], cleanup: &str, resolved: Value) -> Session {
+        self.session_with_resume_ack(events, cleanup, resolved, true)
+    }
+    fn session_without_resume_ack(&self, events: &[Value], cleanup: &str) -> Session {
+        self.session_with_resume_ack(events, cleanup, json!(false), false)
+    }
+    fn session_with_resume_ack(
+        &self,
+        events: &[Value],
+        cleanup: &str,
+        resolved: Value,
+        acknowledge_resume: bool,
+    ) -> Session {
         let script = r#"
 import json,sys
 from pathlib import Path
-events=json.loads(sys.argv[1]); log=Path(sys.argv[2]); cleanup=sys.argv[3]; resolved=json.loads(sys.argv[4])
+events=json.loads(sys.argv[1]); log=Path(sys.argv[2]); cleanup=sys.argv[3]; resolved=json.loads(sys.argv[4]); acknowledge_resume=sys.argv[5]=='1'
 def record(op):
  with log.open('a') as stream: stream.write(op+'\n')
 def closed():
@@ -65,6 +77,7 @@ for event in events:
   raw=sys.stdin.readline()
   if not raw: closed();sys.exit(0)
   assert json.loads(raw)==dict(op='resume',exec_id=event['target']['exec_id']);record('resume')
+  if acknowledge_resume: print(json.dumps(dict(event='release_accepted',exec_id=event['target']['exec_id'])),flush=True)
 for raw in sys.stdin:
  request=json.loads(raw);record(request['op'])
  if request['op']=='evaluate':
@@ -79,7 +92,8 @@ closed()
             .arg(serde_json::to_string(events).unwrap())
             .arg(self.0.join("operations"))
             .arg(cleanup)
-            .arg(serde_json::to_string(&resolved).unwrap());
+            .arg(serde_json::to_string(&resolved).unwrap())
+            .arg(if acknowledge_resume { "1" } else { "0" });
         self.with_controller(Controller::spawn(&mut command).unwrap())
     }
     fn with_controller(&self, controller: Controller) -> Session {
@@ -103,6 +117,10 @@ closed()
             agent_timeout: Duration::from_secs(1),
             measurement_active: false,
             preparation_active: false,
+            resume_ack_deadline: None,
+            resume_exec_id: None,
+            resume_target: None,
+            resume_target_sha256: None,
             cleanup_attempted: false,
             completed_grade: None,
             settlement: None,
@@ -134,6 +152,7 @@ def execute_agent(task,request,attach,output,cancelled,on_ended,**options):
  assert request['op']=='agent' and request['timeout']==1
  assert request['request']['config']['workspace']=='/fixture-task'
  attach(dict(exec_id='owned-execution'));record('resume')
+ options['on_release_accepted'](dict(exec_id='owned-execution'))
  output('stdout',b'live\x00output')
  result=dict(exit_code=carrier,stdout=b'complete\x00output',stderr=b'diagnostic',elapsed_seconds=.125,
   metadata=dict(schema_version=1,exit_code=carrier,final_response='fixture',token_usage={},steps=2,tree_quiesced=True))
@@ -177,6 +196,155 @@ raise SystemExit(serve(Task(),sys.stdin,sys.stdout))
             .map(str::to_owned)
             .collect()
     }
+}
+
+#[test]
+fn execution_output_before_effective_resume_acknowledgement_is_rejected() {
+    let fixture = Fixture::new();
+    let events = [
+        json!({"event":"paused","target":{"exec_id":"fixture"}}),
+        json!({"event":"output","data":"aGk="}),
+    ];
+    let mut session = fixture.session_without_resume_ack(&events, "stopped-preserved");
+    let config = configuration();
+    let project = crate::project::ProjectConfig::default();
+    let connection = connection();
+    let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
+        ignore_mcp_mismatch: false,
+        launch: None,
+        config: &config,
+        connection: Some(&connection),
+        project_root: &fixture.0,
+        project_config: &project,
+        replay: true,
+        max_steps: None,
+        tape_cassette: None,
+        tool_replay: false,
+        tool_tape_cassette: None,
+        mcp_mode: None,
+        mcp_tape_cassette: None,
+        measurements: None,
+        show_output: false,
+        progress: None,
+        collector_ready: None,
+    };
+    session.begin_agent_preparation(&mut context).unwrap();
+    let result = session.run_prepared(
+        &mut context,
+        &mut Vec::new(),
+        &connection,
+        fixture.prepared(),
+    );
+    let error = match session.settle_execution(&mut context, result) {
+        Ok(_) => panic!("output before resume acknowledgement was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("before effective resume acknowledgement"),
+        "{error}"
+    );
+    assert_eq!(fixture.operations(), ["agent", "resume", "cancel"]);
+}
+
+#[test]
+fn failed_effective_resume_proof_is_cancellable_before_its_deadline() {
+    let fixture = Fixture::new();
+    let mut session = fixture.session(&[], "stopped-preserved");
+    session.resume_ack_deadline = Some(Instant::now() + Duration::from_secs(60));
+    session.resume_exec_id = Some(json!("fixture"));
+    session.resume_target = Some(super::super::target::LocalTarget {
+        pid: 2,
+        namespace_pid: 2,
+        start_time_ticks: 1,
+        cgroup: "/sys/fs/cgroup/fixture".into(),
+    });
+    let config = configuration();
+    let project = crate::project::ProjectConfig::default();
+    let connection = connection();
+    let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
+        ignore_mcp_mismatch: false,
+        launch: None,
+        config: &config,
+        connection: Some(&connection),
+        project_root: &fixture.0,
+        project_config: &project,
+        replay: true,
+        max_steps: None,
+        tape_cassette: None,
+        tool_replay: false,
+        tool_tape_cassette: None,
+        mcp_mode: None,
+        mcp_tape_cassette: None,
+        measurements: None,
+        show_output: false,
+        progress: None,
+        collector_ready: None,
+    };
+    let calls = std::cell::Cell::new(0);
+    let error = session
+        .verify_effective_resume_with(
+            &mut context,
+            &json!({"exec_id":"fixture"}),
+            |_| {
+                calls.set(calls.get() + 1);
+                Err("still stopped".into())
+            },
+            || true,
+        )
+        .unwrap_err();
+    assert_eq!(calls.get(), 1);
+    assert!(error.contains("interruption requested controlled workload cleanup"));
+    assert!(session.resume_ack_deadline.is_some());
+}
+
+#[test]
+fn effective_resume_requires_host_proof_before_clearing_the_pending_barrier() {
+    let fixture = Fixture::new();
+    let mut session = fixture.session(&[], "stopped-preserved");
+    session.resume_ack_deadline = Some(Instant::now());
+    session.resume_exec_id = Some(json!("fixture"));
+    session.resume_target = Some(super::super::target::LocalTarget {
+        pid: 2,
+        namespace_pid: 2,
+        start_time_ticks: 1,
+        cgroup: "/sys/fs/cgroup/fixture".into(),
+    });
+    let config = configuration();
+    let project = crate::project::ProjectConfig::default();
+    let connection = connection();
+    let mut context = ExecutionContext {
+        ignore_tool_mismatch: false,
+        ignore_mcp_mismatch: false,
+        launch: None,
+        config: &config,
+        connection: Some(&connection),
+        project_root: &fixture.0,
+        project_config: &project,
+        replay: true,
+        max_steps: None,
+        tape_cassette: None,
+        tool_replay: false,
+        tool_tape_cassette: None,
+        mcp_mode: None,
+        mcp_tape_cassette: None,
+        measurements: None,
+        show_output: false,
+        progress: None,
+        collector_ready: None,
+    };
+    let error = session
+        .verify_effective_resume_with(
+            &mut context,
+            &json!({"exec_id":"fixture"}),
+            |_| Err("target remains stopped".into()),
+            || false,
+        )
+        .unwrap_err();
+    assert!(error.contains("target remains stopped"));
+    assert!(session.resume_ack_deadline.is_some());
+    assert!(session.resume_target.is_some());
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -1088,7 +1256,12 @@ fn cohort_release_receipts_are_bounded_public_target_evidence() {
     let measurements =
         crate::measurements::Session::start_with_collectors(&directory, &[], None).unwrap();
     let target_sha256 = "a".repeat(64);
-    for stage in ["collector_attached", "collector_released", "resume_sent"] {
+    for stage in [
+        "collector_attached",
+        "collector_released",
+        "resume_sent",
+        "resume_acknowledged",
+    ] {
         write_cohort_release_receipt(&measurements, &target_sha256, stage).unwrap();
         let receipt: Value = serde_json::from_slice(
             &fs::read(directory.join(format!("cohort-{stage}.json"))).unwrap(),

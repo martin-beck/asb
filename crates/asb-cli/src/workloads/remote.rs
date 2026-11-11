@@ -27,6 +27,7 @@ const INITIAL_MATERIAL_TIMEOUT: Duration = Duration::from_secs(600);
 const COHORT_IDLE_ALLOWANCE: Duration = Duration::from_secs(120);
 const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
+const RESUME_ACK_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
@@ -729,6 +730,10 @@ struct Session {
     agent_timeout: Duration,
     measurement_active: bool,
     preparation_active: bool,
+    resume_ack_deadline: Option<Instant>,
+    resume_exec_id: Option<Value>,
+    resume_target: Option<super::target::LocalTarget>,
+    resume_target_sha256: Option<String>,
     cleanup_attempted: bool,
     completed_grade: Option<CompletedGrade>,
     settlement: Option<ResourceSettlement>,
@@ -1036,6 +1041,10 @@ fn launch_inner(
             .unwrap_or_else(|| Duration::from_secs_f64(agent_timeout)),
         measurement_active: false,
         preparation_active: false,
+        resume_ack_deadline: None,
+        resume_exec_id: None,
+        resume_target: None,
+        resume_target_sha256: None,
         cleanup_attempted: false,
         completed_grade: None,
         settlement: None,
@@ -1336,7 +1345,10 @@ impl Session {
         let mut preparation_failed = false;
         let mut progress_stdout = Vec::new();
         loop {
-            let poll_deadline = deadline.min(Instant::now() + PROGRESS_POLL);
+            let response_deadline = self
+                .resume_ack_deadline
+                .map_or(deadline, |ack| ack.min(deadline));
+            let poll_deadline = response_deadline.min(Instant::now() + PROGRESS_POLL);
             let event = self
                 .controller
                 .receive_until(poll_deadline)
@@ -1347,6 +1359,11 @@ impl Session {
                     )
                 })?;
             let Some(event) = event else {
+                if self.resume_ack_deadline.is_some() && Instant::now() >= response_deadline {
+                    return Err(
+                        "isolated execution did not report accepted release before effective resume verification deadline".into(),
+                    );
+                }
                 if Instant::now() >= deadline {
                     let error = "workload controller exceeded its response deadline";
                     return Err(output_error.as_ref().map_or_else(
@@ -1373,6 +1390,9 @@ impl Session {
                         progress.update(&progress_stdout, &[]);
                     }
                 }
+                Some(EventKind::ReleaseAccepted) => {
+                    self.verify_effective_resume(context, &event)?
+                }
                 Some(EventKind::PreparationFailed) => {
                     abort_launch_boundaries(context);
                     preparation_failed = true;
@@ -1382,6 +1402,7 @@ impl Session {
                     deadline = deadline.min(Instant::now() + CANCELLATION_TIMEOUT);
                 }
                 Some(EventKind::Output) => {
+                    self.require_resume_acknowledged()?;
                     let bytes = decode_base64(&event["data"])?;
                     append_progress_transcript(&mut progress_stdout, &bytes);
                     if launched && let Some(progress) = context.progress.as_deref_mut() {
@@ -1395,6 +1416,7 @@ impl Session {
                     }
                 }
                 Some(EventKind::ExecutionEnded) => {
+                    self.require_resume_acknowledged()?;
                     if let Some(session) = context.measurements.as_deref_mut() {
                         if !self.measurement_active {
                             return Err(
@@ -1413,6 +1435,7 @@ impl Session {
                     }
                 }
                 Some(EventKind::Completed) => {
+                    self.require_resume_acknowledged()?;
                     if preparation_failed {
                         return Err("isolated preparation failed before shared launch; inspect private task artifacts".into());
                     }
@@ -1436,6 +1459,7 @@ impl Session {
         deadline: Instant,
     ) -> Result<(), String> {
         let mut verified_target = None;
+        self.resume_target = None;
         if let Some(launch) = context.launch {
             let target = &event["target"];
             let valid_hex = |value: &Value| {
@@ -1490,6 +1514,7 @@ impl Session {
                 return Err(error);
             }
             write_cohort_release_receipt(session, &target_sha256, "collector_attached")?;
+            self.resume_target = Some(target);
             verified_target = Some(target_sha256);
         }
         if let Some(session) = context.measurements.as_deref_mut() {
@@ -1528,6 +1553,75 @@ impl Session {
             verified_target.as_ref(),
         ) {
             write_cohort_release_receipt(session, target_sha256, "resume_sent")?;
+        }
+        self.resume_ack_deadline = Some((Instant::now() + RESUME_ACK_TIMEOUT).min(deadline));
+        self.resume_exec_id = Some(event["target"]["exec_id"].clone());
+        self.resume_target_sha256 = verified_target;
+        Ok(())
+    }
+
+    fn require_resume_acknowledged(&self) -> Result<(), String> {
+        if self.resume_ack_deadline.is_some() {
+            return Err(
+                "isolated target emitted execution data before effective resume acknowledgement"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_effective_resume(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        event: &Value,
+    ) -> Result<(), String> {
+        self.verify_effective_resume_with(
+            context,
+            event,
+            super::target::verify_resumed,
+            crate::interruption::requested,
+        )
+    }
+
+    fn verify_effective_resume_with(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        event: &Value,
+        verify: impl Fn(&super::target::LocalTarget) -> Result<(), String>,
+        interrupted: impl Fn() -> bool,
+    ) -> Result<(), String> {
+        let expected = self
+            .resume_exec_id
+            .as_ref()
+            .ok_or("isolated execution accepted release without a pending target")?;
+        if event["exec_id"] != *expected {
+            return Err("isolated execution accepted release for a different target".into());
+        }
+        let deadline = self
+            .resume_ack_deadline
+            .ok_or("isolated execution accepted release without a pending deadline")?;
+        if let Some(target) = self.resume_target.as_ref() {
+            loop {
+                match verify(target) {
+                    Ok(()) => break,
+                    Err(_) if interrupted() => {
+                        return Err("ASB interruption requested controlled workload cleanup".into());
+                    }
+                    Err(_error) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        self.resume_exec_id.take();
+        self.resume_ack_deadline.take();
+        self.resume_target.take();
+        if let (Some(session), Some(target_sha256)) = (
+            context.measurements.as_deref_mut(),
+            self.resume_target_sha256.take(),
+        ) {
+            write_cohort_release_receipt(session, &target_sha256, "resume_acknowledged")?;
         }
         Ok(())
     }
@@ -2500,6 +2594,10 @@ sys.stdout.write(result['project_configuration'])
             agent_timeout: Duration::from_secs(1),
             measurement_active: false,
             preparation_active: false,
+            resume_ack_deadline: None,
+            resume_exec_id: None,
+            resume_target: None,
+            resume_target_sha256: None,
             cleanup_attempted: false,
             completed_grade: None,
             settlement: None,

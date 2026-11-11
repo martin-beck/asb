@@ -523,6 +523,10 @@ class ExecutionTests(unittest.TestCase):
     def test_gate_stops_before_attachment_and_preserves_argv_env_and_output(self):
         workspace, container, api, creation = self.workspace()
         with workspace:
+            resumed = []
+            def effective_resume(target):
+                self.assertIn("release", container.events)
+                resumed.append(target)
             def attach(target):
                 self.assertFalse(container.resumed)
                 self.assertEqual(container.events[-1], "gate")
@@ -530,7 +534,8 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(target["namespace_pid"], 42)
                 self.assertEqual(target["pid_scope"], "docker-daemon-host")
                 container.events.append("attached")
-            result = workspace.execute(["agent", "literal ; $value"], {"FIXTURE_KEY": "fixture-only"}, before_resume=attach)
+            result = workspace.execute(["agent", "literal ; $value"], {"FIXTURE_KEY": "fixture-only"},
+                                       before_resume=attach, on_release_accepted=effective_resume)
             self.assertEqual(result["stdout"], b"stdout")
             self.assertEqual(result["stderr"], b"stderr")
             self.assertEqual(result["exit_code"], 0)
@@ -541,6 +546,9 @@ class ExecutionTests(unittest.TestCase):
             self.assertRegex(environment["ASB_GATE_RELEASE"], r"^/tmp/\.asb-gate-release-[0-9a-f]{32}$")
             self.assertIn("unset ASB_GATE_RELEASE", api.calls[0]["cmd"][2])
             self.assertLess(container.events.index("attached"), container.events.index("release"))
+            self.assertEqual(resumed, [{"container_id": "owned-container", "exec_id": "exec-1",
+                                        "daemon_pid": 9001, "namespace_pid": 42,
+                                        "pid_scope": "docker-daemon-host"}])
             self.assertNotIn("volumes", creation[0])
             self.assertNotIn("network_mode", creation[0])
             self.assertNotIn("privileged", creation[0])
@@ -608,6 +616,34 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(resume_attempts, 9)
         self.assertIn(call(2.0), sleep.call_args_list)
         self.assertTrue(api.completed)
+
+    def test_failed_gate_release_never_acknowledges_effective_resume(self):
+        workspace, _, api, _ = self.workspace()
+        api.put_archive = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("daemon unavailable"))
+        resumed = []
+        with patch.object(RUNTIME.time, "sleep"):
+            with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "could not be resumed"):
+                workspace.execute(["agent"], on_release_accepted=resumed.append)
+        self.assertEqual(resumed, [])
+
+    def test_accepted_gate_release_reports_delivery_not_effective_target_resume(self):
+        workspace, container, api, _ = self.workspace()
+        accepted = []
+        def accepted_without_target_resume(container_id, path, data):
+            self.assertEqual((container_id, path), (container.id, "/tmp"))
+            self.assertIsInstance(data, bytes)
+            api.releases.append(data)
+            container.events.append("release")
+            # Deliberately leave the stopped target stopped. The Rust host
+            # verifier must reject this after the delivery-only notification.
+            return True
+        api.put_archive = accepted_without_target_resume
+        with workspace, self.assertRaisesRegex(AssertionError, "before resume"):
+            workspace.execute(["agent"], on_release_accepted=accepted.append)
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(container.events.count("release"), 1)
+        self.assertFalse(container.resumed)
+        self.assertIn("kill", container.events)
 
     @unittest.skipIf(
         RUNTIME.fcntl is None or "fork" not in multiprocessing.get_all_start_methods(),

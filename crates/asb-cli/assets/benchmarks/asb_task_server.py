@@ -42,6 +42,7 @@ class Operation(str, Enum):
 class Event(str, Enum):
     READY = "ready"
     PAUSED = "paused"
+    RELEASE_ACCEPTED = "release_accepted"
     OUTPUT = "output"
     EXECUTION_ENDED = "execution_ended"
     COMPLETED = "completed"
@@ -124,6 +125,12 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
         if response.get("op") != Operation.RESUME or response.get("exec_id") != target["exec_id"]:
             raise ExecutionError("execution was cancelled before collector attachment completed")
 
+    def release_accepted(target):
+        exec_id = target.get("exec_id") if isinstance(target, dict) else None
+        if not isinstance(exec_id, str) or not exec_id:
+            raise ExecutionError("execution release was accepted without a valid target identity")
+        emit(Event.RELEASE_ACCEPTED, exec_id=exec_id)
+
     def output(name, chunk):
         emit(Event.OUTPUT, stream=name, data=base64.b64encode(chunk).decode("ascii"))
 
@@ -157,13 +164,14 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
                             budget = PreparationBudget(seconds) if seconds is not None else None
                             result = execute_agent(task, request, lambda target: attach(target,budget), output, peer_closed,
                                 on_ended=lambda result: emit(Event.EXECUTION_ENDED, elapsed_seconds=result["elapsed_seconds"], exit_code=result["exit_code"]),
-                                preparation_budget=budget, on_preparation_failure=lambda: emit(Event.PREPARATION_FAILED))
+                                preparation_budget=budget, on_preparation_failure=lambda: emit(Event.PREPARATION_FAILED),
+                                on_release_accepted=release_accepted)
                         else:
                             result = task.workspace.execute(
                                 request.get("argv"), request.get("environment"),
                                 timeout=request.get("timeout", DEFAULT_EXECUTION_TIMEOUT), output_limit=request.get("output_limit", 256 * 1024),
                                 before_resume=attach, on_output=output, cancelled=peer_closed,
-                                gate=request.get("gate", "shell"),
+                                gate=request.get("gate", "shell"), on_release_accepted=release_accepted,
                             )
                         result = dict(result)
                         for stream in ["stdout", "stderr"]:
