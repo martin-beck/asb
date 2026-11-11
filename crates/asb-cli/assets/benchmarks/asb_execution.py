@@ -213,8 +213,11 @@ def principal_observation(metadata):
 
 
 # The archive-created marker admits only this outer shell.  It remains as
-# container teardown evidence, but descendants receive no stale capability.
-GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; unset ASB_GATE_RELEASE; exec "$@"'
+# container teardown evidence, but descendants receive neither its path nor a
+# reusable release capability.  Application drivers receive only this
+# one-shot admission result, which prevents a direct driver's readiness frame
+# from circularly waiting for the controller to create the marker.
+GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; unset ASB_GATE_RELEASE; ASB_GATE_ADMITTED=1 exec "$@"'
 MAX_ARGUMENT_BYTES = 1024 * 1024
 
 
@@ -565,8 +568,7 @@ class ManagedDockerWorkspace:
             command = argv
             release_path = "/tmp/.asb-gate-release-" + secrets.token_hex(16)
             gate_environment = dict(environment, ASB_GATE_RELEASE=release_path)
-            if gate != "application":
-                command = ["/bin/sh", "-c", GATE, "asb-gate", *argv]
+            command = ["/bin/sh", "-c", GATE, "asb-gate", *argv]
             # A sweep creates independent Python workers.  Their agents still
             # run concurrently, but concurrently creating the paused Docker
             # gate streams overwhelms some native Docker daemons before the

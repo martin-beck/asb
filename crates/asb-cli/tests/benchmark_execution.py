@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
@@ -127,6 +128,21 @@ class API:
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_application_gate_admits_without_forwarding_marker_capability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / ".asb-gate-release-0123456789abcdef0123456789abcdef"
+            environment = dict(os.environ, ASB_GATE_RELEASE=str(release))
+            process = subprocess.Popen(
+                ["/bin/sh", "-c", RUNTIME.GATE, "asb-gate", "/bin/sh", "-c",
+                 'printf "%s:%s\\n" "${ASB_GATE_RELEASE-unset}" "${ASB_GATE_ADMITTED-unset}"'],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", env=environment)
+            self.assertEqual(process.stdout.readline(), f"__ASB_GATE__:{process.pid}\n")
+            release.touch(mode=0o600)
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(stdout, "unset:1\n")
+
     def test_compose_cpu_allocation_applies_to_services_and_rejects_conflicts(self):
         services = [{}, {"cpuset": "1,3"}]
         for service in services:
@@ -540,6 +556,7 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(environment["FIXTURE_KEY"], "fixture-only")
             self.assertRegex(environment["ASB_GATE_RELEASE"], r"^/tmp/\.asb-gate-release-[0-9a-f]{32}$")
             self.assertIn("unset ASB_GATE_RELEASE", api.calls[0]["cmd"][2])
+            self.assertIn("ASB_GATE_ADMITTED=1", api.calls[0]["cmd"][2])
             self.assertLess(container.events.index("attached"), container.events.index("release"))
             self.assertNotIn("volumes", creation[0])
             self.assertNotIn("network_mode", creation[0])
@@ -680,7 +697,8 @@ class ExecutionTests(unittest.TestCase):
         workspace, _container, api, _ = self.workspace()
         with workspace:
             self.assertEqual(workspace.execute(["/opt/asb/asb", "__asb-agent"], gate="application")["exit_code"], 0)
-            self.assertEqual(api.calls[0]["cmd"], ["/opt/asb/asb", "__asb-agent"])
+            self.assertEqual(api.calls[0]["cmd"][-2:], ["/opt/asb/asb", "__asb-agent"])
+            self.assertIn("ASB_GATE_ADMITTED=1", api.calls[0]["cmd"][2])
 
     def alternate_transport(self, api, targets=None, status=7):
         transports = []
