@@ -195,15 +195,16 @@ pub(crate) fn pause_current() -> io::Result<()> {
 
 /// Consume the one-shot release capability that the workload controller
 /// materializes through Docker's archive API.  The gate must first stop so
-/// collectors can attach; after its owner resumes it, consuming this file is
-/// the only admission path.  Do not pass the capability to the target: a
-/// nested ASB gate would otherwise wait for a second, nonexistent release.
+/// collectors can attach; after its owner resumes it, this marker admits the
+/// gate.  Keep the marker and its capability in the target environment:
+/// guest setup invokes nested ASB gates (for example while staging Node), and
+/// they all share this single container-scoped release.  The final agent
+/// boundary consumes the marker after setup has settled.
 #[cfg(target_os = "linux")]
 fn await_archive_gate_release() -> io::Result<()> {
     let Some(value) = std::env::var_os(GATE_RELEASE) else {
         return Ok(());
     };
-    unsafe { std::env::remove_var(GATE_RELEASE) };
     let path = std::path::PathBuf::from(value);
     let valid = path.parent() == Some(Path::new("/tmp"))
         && path
@@ -220,14 +221,15 @@ fn await_archive_gate_release() -> io::Result<()> {
         return Err(io::Error::other("invalid private guest gate release path"));
     }
     loop {
-        match std::fs::remove_file(&path) {
-            Ok(()) => return Ok(()),
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => return Ok(()),
+            Ok(_) => return Err(io::Error::other("guest gate release is not a regular file")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(error) => {
                 return Err(io::Error::other(format!(
-                    "cannot consume guest gate release: {error}"
+                    "cannot inspect guest gate release: {error}"
                 )));
             }
         }
