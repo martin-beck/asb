@@ -194,7 +194,8 @@ impl Producer {
             Some(Active::Process(process)) => {
                 process.policy.graceful.unwrap_or_default() + Duration::from_secs(8)
             }
-            _ => Duration::from_secs(6),
+            Some(Active::Snapshot(_)) => ProcessTreeSnapshot::stop_budget(),
+            None => Duration::from_secs(6),
         }
     }
     pub fn stop_before(&mut self, deadline: Instant) -> Completion {

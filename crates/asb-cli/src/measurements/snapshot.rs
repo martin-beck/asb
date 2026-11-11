@@ -5,17 +5,36 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
 pub(super) struct ProcessTreeSnapshot {
     stop: Arc<AtomicBool>,
+    stop_deadline: Arc<Mutex<Option<Instant>>>,
     handle: Option<WorkerHandle>,
 }
 type WorkerTask = Box<dyn FnOnce() -> Result<(), String> + Send>;
 type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
+
+// A snapshot cancellation can first spend the gate's bounded owned-cleanup
+// window. Keep a small scheduler margin so its owner does not report an
+// otherwise bounded cleanup as unconfirmed at the same deadline.
+const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
+
+fn record_stop_deadline(slot: &Mutex<Option<Instant>>, deadline: Instant) {
+    let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if slot.is_none_or(|current| deadline < current) {
+        *slot = Some(deadline);
+    }
+}
+
+fn stop_deadline(slot: Option<&Mutex<Option<Instant>>>) -> Instant {
+    slot.and_then(|slot| *slot.lock().unwrap_or_else(|error| error.into_inner()))
+        .unwrap_or_else(|| Instant::now() + SETTLEMENT_BUDGET)
+}
+
 fn spawn_worker(task: WorkerTask) -> io::Result<WorkerHandle> {
     std::thread::Builder::new()
         .name("asb-process-tree-snapshot".into())
@@ -41,6 +60,8 @@ impl ProcessTreeSnapshot {
     ) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&stop);
+        let stop_deadline = Arc::new(Mutex::new(None));
+        let cancellation_deadline = Arc::clone(&stop_deadline);
         let handle = spawn(Box::new(move || {
             let started = Instant::now();
             while !cancelled.load(Ordering::Acquire) && root.matches() {
@@ -54,7 +75,14 @@ impl ProcessTreeSnapshot {
                 }
                 let pids = members.iter().map(|member| member.pid).collect::<Vec<_>>();
                 let request = arguments(&pids);
-                let Some(observation) = observe(&executable, request, &cancelled, false)? else {
+                let Some(observation) = observe(
+                    &executable,
+                    request,
+                    &cancelled,
+                    Some(&cancellation_deadline),
+                    false,
+                )?
+                else {
                     break;
                 };
                 if !root.matches() || members.iter().any(|member| !member.in_tree(root)) {
@@ -71,6 +99,7 @@ impl ProcessTreeSnapshot {
         .ok()?;
         Some(Self {
             stop,
+            stop_deadline,
             handle: Some(handle),
         })
     }
@@ -79,7 +108,14 @@ impl ProcessTreeSnapshot {
         self.settle()
     }
     pub(super) fn request_stop(&self) {
+        self.request_stop_until(Instant::now() + Self::stop_budget());
+    }
+    fn request_stop_until(&self, deadline: Instant) {
+        record_stop_deadline(&self.stop_deadline, deadline);
         self.stop.store(true, Ordering::Release);
+    }
+    pub(super) const fn stop_budget() -> Duration {
+        SETTLEMENT_BUDGET
     }
     pub(super) fn stop_before_with_owner(
         mut self,
@@ -95,14 +131,14 @@ impl ProcessTreeSnapshot {
             .is_none_or(|handle| handle.is_finished())
     }
     fn settle(&mut self) -> Result<(), String> {
-        self.settle_before(Instant::now() + Duration::from_secs(6), None)
+        self.settle_before(Instant::now() + Self::stop_budget(), None)
     }
     fn settle_before(
         &mut self,
         deadline: Instant,
         owner: Option<Arc<crate::output_lock::OutputLock>>,
     ) -> Result<(), String> {
-        self.request_stop();
+        self.request_stop_until(deadline);
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
@@ -141,7 +177,7 @@ pub(crate) fn bounded_command(
 ) -> Option<(Vec<u8>, Vec<u8>)> {
     #[cfg(target_os = "linux")]
     {
-        let result = observe(executable, request, &AtomicBool::new(false), true).ok()??;
+        let result = observe(executable, request, &AtomicBool::new(false), None, true).ok()??;
         Some((result.stdout, result.stderr))
     }
     #[cfg(not(target_os = "linux"))]
@@ -163,7 +199,7 @@ pub(crate) fn bounded_version(
             runtime: budget,
             stream_bytes: 8192,
         };
-        let result = observe(executable, request, &AtomicBool::new(false), true).ok()??;
+        let result = observe(executable, request, &AtomicBool::new(false), None, true).ok()??;
         Some((result.stdout, result.stderr))
     }
     #[cfg(not(target_os = "linux"))]
@@ -269,6 +305,7 @@ fn observe(
     executable: &std::path::Path,
     request: SnapshotCommand,
     cancelled: &AtomicBool,
+    cancellation_deadline: Option<&Mutex<Option<Instant>>>,
     no_auto_install: bool,
 ) -> Result<Option<Observation>, String> {
     if request.runtime.is_zero()
@@ -317,7 +354,11 @@ fn observe(
     loop {
         if cancelled.load(Ordering::Acquire) {
             if !exited {
-                let grace = Instant::now() + Duration::from_millis(100);
+                let cleanup_deadline = stop_deadline(cancellation_deadline);
+                let grace = std::cmp::min(
+                    Instant::now() + Duration::from_millis(100),
+                    cleanup_deadline,
+                );
                 let _ = gate.interrupt_principal(grace);
                 while Instant::now() < grace {
                     if gate
@@ -333,7 +374,8 @@ fn observe(
                 // Delivery acknowledgement is never used as quiescence proof.
                 let _acknowledged = gate.interruption_acknowledged();
                 if !exited {
-                    gate.stop().map_err(|error| error.to_string())?;
+                    gate.stop_until(cleanup_deadline)
+                        .map_err(|error| error.to_string())?;
                 }
             }
             return Ok(None);
@@ -460,6 +502,16 @@ mod io_tests {
             "expired budget must never perform another read"
         );
     }
+
+    #[test]
+    fn cancellation_deadline_is_pinned_before_the_worker_observes_stop() {
+        let deadlines = Mutex::new(None);
+        let outer = Instant::now() + Duration::from_millis(40);
+        record_stop_deadline(&deadlines, outer);
+        record_stop_deadline(&deadlines, Instant::now() + Duration::from_secs(8));
+        assert_eq!(stop_deadline(Some(&deadlines)), outer);
+    }
+
     #[test]
     fn timed_out_snapshot_settles_gate_before_closing_capture_pipes() {
         let error = match observe(
@@ -470,6 +522,7 @@ mod io_tests {
                 stream_bytes: 8192,
             },
             &AtomicBool::new(false),
+            None,
             true,
         ) {
             Err(error) => error,
@@ -526,6 +579,7 @@ fn observe(
     _: &std::path::Path,
     _: SnapshotCommand,
     _: &AtomicBool,
+    _: Option<&Mutex<Option<Instant>>>,
     _: bool,
 ) -> Result<Option<Observation>, String> {
     Err("bounded process-tree snapshot supervision requires Linux native gate support".into())
