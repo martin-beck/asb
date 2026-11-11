@@ -193,15 +193,13 @@ pub(crate) fn pause_current() -> io::Result<()> {
     }
 }
 
-/// Consume the one-shot release capability that the workload controller
-/// materializes through Docker's archive API.  The gate must first stop so
-/// collectors can attach; after its owner resumes it, this marker admits the
-/// gate.  Keep the marker and its capability in the target environment:
-/// guest setup invokes nested ASB gates (for example while staging Node), and
-/// they all share this single container-scoped release.  The final agent
-/// boundary consumes the marker after setup has settled.
+/// Consume the archive-created release capability before starting a target.
+/// The outer guest shell has already waited for the marker before it execs
+/// this gate.  Descendant gates must not inherit that admission state: they
+/// have their own stopped-principal handshake and otherwise can wait on a
+/// marker that belongs only to the outer Docker execution.
 #[cfg(target_os = "linux")]
-fn await_archive_gate_release() -> io::Result<()> {
+fn consume_archive_gate_release() -> io::Result<()> {
     let Some(value) = std::env::var_os(GATE_RELEASE) else {
         return Ok(());
     };
@@ -222,7 +220,12 @@ fn await_archive_gate_release() -> io::Result<()> {
     }
     loop {
         match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => return Ok(()),
+            Ok(metadata) if metadata.is_file() => {
+                // Retain the archive evidence for container teardown, but do
+                // not forward its environment capability into nested gates.
+                unsafe { std::env::remove_var(GATE_RELEASE) }
+                return Ok(());
+            }
             Ok(_) => return Err(io::Error::other("guest gate release is not a regular file")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -364,7 +367,7 @@ pub(crate) fn run_gate(args: &[OsString]) -> std::process::ExitCode {
     }
     #[cfg(target_os = "linux")]
     let status = (|| {
-        await_archive_gate_release()?;
+        consume_archive_gate_release()?;
         if owner.cancelled()? {
             return Err(io::Error::other(
                 "native gate owner exited before client execution",
