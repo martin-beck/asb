@@ -2090,12 +2090,23 @@ fn principal_identity(
 }
 
 #[cfg(target_os = "linux")]
+fn agent_exec_wait_window(runtime: Duration) -> Duration {
+    // A replay cohort may hold an early stopped agent until every selected
+    // replica has reached the shared launch barrier.  Keep this local wait
+    // bounded by the same two-hour launch window used by the replay campaign,
+    // rather than treating the old short per-agent observation interval as a
+    // failed execution before the cohort can be released.
+    runtime.min(Duration::from_secs(7_200))
+}
+
+#[cfg(target_os = "linux")]
 fn wait_for_agent_exec(
     child: &mut OwnedChild,
     identity: (measurements::ProcessIdentity, std::path::PathBuf),
+    runtime: Duration,
 ) -> Result<(), Error> {
     let (identity, launcher) = identity;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + agent_exec_wait_window(runtime);
     loop {
         if !identity.matches() {
             break;
@@ -2185,7 +2196,7 @@ pub(crate) fn run_guest_process(
     if let Some(identity) = identity
         && !archive_gate_release
     {
-        wait_for_agent_exec(&mut child, identity)?;
+        wait_for_agent_exec(&mut child, identity, runtime)?;
     }
     if let Some(prompt) = stdin_prompt {
         let Some(mut stdin) = child.take_stdin() else {
@@ -2338,6 +2349,21 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_exec_wait_window_covers_shared_launch_and_remains_bounded() {
+        use std::time::Duration;
+
+        assert_eq!(
+            super::agent_exec_wait_window(Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            super::agent_exec_wait_window(Duration::from_secs(36_000)),
+            Duration::from_secs(7_200)
+        );
+    }
+
     #[test]
     fn direct_failure_without_log_reports_directory_and_preserves_error_kind() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());

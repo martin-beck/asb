@@ -176,7 +176,7 @@ pub(crate) fn start_with_spawn<'a>(
         }
         let identity = super::principal_identity(child.id())?;
         on_spawn(child.id())?;
-        super::wait_for_agent_exec(&mut child, identity)?;
+        super::wait_for_agent_exec(&mut child, identity, runtime)?;
     }
     let started = Instant::now();
     if let Some(prompt) = stdin_prompt {
