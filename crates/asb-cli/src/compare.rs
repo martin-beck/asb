@@ -666,6 +666,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         let primary_details = benchmark
             .artifacts
             .iter()
+            .filter(|artifact| !is_flamegraph_artifact(artifact))
             .flat_map(|artifact| {
                 benchmark
                     .artifact_sources
@@ -682,6 +683,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             let links = benchmark
                 .artifacts
                 .iter()
+                .filter(|artifact| !is_flamegraph_artifact(artifact))
                 .map(|artifact| {
                     let supplemental_links = benchmark
                         .artifact_sources
@@ -707,6 +709,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 .collect::<String>();
             let mut previews = String::new();
             for artifact in &benchmark.artifacts {
+                if is_flamegraph_artifact(artifact) {
+                    continue;
+                }
                 if benchmark.result_source == ResultSource::RecoveredOfficialGrade {
                     // Preserved partial collectors are diagnostic downloads,
                     // never final execution charts for a grade-only closure.
@@ -810,6 +815,9 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             ));
     }
     html.push_str("</tbody></table></div></section>");
+    if let Some(section) = flamegraph_section(benchmarks, &prepared.data.previews) {
+        html.push_str(&section);
+    }
     if aggregate {
         html.push_str(&distributions::html(benchmarks));
         html.push_str("<section><h2>Other analysis artifacts</h2><p>Original per-run charts and cohort analyses remain available as files.</p><a href=\"cohort-analysis.json\">Cohort analysis data</a><ul>");
@@ -848,9 +856,6 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         {
             html.push_str(&chart_figure(stage, graph)?);
         }
-        for benchmark in benchmarks {
-            html.push_str(&flamegraph_figure(benchmark, &prepared.data.previews));
-        }
         html.push_str("</div></section>");
     }
     html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
@@ -858,6 +863,34 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str(HTML_SCRIPT);
     fs::write(stage.join("report.html"), html)
         .map_err(|error| Error::Run(format!("cannot write HTML report: {error}")))
+}
+
+fn is_flamegraph_artifact(artifact: &str) -> bool {
+    matches!(
+        artifact.rsplit('/').next(),
+        Some("flamegraph.svg" | "flamegraph.json" | "flamegraph.folded")
+    )
+}
+
+fn flamegraph_section(
+    benchmarks: &[BenchmarkData],
+    previews: &BTreeMap<String, String>,
+) -> Option<String> {
+    let figures = benchmarks
+        .iter()
+        .filter(|benchmark| {
+            benchmark
+                .artifacts
+                .iter()
+                .any(|artifact| is_flamegraph_artifact(artifact))
+        })
+        .map(|benchmark| flamegraph_figure(benchmark, previews))
+        .collect::<String>();
+    (!figures.is_empty()).then(|| {
+        format!(
+            "<section class=\"flamegraph-section\"><details><summary>Flamegraphs</summary><p class=\"muted\">Per-run flamegraphs are collector evidence. Completed graphs remain sandboxed; unavailable collectors are shown without treating partial captures as measurements.</p><div class=\"charts\">{figures}</div></details></section>"
+        )
+    })
 }
 
 fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, String>) -> String {
@@ -869,6 +902,10 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         .artifacts
         .iter()
         .find(|artifact| artifact.rsplit('/').next() == Some("flamegraph.json"));
+    let folded = benchmark
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.rsplit('/').next() == Some("flamegraph.folded"));
     let mut body = String::new();
     if let Some(artifact) =
         graph.filter(|_| benchmark.result_source != ResultSource::RecoveredOfficialGrade)
@@ -902,7 +939,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
             })
             .unwrap_or_else(|| ("unknown".into(), None));
         body.push_str(&format!(
-            " <a href=\"{}\">Collector status: {}</a>",
+            " <span>Flamegraph collector status</span>: <a href=\"{}\">Collector status: {}</a>",
             escape(status),
             escape(&state.0)
         ));
@@ -911,6 +948,12 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         }
     } else {
         body.push_str(" <span>Collector status unavailable.</span>");
+    }
+    if let Some(folded) = folded {
+        body.push_str(&format!(
+            " <a href=\"{}\" download>Download folded stacks</a>",
+            escape(folded)
+        ));
     }
     format!(
         "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}</figure>",
@@ -1766,15 +1809,70 @@ mod tests {
         run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
         let html =
             std::fs::read_to_string(root.join("results/sweep-comparison/report.html")).unwrap();
-        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
+        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 1);
         assert!(html.contains("Collector status: unavailable"));
         assert!(html.contains("bad &lt;capture&gt;"));
-        assert!(html.contains("Collector status unavailable."));
         assert_eq!(
             html.matches("Flamegraph unavailable or not recorded.")
                 .count(),
-            2
+            1
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_flamegraphs_have_a_dedicated_collapsible_section() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("one.toml"),
+            "agent=\"codex\"\nworkload=\"bug-fix\"\nprovider=\"local\"\nmodel=\"m\"\nconcurrency=2\n",
+        )
+        .unwrap();
+        for replica in 1..=2 {
+            let measurement = root.join(format!(
+                "sweep-results/000-one/measurements-concurrency-{replica}"
+            ));
+            std::fs::create_dir_all(&measurement).unwrap();
+            std::fs::write(
+                measurement.join("run.json"),
+                r#"{"status":"completed","elapsed_ms":12}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                measurement.join("flamegraph.svg"),
+                "<svg><title>flame</title></svg>",
+            )
+            .unwrap();
+            std::fs::write(
+                measurement.join("flamegraph.json"),
+                r#"{"status":"completed","artifact":"flamegraph.svg"}"#,
+            )
+            .unwrap();
+            std::fs::write(measurement.join("flamegraph.folded"), "main;work 1\n").unwrap();
+        }
+        std::fs::write(root.join("sweep.toml"), "configs=[\"one.toml\"]\n").unwrap();
+
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        let html =
+            std::fs::read_to_string(root.join("results/sweep-comparison/report.html")).unwrap();
+        let flamegraphs = html.find("<section class=\"flamegraph-section\">").unwrap();
+        let table_end = html[..flamegraphs]
+            .rfind("</tbody></table></div></section>")
+            .unwrap()
+            + "</tbody></table></div></section>".len();
+        assert_eq!(flamegraphs, table_end, "{html}");
+        assert!(html[flamegraphs..].starts_with(
+            "<section class=\"flamegraph-section\"><details><summary>Flamegraphs</summary>"
+        ));
+        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
+        assert_eq!(html.matches("Download original SVG").count(), 2);
+        assert_eq!(html.matches("Download folded stacks").count(), 2);
+        assert_eq!(html.matches("Collector status: completed").count(), 2);
+        let table = &html[..flamegraphs];
+        assert!(!table.contains("flamegraph.svg"));
+        assert!(!table.contains("flamegraph.json"));
+        assert!(!table.contains("flamegraph.folded"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
