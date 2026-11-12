@@ -607,6 +607,7 @@ class ManagedDockerWorkspace:
         watchdog.start()
         stream = None
         result = None
+        preparation_phase = "gate-transport"
         try:
             release_path = None
             gate_environment = environment
@@ -633,6 +634,7 @@ class ManagedDockerWorkspace:
 
             with _gate_resume_section(gate_setup_aborted):
                 stream = (transport_factory or DockerExecTransport)(api,container,command,gate_environment,self.workdir)
+                preparation_phase = "gate-readiness"
                 ready = bytearray()
                 # Docker's multiplexed stream may deliver stderr before the gate's
                 # already-written stdout readiness frame. Installer diagnostics are
@@ -666,6 +668,7 @@ class ManagedDockerWorkspace:
                 if namespace_pid <= 1:
                     raise ExecutionError("container gate did not identify a distinct agent process")
             try:
+                preparation_phase = "gate-target"
                 target = execution_target(stream,container,namespace_pid)
             except ExecutionError:
                 # The watchdog may stop the container while Docker is returning
@@ -677,6 +680,7 @@ class ManagedDockerWorkspace:
                         raise ExecutionError("container execution preparation was cancelled or exceeded its deadline") from None
                 raise
             if before_resume is not None:
+                preparation_phase = "collector-attachment"
                 before_resume(target)
             with phase_lock:
                 if (expired.is_set() or interrupted.is_set() or time.monotonic() >= phase_deadline[0]
@@ -694,6 +698,7 @@ class ManagedDockerWorkspace:
                             or (cancelled is not None and cancelled.is_set()))
 
             resume_error = None
+            preparation_phase = "gate-release"
             # Hold the interprocess lock through the bounded retry sequence.
             # Releasing it between attempts recreates the same Docker-daemon
             # burst that this section is intended to prevent.
@@ -783,7 +788,7 @@ class ManagedDockerWorkspace:
                       "timed_out": expired.is_set(), "cancelled": interrupted.is_set(), "output_truncated": truncated,
                       "elapsed_seconds": time.monotonic() - execution_started,
                       "preparation_seconds": execution_started - started, "target": target}
-        except BaseException:
+        except BaseException as error:
             # A failed collector callback, malformed gate or protocol failure
             # must not leave a paused/live agent behind. Preserve its filesystem
             # by restarting only PID 1 after the complete old tree is gone.
@@ -793,6 +798,12 @@ class ManagedDockerWorkspace:
                 container.kill()
             except Exception:
                 pass
+            if execution_started is None:
+                try:
+                    if isinstance(error, ExecutionError):
+                        error.asb_preparation_phase = preparation_phase
+                except BaseException:
+                    pass
             raise
         finally:
             done.set()
