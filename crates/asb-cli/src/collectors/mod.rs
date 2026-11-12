@@ -595,9 +595,19 @@ pub(crate) trait CollectorAdapter: Sync {
     ) -> Result<(), String> {
         Ok(())
     }
-    /// A verified local isolated process is not ASB's direct child. Adapters
-    /// that manage membership must override this instead of moving its PID.
+    /// Bind a verified local isolated process without starting capture. The
+    /// shared cohort release remains responsible for activating observation
+    /// only after the workload has proved the target resumed.
     fn attach_isolated_pid(
+        &self,
+        _session: &mut crate::measurements::Session,
+        _pid: u32,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    /// Begin isolated-target observation after the workload-owned effective
+    /// release acknowledgement. The default reuses ordinary PID attachment.
+    fn activate_isolated_pid(
         &self,
         session: &mut crate::measurements::Session,
         pid: u32,

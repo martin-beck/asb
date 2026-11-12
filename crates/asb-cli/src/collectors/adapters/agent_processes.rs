@@ -354,6 +354,11 @@ impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
         session.state::<State<MEMORY>>().borrow_mut().isolated = true;
         Ok(())
     }
+    fn activate_isolated_pid(&self, _session: &mut Session, _pid: u32) -> Result<(), String> {
+        // Isolated executions import their agent-process observations from the
+        // execution namespace; host-side activation would widen that scope.
+        Ok(())
+    }
     fn id(&self) -> &'static str {
         if MEMORY {
             "agent-memory"

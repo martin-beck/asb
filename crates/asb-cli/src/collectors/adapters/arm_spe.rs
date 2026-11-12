@@ -201,13 +201,13 @@ impl CollectorAdapter for ArmSpe {
         let _ = (session, pid);
         Ok(())
     }
-    fn attach_isolated_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
+    fn attach_isolated_pid(&self, session: &mut Session, _pid: u32) -> Result<(), String> {
         let state = session.state::<State>();
         if !state.borrow().selected || state.borrow().pmu.is_none() {
             return Ok(());
         }
         let _ = session.enable_passwordless_sudo_collector("perf");
-        self.attach_pid(session, pid)
+        Ok(())
     }
     fn process(
         &self,

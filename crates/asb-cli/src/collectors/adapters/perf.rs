@@ -204,14 +204,14 @@ impl CollectorAdapter for PerfCollector {
     fn attach_isolated_pid(
         &self,
         session: &mut measurements::Session,
-        pid: u32,
+        _pid: u32,
     ) -> Result<(), String> {
         // The target is a verified daemon-host PID, but rootless Docker may
         // still reject unprivileged perf_event_open across its user namespace.
         // Prefer an existing non-interactive sudo route before the launch gate
         // resumes; never probe the deliberately stopped target.
         let _ = session.enable_passwordless_sudo_collector("perf");
-        session.start_perf(pid)
+        Ok(())
     }
 }
 

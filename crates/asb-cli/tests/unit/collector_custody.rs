@@ -57,6 +57,7 @@ impl Fixture {
                     script.clone(),
                 ],
             }),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stdout,
             File::create(self.directory.join("stderr")).unwrap(),
         )
@@ -97,6 +98,45 @@ fn readiness_is_not_visible_until_the_complete_pid_is_published() {
     assert_eq!(value, "12345");
     assert_eq!(value.parse::<u32>().unwrap(), 12345);
     assert!(!fixture.directory.join(".ready.pending").exists());
+}
+
+#[test]
+fn snapshot_command_waits_for_execution_release() {
+    let fixture = Fixture::new();
+    let ready = fixture.directory.join("ready");
+    let script = format!(
+        "{}\npublish_ready('started')\n",
+        readiness_publisher(&ready)
+    );
+    let execution_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let snapshot = ProcessTreeSnapshot::start(
+        fixture.identity(),
+        PathBuf::from("python3"),
+        Box::new(move |_| SnapshotCommand {
+            runtime: Duration::from_secs(3),
+            stream_bytes: 1024 * 1024,
+            arguments: vec![
+                "-I".into(),
+                "-S".into(),
+                "-B".into(),
+                "-u".into(),
+                "-c".into(),
+                script.clone(),
+            ],
+        }),
+        std::sync::Arc::clone(&execution_started),
+        File::create(fixture.directory.join("stdout")).unwrap(),
+        File::create(fixture.directory.join("stderr")).unwrap(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !ready.exists(),
+        "snapshot command started before the execution release"
+    );
+    execution_started.store(true, std::sync::atomic::Ordering::Release);
+    assert_eq!(fixture.wait_for(&ready), "started");
+    snapshot.stop().unwrap();
 }
 
 #[test]
@@ -208,6 +248,7 @@ fn worker_creation_failure_admits_no_command_or_observation() {
         fixture.identity(),
         "/must-not-execute".into(),
         Box::new(|_| panic!("failed worker must not inspect or execute a command")),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         File::create(fixture.directory.join("stdout")).unwrap(),
         File::create(fixture.directory.join("stderr")).unwrap(),
         |_| Err(std::io::Error::other("fixture worker creation failed")),
@@ -227,6 +268,7 @@ fn worker_panic_is_reported_without_joining_a_live_worker_or_killing_observed_ta
         fixture.identity(),
         "/must-not-execute".into(),
         Box::new(|_| panic!("fixture worker panic before producer launch")),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         File::create(fixture.directory.join("stdout")).unwrap(),
         File::create(fixture.directory.join("stderr")).unwrap(),
     )

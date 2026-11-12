@@ -200,11 +200,17 @@ impl CollectorAdapter for CpuAccounting {
         )
     }
 
-    fn attach_isolated_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
+    fn attach_isolated_pid(&self, session: &mut Session, _pid: u32) -> Result<(), String> {
         let state = session.state::<State>();
         let mut state = state.borrow_mut();
         state.isolated = true;
         state.reason = Some("Container cgroup membership is preserved; agent-tree CPU accounting uses process sampling, which can miss short-lived processes. Container-wide counters must not be reported as agent-only CPU.".into());
+        Ok(())
+    }
+
+    fn activate_isolated_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
+        let state = session.state::<State>();
+        let mut state = state.borrow_mut();
         match external_counter(pid) {
             Ok(counter) => state.external = Some(counter),
             Err(reason) => state.external_reason = Some(reason),
@@ -503,14 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn isolated_attachment_never_creates_or_moves_a_cgroup_leaf() {
+    fn isolated_binding_defers_fallback_sampling_without_creating_a_cgroup_leaf() {
         let dir = std::env::temp_dir()
             .join(crate::workloads::TaskIdentity::local("isolated-cpu", None).attempt_id);
         let mut session = Session::start_with_collectors(&dir, &[], None).unwrap();
-        // An invalid/unowned PID is intentional: this method must not move it
-        // or create a cgroup. Missing read-only counters remain unavailable.
-        ADAPTER.attach_isolated_pid(&mut session, u32::MAX).unwrap();
+        let pid = std::process::id();
+        // Binding must not move the target, create a cgroup, or begin the
+        // fallback sampler before the workload proves effective release.
+        ADAPTER.attach_isolated_pid(&mut session, pid).unwrap();
         assert!(session.state::<State>().borrow().leaf.is_none());
+        assert!(session.state::<State>().borrow().fallback_sampler.is_none());
+        ADAPTER.activate_isolated_pid(&mut session, pid).unwrap();
+        assert!(session.state::<State>().borrow().fallback_sampler.is_some());
+        ADAPTER
+            .lifecycle_event(&mut session, LifecycleEvent::AgentExecuteEnd)
+            .unwrap();
         ADAPTER.finish(&mut session).unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.join("cpu-accounting.json")).unwrap()).unwrap();

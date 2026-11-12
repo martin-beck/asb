@@ -30,7 +30,10 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -467,6 +470,7 @@ pub struct Session {
     component_timings: BTreeMap<String, ComponentTiming>,
     process_identity: Option<ProcessIdentity>,
     measurement_guardian: Option<ProcessIdentity>,
+    snapshot_execution_started: Arc<AtomicBool>,
     execution_window: Rc<RefCell<execution_window::Window>>,
     incomplete_collectors: BTreeMap<String, String>,
     startup_ignored: Vec<String>,
@@ -731,6 +735,7 @@ impl Session {
             component_timings: BTreeMap::new(),
             process_identity: None,
             measurement_guardian: None,
+            snapshot_execution_started: Arc::new(AtomicBool::new(false)),
             execution_window: Rc::new(RefCell::new(execution_window::Window::default())),
             incomplete_collectors: BTreeMap::new(),
             startup_ignored: unavailable
@@ -773,6 +778,8 @@ impl Session {
         self.record_component_event(event);
         match event {
             collectors::LifecycleEvent::AgentExecuteBegin => {
+                self.snapshot_execution_started
+                    .store(true, Ordering::Release);
                 self.execution_window.borrow_mut().begin_execution_phase()
             }
             collectors::LifecycleEvent::AgentExecuteEnd => self.execution_window.borrow_mut().end(),
@@ -1133,6 +1140,32 @@ impl Session {
                     return Err("isolated process exited during collector attachment".into());
                 }
                 collector.attach_isolated_pid(self, pid)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Activate scoped observation only after the remote workload has proved
+    /// its stopped target actually resumed. Binding above deliberately does
+    /// not sample the cohort's launch or collector rendezvous interval.
+    pub(crate) fn activate_isolated_collectors(
+        &mut self,
+        pid: u32,
+        start_time_ticks: u64,
+    ) -> Result<(), String> {
+        let root = ProcessIdentity {
+            pid,
+            start_time_ticks,
+        };
+        if self.process_identity != Some(root) || !root.matches() {
+            return Err("isolated process identity changed before collector activation".into());
+        }
+        for collector in self.adapters.clone() {
+            if collector.requires_pid() {
+                if !root.matches() {
+                    return Err("isolated process exited during collector activation".into());
+                }
+                collector.activate_isolated_pid(self, pid)?;
             }
         }
         Ok(())
@@ -1512,6 +1545,7 @@ impl Session {
                     .ok_or("process-tree sampler target has exited")?,
                 executable,
                 arguments,
+                Arc::clone(&self.snapshot_execution_started),
                 captures[0].writer()?,
                 captures[1].writer()?,
             )
@@ -2022,6 +2056,51 @@ mod tests {
         assert!(document.get("count").is_none());
         assert_eq!(document["availability"], "unavailable");
         assert_eq!(document["calls"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn isolated_collectors_activate_only_after_effective_release() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Fixture;
+        static BINDINGS: AtomicUsize = AtomicUsize::new(0);
+        static ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+        impl collectors::CollectorAdapter for Fixture {
+            fn id(&self) -> &'static str {
+                "isolated-activation-fixture"
+            }
+            fn requires_pid(&self) -> bool {
+                true
+            }
+            fn attach_isolated_pid(&self, _: &mut Session, _: u32) -> Result<(), String> {
+                BINDINGS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn activate_isolated_pid(&self, _: &mut Session, _: u32) -> Result<(), String> {
+                ACTIVATIONS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        static FIXTURE: Fixture = Fixture;
+
+        BINDINGS.store(0, Ordering::SeqCst);
+        ACTIVATIONS.store(0, Ordering::SeqCst);
+        let directory = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("isolated-activation", None).attempt_id);
+        let mut session = Session::start_with_collectors(&directory, &[], None).unwrap();
+        session.add_test_adapter(&FIXTURE);
+        let root = ProcessIdentity::read(std::process::id()).unwrap();
+        session
+            .attach_isolated_pid(root.pid, root.start_time_ticks)
+            .unwrap();
+        assert_eq!(BINDINGS.load(Ordering::SeqCst), 1);
+        assert_eq!(ACTIVATIONS.load(Ordering::SeqCst), 0);
+        session
+            .activate_isolated_collectors(root.pid, root.start_time_ticks)
+            .unwrap();
+        assert_eq!(ACTIVATIONS.load(Ordering::SeqCst), 1);
+        drop(session);
+        fs::remove_dir_all(directory).unwrap();
     }
     use std::time::{SystemTime, UNIX_EPOCH};
 
