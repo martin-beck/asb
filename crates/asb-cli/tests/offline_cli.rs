@@ -8037,6 +8037,103 @@ fn isolated_cpu_pool_lease_conflict_and_failure_cleanup_qualification() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn replay_foreground_interrupt_stops_the_agent_and_preserves_the_existing_cassette() {
+    use std::time::{Duration, Instant};
+
+    let project = replay_project(1);
+    let cassette = project.0.join("tape.jsonl");
+    let recorded = std::fs::read(&cassette).unwrap();
+    let script_path = project.0.join(".asb-tools/pi/bin/pi");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    let hook = r#"if (behavior === 'interrupt-hold') {
+    const root = process.env.ASB_FIXTURE_BARRIER;
+    fs.mkdirSync(root, {recursive:true});
+    fs.writeFileSync(require('path').join(root, 'agent-pid'), String(process.pid));
+    while (true) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (behavior === 'replica-barrier') {"#;
+    assert!(script.contains("if (behavior === 'replica-barrier') {"));
+    std::fs::write(
+        &script_path,
+        script.replacen("if (behavior === 'replica-barrier') {", hook, 1),
+    )
+    .unwrap();
+    let hold = project.0.join("interrupt-hold");
+    let args = [
+        "run",
+        "benchmark.toml",
+        "--llm-replay",
+        "--cassette",
+        "tape.jsonl",
+    ];
+    let mut child = project
+        .invocation(
+            &project.0,
+            &args,
+            &[
+                ("ASB_FIXTURE_BEHAVIOR", "interrupt-hold"),
+                ("ASB_FIXTURE_BARRIER", hold.to_str().unwrap()),
+            ],
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = hold.join("agent-pid");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("replay ended before the held agent started: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replay agent did not consume the cassette"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let agent_pid = std::fs::read_to_string(&ready).unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success(),
+        "could not request foreground interruption"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let output = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status, status);
+            break output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground interruption did not settle the replay within 15 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        !output.status.success(),
+        "interrupted replay unexpectedly succeeded"
+    );
+    assert!(
+        stderr(&output).contains("ASB interruption requested graceful agent shutdown"),
+        "stderr={}",
+        stderr(&output)
+    );
+    assert!(
+        !std::path::Path::new("/proc")
+            .join(agent_pid.trim())
+            .exists(),
+        "held replay agent survived foreground interruption"
+    );
+    assert_eq!(std::fs::read(&cassette).unwrap(), recorded);
+    expect_success(&replay(&project, "success", &[]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 #[ignore = "requires ASB_TEST_CROSS_HOST_CONFIG from another architecture"]
 fn cross_host_cpu_pool_configuration_qualification() {
     use std::io::Write;

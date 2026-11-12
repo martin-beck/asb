@@ -18,6 +18,7 @@ const READ_BATCH: usize = 64 * 1024;
 const TICK: Duration = Duration::from_millis(5);
 const DRAIN: Duration = Duration::from_secs(1);
 const CLEANUP: Duration = Duration::from_secs(6);
+const INTERRUPTION_GRACE: Duration = Duration::from_secs(6);
 
 pub(super) struct DirectChild {
     child: Option<Child>,
@@ -100,6 +101,18 @@ impl DirectChild {
             std::thread::sleep(TICK);
         }
     }
+
+    #[cfg(unix)]
+    fn interrupt(&mut self) -> io::Result<()> {
+        if self.observed.is_some() {
+            return Ok(());
+        }
+        if unsafe { libc::kill(self.id() as libc::pid_t, libc::SIGINT) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
 }
 impl Drop for DirectChild {
     fn drop(&mut self) {
@@ -162,6 +175,19 @@ impl OwnedChild {
             Self::Direct(child) => child.stop(),
             #[cfg(target_os = "linux")]
             Self::Gated(child) => child.stop(),
+        }
+    }
+    pub fn interrupt(&mut self, deadline: Instant) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Self::Direct(child) => child.interrupt(),
+            #[cfg(not(unix))]
+            Self::Direct(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "graceful foreground interruption requires a supported process signal",
+            )),
+            #[cfg(target_os = "linux")]
+            Self::Gated(child) => child.interrupt_principal(deadline),
         }
     }
     pub fn failure(&mut self, primary: impl std::fmt::Display) -> String {
@@ -230,6 +256,7 @@ pub(super) struct CapturedOutput {
     pub stream_fault: bool,
     pub drain_timed_out: bool,
     pub timed_out: bool,
+    pub interrupted: bool,
 }
 
 impl CapturedOutput {
@@ -501,6 +528,8 @@ fn capture_inner(
     let mut stream_fault = false;
     let mut drain_timed_out = false;
     let mut timed_out = false;
+    let mut interrupted = false;
+    let mut interruption_deadline = None;
     loop {
         if status.is_none() {
             status = child.try_wait()?;
@@ -511,6 +540,16 @@ fn capture_inner(
             }
             if status.is_none() && Instant::now() >= execution_deadline {
                 timed_out = true;
+                status = Some(child.stop()?);
+            }
+            if status.is_none() && !interrupted && crate::interruption::requested() {
+                child.interrupt(Instant::now() + Duration::from_secs(1))?;
+                interrupted = true;
+                interruption_deadline = Some(Instant::now() + INTERRUPTION_GRACE);
+            }
+            if status.is_none()
+                && interruption_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 status = Some(child.stop()?);
             }
             if status.is_some() {
@@ -607,6 +646,7 @@ fn capture_inner(
         stream_fault,
         drain_timed_out,
         timed_out,
+        interrupted,
     })
 }
 

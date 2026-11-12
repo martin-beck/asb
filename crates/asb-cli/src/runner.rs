@@ -1587,9 +1587,9 @@ fn run_measured_agent_with_launch_progress(
             .map_err(|error| Error::Run(format!("cannot validate ASB gate launch: {error}")))?;
         Some(
             (if measure_principal {
-                crate::process_gate::Admission::with_measured_principal(validated)
+                crate::process_gate::Admission::with_measured_principal_control(validated)
             } else {
-                crate::process_gate::Admission::with_principal_observation(validated)
+                crate::process_gate::Admission::with_principal_control(validated)
             })
             .map_err(|error| {
                 Error::Run(format!(
@@ -1817,6 +1817,12 @@ fn run_measured_agent_with_launch_progress(
     }
     match result {
         Ok(captured) => {
+            if captured.interrupted {
+                issues.run_error(
+                    "ASB interruption requested graceful agent shutdown; owned work was settled"
+                        .into(),
+                );
+            }
             let only_truncated = captured.only_transcript_truncated();
             issues.output_error = captured.output_error;
             // A full bounded presentation buffer is not a broken capture:
