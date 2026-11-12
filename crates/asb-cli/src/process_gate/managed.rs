@@ -54,6 +54,22 @@ impl<'a> Admission<'a> {
         Ok(admission)
     }
 
+    /// Request an externally measured principal and retain the private
+    /// interruption capability for a foreground command.
+    pub(crate) fn with_measured_principal_control(
+        validated: crate::launch::ValidatedGate<'a>,
+    ) -> io::Result<Self> {
+        let mut admission = Self::prepare(validated, true, "controlled-measured-principal")?;
+        admission.command.env(super::MEASURE_PRINCIPAL, "1");
+        admission
+            .control
+            .as_mut()
+            .expect("controlled gate")
+            .0
+            .expect_principal();
+        Ok(admission)
+    }
+
     pub(crate) fn with_principal_observation(
         validated: crate::launch::ValidatedGate<'a>,
     ) -> io::Result<Self> {
