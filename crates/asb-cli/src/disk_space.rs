@@ -14,6 +14,15 @@ const BASE_PER_ATTEMPT_MIB: u64 = 512;
 const PROVIDER_SESSION_MIB: u64 = 256;
 const REPORT_OVERHEAD_MIB: u64 = 512;
 const SAFETY_NUMERATOR: u64 = 2;
+// A sealed replay reuses an existing task image and cassette. It still needs a
+// private writable workspace per active replica, but it does not reserve the
+// full source-image build envelope used by live and recording runs.
+const REPLAY_WORKSPACE_MIB: u64 = 1024;
+// Project-local installed agents are shared across a replay cohort. Per-replica
+// replay evidence is bounded, including for collectors whose live acquisition
+// may reserve a larger host-side cache or symbol/image staging area.
+const REPLAY_AGENT_MIB: u64 = 512;
+const REPLAY_COLLECTOR_MIB: u64 = 128;
 
 // Unit fixtures exercise later admission boundaries with deliberately tiny
 // temporary filesystems. Keep their capacity premise explicit and scoped to
@@ -73,6 +82,11 @@ pub(crate) fn benchmark(
         .and_then(|plan| plan.task_requirements.as_ref())
         .and_then(|requirements| requirements.disk_mib)
         .unwrap_or_else(|| workload_mib(&config.workload));
+    let workspace_mib = if mode == Some(tape::Mode::Replay) {
+        workload.min(REPLAY_WORKSPACE_MIB)
+    } else {
+        workload
+    };
     let collectors = policy.map_or_else(
         || configured_collectors(config),
         |plan| {
@@ -82,12 +96,23 @@ pub(crate) fn benchmark(
                 .collect()
         },
     );
-    let collector_mib = collectors
-        .into_iter()
-        .fold(0u64, |total, id| total.saturating_add(collector_mib(id)));
+    let collector_mib = collectors.into_iter().fold(0u64, |total, id| {
+        let estimate = collector_mib(id);
+        let per_replica = if mode == Some(tape::Mode::Replay) {
+            estimate.min(REPLAY_COLLECTOR_MIB)
+        } else {
+            estimate
+        };
+        total.saturating_add(per_replica)
+    });
+    let agent_mib = if mode == Some(tape::Mode::Replay) {
+        agent_mib(&config.agent).min(REPLAY_AGENT_MIB)
+    } else {
+        agent_mib(&config.agent)
+    };
     let non_workspace_per_attempt = BASE_PER_ATTEMPT_MIB
         .saturating_add(PROVIDER_SESSION_MIB)
-        .saturating_add(agent_mib(&config.agent))
+        .saturating_add(agent_mib)
         .saturating_add(collector_mib)
         .saturating_add(mode_mib(mode));
     // A compact configuration retains the official grade, submission and
@@ -106,7 +131,7 @@ pub(crate) fn benchmark(
         // growth and task sources that exceed their declared disk envelope.
         required_mib: non_workspace_per_attempt
             .saturating_mul(attempts)
-            .saturating_add(workload.saturating_mul(workspace_attempts))
+            .saturating_add(workspace_mib.saturating_mul(workspace_attempts))
             .saturating_mul(SAFETY_NUMERATOR)
             .saturating_add(REPORT_OVERHEAD_MIB),
         attempts,
@@ -291,6 +316,17 @@ mod tests {
         assert_eq!(live.attempts, 2);
         assert_eq!(recording.attempts, 6);
         assert!(recording.required_mib > live.required_mib * 3);
+    }
+
+    #[test]
+    fn sealed_replay_reserves_a_bounded_writable_workspace_not_a_fresh_image_build() {
+        let live = benchmark(&config(), None, 1, None);
+        let replay = benchmark(&config(), None, 1, Some(tape::Mode::Replay));
+        assert_eq!(live.attempts, replay.attempts);
+        assert!(replay.required_mib < live.required_mib / 2);
+        // The replay workspace remains explicitly reserved for every active
+        // replica instead of treating the existing cassette as cost-free.
+        assert!(replay.required_mib > REPLAY_WORKSPACE_MIB);
     }
 
     #[test]
