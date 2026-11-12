@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, preparation_failure_code, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 from asb_guest import experimental_snapshot_roots, isolate_snapshot_replay_network
@@ -105,6 +105,22 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_preparation_failure_code_classifies_pre_target_gate_errors(self):
+        cases = {
+            "cannot safely coordinate concurrent Docker gate resumes": "gate-lock",
+            "cannot open Docker gate-resume coordination lock": "gate-lock",
+            "Docker gate-resume coordination lock is not a private regular file": "gate-lock",
+            "cannot coordinate container execution gate resume": "gate-lock",
+            "workspace is not running": "workspace-not-running",
+            "one command is already running in this task workspace": "workspace-busy",
+            "container execution gate stderr exceeded its output limit before readiness": "gate-stderr-limit",
+            "execution transport returned no valid child exit status": "gate-transport-status",
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(preparation_failure_code(ExecutionError(message)), expected)
+        self.assertEqual(preparation_failure_code(ExecutionError("unrecognized failure")), "execution-error-other")
+
     def test_shared_launch_preparation_budget_accepts_long_setup_but_is_bounded(self):
         with patch("asb_guest.time.monotonic", return_value=100):
             self.assertEqual(PreparationBudget(7200).deadline, 7300)
