@@ -135,10 +135,14 @@ impl<'de> Deserialize<'de> for BatchAdmissionPolicy {
 impl BatchAdmissionPolicy {
     pub(crate) const fn current() -> Self {
         Self {
-            scope: "verified-material-shared-launch-collector-ready-v2",
+            scope: "verified-material-shared-launch-collector-ready-v3",
             material_seconds: 7200,
             launch_seconds: 7200,
-            collector_seconds: 300,
+            // The collector boundary is still before effective resume. Large
+            // Docker cohorts can legitimately queue bounded guest setup after
+            // the first stopped target arms this barrier, so it needs the
+            // same bounded preparation window as shared launch admission.
+            collector_seconds: 7200,
             material_arming: "batch-gate-construction",
             launch_arming: "first-post-material-slot-registration",
             collector_arming: "verified-stopped-target-cohort",
@@ -1250,7 +1254,7 @@ mod tests {
         let admission = BatchAdmissionPolicy::current();
         assert_eq!(admission.material_timeout().as_secs(), 7200);
         assert_eq!(admission.launch_timeout().as_secs(), 7200);
-        assert_eq!(admission.collector_timeout().as_secs(), 300);
+        assert_eq!(admission.collector_timeout().as_secs(), 7200);
         let manual = protocol_fingerprint(&config, &resolve(&config).unwrap(), caps, 2).unwrap();
         let first = protocol_fingerprint_with_admission(
             &config,
