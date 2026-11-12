@@ -1538,7 +1538,7 @@ impl Session {
             {
                 let error = "isolated launch gate returned invalid stopped-target identity";
                 if let Some(session) = context.measurements.as_deref_mut() {
-                    write_launch_gate_failure(session, error)?;
+                    write_launch_gate_failure(session, error, "target-identity")?;
                 }
                 return Err(error.into());
             }
@@ -1583,7 +1583,7 @@ impl Session {
                 }) {
                     Ok(target) => target,
                     Err(error) => {
-                        write_launch_gate_failure(session, &error)?;
+                        write_launch_gate_failure(session, &error, "target-attachment")?;
                         return Err(error);
                     }
                 };
@@ -1597,19 +1597,30 @@ impl Session {
         }
         if let Some(session) = context.measurements.as_deref_mut() {
             use crate::collectors::LifecycleEvent as Event;
-            session.event(Event::PhaseEnd(
-                crate::collectors::LifecyclePhase::AgentPreparation,
-            ))?;
+            let phase_end = Event::PhaseEnd(crate::collectors::LifecyclePhase::AgentPreparation);
+            if let Err(error) = session.event(phase_end) {
+                write_launch_gate_failure(session, &error, "lifecycle")?;
+                return Err(error);
+            }
             self.preparation_active = false;
-            session.event(Event::MeasurementsReady)?;
-            session.event(Event::AgentSpawn)?;
+            for event in [Event::MeasurementsReady, Event::AgentSpawn] {
+                if let Err(error) = session.event(event) {
+                    write_launch_gate_failure(session, &error, "lifecycle")?;
+                    return Err(error);
+                }
+            }
         }
         // The target remains stopped through collector binding. Resume is the
         // final common release: every admitted peer now has an equivalent
         // verified target and a bound collector set. Capture activation waits
         // for the workload-owned effective-release acknowledgement below.
-        if let Some(collector_ready) = context.collector_ready {
-            collector_ready.ready()?;
+        if let Some(collector_ready) = context.collector_ready
+            && let Err(error) = collector_ready.ready()
+        {
+            if let Some(session) = context.measurements.as_deref_mut() {
+                write_launch_gate_failure(session, &error, "collector-release")?;
+            }
+            return Err(error);
         }
         if let (Some(session), Some(target_sha256)) = (
             context.measurements.as_deref_mut(),
@@ -1617,13 +1628,18 @@ impl Session {
         ) {
             write_cohort_release_receipt(session, target_sha256, "collector_released")?;
         }
-        self.controller.send(
+        if let Err(error) = self.controller.send(
             &Request::Resume {
                 exec_id: &event["target"]["exec_id"],
             }
             .value()?,
             deadline,
-        )?;
+        ) {
+            if let Some(session) = context.measurements.as_deref_mut() {
+                write_launch_gate_failure(session, &error, "resume-dispatch")?;
+            }
+            return Err(error);
+        }
         if let (Some(session), Some(target_sha256)) = (
             context.measurements.as_deref_mut(),
             verified_target.as_ref(),
@@ -1867,6 +1883,7 @@ fn write_target_verification_failure(
 fn write_launch_gate_failure(
     session: &crate::measurements::Session,
     error: &str,
+    stage: &'static str,
 ) -> Result<(), String> {
     crate::measurements::write_json(
         &session.dir.join("launch-gate-failure.json"),
@@ -1874,6 +1891,7 @@ fn write_launch_gate_failure(
             "schema_version": 1,
             "scope": "isolated-launch-gate-failure-v1",
             "failure_code": launch_gate_failure_code(error),
+            "stage": stage,
         }),
     )
 }
