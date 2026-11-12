@@ -1546,11 +1546,17 @@ impl Session {
             }
             let (target, target_sha256) =
                 attach_target_before_launch(context.launch, context.collector_ready, || {
-                    let target = verify_stopped_target_until(
+                    let target = match verify_stopped_target_until(
                         &event["target"],
                         deadline,
                         super::target::verify,
-                    )?;
+                    ) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            write_target_verification_failure(session, &error)?;
+                            return Err(error);
+                        }
+                    };
                     let target_evidence = json!({
                         "schema_version":1,"scope":"verified-local-isolated-process-tree",
                         "host_pid":target.pid,"namespace_pid":target.namespace_pid,
@@ -1789,6 +1795,49 @@ fn write_cohort_release_receipt(
 
 fn target_evidence_digest(target: &Value) -> Result<String, String> {
     crate::evidence::json_bytes(target).map(|bytes| crate::cassette::digest(&bytes))
+}
+
+/// Stable, non-sensitive classification for a stopped-target observation.
+/// Never persist the verifier's text: it may contain an implementation detail
+/// while the category is sufficient to repair admission behavior.
+fn target_verification_code(error: &str) -> &'static str {
+    match error {
+        "isolated target is not proven to belong to this host; remote Docker measurement is not supported"
+        | "isolated target driver identity is invalid"
+        | "isolated measurement target has invalid identity fields" => "host-identity",
+        "isolated target lacks namespace PID evidence"
+        | "isolated target has invalid namespace PID evidence"
+        | "invalid isolated process start time"
+        | "isolated target is stale, not stopped, or does not match this host PID namespace" => {
+            "namespace-identity"
+        }
+        "isolated measurement requires identifiable cgroup-v2 membership"
+        | "isolated target does not match its owned container cgroup or changed during verification"
+        | "isolated driver does not belong to its owned container" => "container-cgroup",
+        "isolated target candidate scan exceeded its deadline"
+        | "isolated target candidate scan exceeded its bound"
+        | "isolated target process tree exceeds its bound"
+        | "isolated target task list is invalid"
+        | "isolated target children list is invalid"
+        | "isolated stopped target identity is ambiguous"
+        | "cannot identify the stopped agent under its owned driver"
+        | "isolated driver changed during target resolution" => "candidate-resolution",
+        _ => "other",
+    }
+}
+
+fn write_target_verification_failure(
+    session: &crate::measurements::Session,
+    error: &str,
+) -> Result<(), String> {
+    crate::measurements::write_json(
+        &session.dir.join("target-verification-failure.json"),
+        &json!({
+            "schema_version": 1,
+            "scope": "isolated-target-verification-failure-v1",
+            "failure_code": target_verification_code(error),
+        }),
+    )
 }
 
 fn abort_launch_boundaries(context: &ExecutionContext<'_>) {
@@ -2062,6 +2111,24 @@ mod tests {
             "isolated measurement target has invalid identity fields"
         );
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn stopped_target_verification_failure_codes_are_stable_and_non_sensitive() {
+        assert_eq!(
+            super::target_verification_code(
+                "isolated target does not match its owned container cgroup or changed during verification"
+            ),
+            "container-cgroup"
+        );
+        assert_eq!(
+            super::target_verification_code("isolated stopped target identity is ambiguous"),
+            "candidate-resolution"
+        );
+        assert_eq!(
+            super::target_verification_code("secret detail must not be persisted"),
+            "other"
+        );
     }
 
     #[test]
