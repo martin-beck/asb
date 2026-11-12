@@ -451,6 +451,7 @@ struct Configuration {
     workload: String,
     provider: String,
     model: String,
+    thinking_effort: Option<crate::benchmark::ThinkingEffort>,
     concurrency: usize,
     batch: Option<u64>,
     expected_execution: Option<Value>,
@@ -551,6 +552,7 @@ fn load_configuration(
         workload,
         provider,
         model,
+        thinking_effort: configuration.thinking_effort,
         concurrency,
         batch: None,
         expected_execution: None,
@@ -571,11 +573,12 @@ fn load_attempt(
     let index = context.index;
     let config = &context.config;
     let result_dir = &context.result_dir;
-    let (agent, workload, provider, model) = (
+    let (agent, workload, provider, model, thinking_effort) = (
         context.agent.clone(),
         context.workload.clone(),
         context.provider.clone(),
         context.model.clone(),
+        context.thinking_effort,
     );
     let concurrency = context.concurrency;
     let standalone = &context.standalone;
@@ -689,6 +692,7 @@ fn load_attempt(
             evaluation_completed: false,
             workload_evaluation,
             provider: provider.clone(),
+            thinking_effort,
             model: model.clone(),
             metrics: BTreeMap::new(),
             series: BTreeMap::new(),
@@ -1033,6 +1037,7 @@ fn load_attempt(
         evaluation_completed,
         workload_evaluation,
         provider: provider.clone(),
+        thinking_effort,
         model: model.clone(),
         metrics,
         series,
@@ -1447,6 +1452,7 @@ mod pricing_tests {
                 evaluation_completed: false,
                 workload_evaluation: "fixture".into(),
                 provider: provider.into(),
+                thinking_effort: None,
                 model: "fixture".into(),
                 metrics: BTreeMap::from([
                     ("token_usage.input_tokens".into(), 100.0),

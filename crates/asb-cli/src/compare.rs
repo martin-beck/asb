@@ -64,6 +64,8 @@ struct BenchmarkData {
     evaluation_completed: bool,
     workload_evaluation: String,
     provider: String,
+    /// Kept separate from `model`: pricing is keyed only by the raw provider model id.
+    thinking_effort: Option<crate::benchmark::ThinkingEffort>,
     model: String,
     metrics: BTreeMap<String, f64>,
     series: BTreeMap<String, TimeSeries>,
@@ -92,6 +94,16 @@ fn trial_label(benchmark: &BenchmarkData) -> &str {
 fn chart_label(benchmark: &BenchmarkData) -> String {
     let trial = trial_label(benchmark);
     format!("{}:{trial}", benchmark.workload)
+}
+
+fn model_display(benchmark: &BenchmarkData) -> String {
+    format!(
+        "{}:{}",
+        benchmark.model,
+        benchmark
+            .thinking_effort
+            .map_or("default", crate::benchmark::ThinkingEffort::as_str)
+    )
 }
 
 fn attempt_label(benchmark: &BenchmarkData) -> String {
@@ -802,9 +814,10 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 format!("Dispatch group {}: {} of {} selected replicas admitted; slots {}. {descriptor} Dispatch membership is not proof of simultaneous execution. Resumed measurements may belong to different cohorts.", dispatch_groups[cohort.id.as_str()], cohort.admitted_slots.len(), cohort.selected_replicas, cohort.admitted_slots.iter().map(usize::to_string).collect::<Vec<_>>().join(", "))
             },
         );
+        let model_display = model_display(benchmark);
         html.push_str(&format!("<tr data-dimension-benchmark=\"{}\" data-dimension-agent=\"{}\" data-dimension-provider=\"{}\" data-dimension-model=\"{}\" data-dimension-workload=\"{}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"details\">{}{}{}{}{}{}</td></tr>",
-            escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload),
-            escape(&benchmark.agent), escape(&benchmark.provider), escape(&benchmark.model), escape(&benchmark.workload), escape(trial), escape(&attempt),
+            escape(&benchmark.label), escape(&benchmark.agent), escape(&benchmark.provider), escape(&model_display), escape(&benchmark.workload),
+            escape(&benchmark.agent), escape(&benchmark.provider), escape(&model_display), escape(&benchmark.workload), escape(trial), escape(&attempt),
             runtime, success, tokens,
             format_args!("{primary_details}{}{}<p>{dispatch_details}</p>", evaluation_details, if benchmark.reconciled { "<p>Reconciled retained local outcome: current artifact consistency checked; no agent rerun or historical attestation.</p>" } else { "" }),
             format_args!("{approximate_details}{execution_details}{replay_selection_details}{native_replay_details}{normalization_details}{normalization_observation}{component_details}{analysis_details}"),
@@ -2619,6 +2632,57 @@ mod tests {
             error.contains("conflicting measurement identity `custom.a/b`"),
             "{error}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn report_keeps_thinking_effort_as_a_visible_separate_model_dimension() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-thinking-effort-report-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("sweep.toml"),
+            "configs=['default.toml','high.toml']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("default.toml"),
+            "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("high.toml"),
+            "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='fixture'\nthinking_effort='high'\n",
+        )
+        .unwrap();
+
+        run(root.join("sweep.toml").to_str().unwrap(), &mut Vec::new()).unwrap();
+        let output = root.join("results/sweep-comparison");
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(output.join("comparison.json")).unwrap())
+                .unwrap();
+        let rows = summary["benchmarks"].as_array().unwrap();
+        assert_eq!(rows[0]["model"], "fixture");
+        assert!(rows.iter().any(|row| row["thinking_effort"].is_null()));
+        assert!(rows.iter().any(|row| row["thinking_effort"] == "high"));
+        assert!(
+            rows.iter()
+                .any(|row| row["model_display"] == "fixture:default")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["model_display"] == "fixture:high")
+        );
+
+        let html = std::fs::read_to_string(output.join("report.html")).unwrap();
+        assert!(html.contains("fixture:default"));
+        assert!(html.contains("fixture:high"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

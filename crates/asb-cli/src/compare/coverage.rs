@@ -35,6 +35,7 @@ fn metric_scope_with_fingerprint(
         &benchmark.agent,
         &benchmark.provider,
         &benchmark.model,
+        benchmark.thinking_effort,
         &benchmark.workload,
         benchmark
             .selection
@@ -203,15 +204,16 @@ fn metric_group_label(key: &str) -> String {
     };
     let string = |index| values.get(index).and_then(serde_json::Value::as_str);
     let (Some(agent), Some(provider), Some(model), Some(workload), Some(kind)) =
-        (string(0), string(1), string(2), string(3), string(7))
+        (string(0), string(1), string(2), string(4), string(8))
     else {
         return key.to_owned();
     };
-    let mut label = format!("{agent} / {provider} / {model} / {workload} · {kind}");
-    if let Some(module) = string(5) {
+    let effort = string(3).unwrap_or("default");
+    let mut label = format!("{agent} / {provider} / {model}:{effort} / {workload} · {kind}");
+    if let Some(module) = string(6) {
         label.push_str(&format!(" · module {module}"));
     }
-    if let Some(fingerprint) = string(6) {
+    if let Some(fingerprint) = string(7) {
         let short = &fingerprint[..fingerprint.len().min(12)];
         label.push_str(&format!(" · plan {short}"));
     }
@@ -349,6 +351,7 @@ pub(super) fn populations(
                 &benchmark.agent,
                 &benchmark.provider,
                 &benchmark.model,
+                benchmark.thinking_effort,
                 &selection.workload,
                 dataset,
                 &benchmark.module,
@@ -358,7 +361,10 @@ pub(super) fn populations(
             let group = result.entry(key).or_insert_with(|| PopulationCoverage {
                 label: format!(
                     "{} / {} / {} / {}",
-                    benchmark.agent, benchmark.provider, benchmark.model, selection.workload
+                    benchmark.agent,
+                    benchmark.provider,
+                    super::model_display(benchmark),
+                    selection.workload
                 ),
                 ..Default::default()
             });
@@ -465,6 +471,7 @@ mod tests {
             evaluation_completed: !missing,
             workload_evaluation: "bundled-fixture".into(),
             provider: "fixture".into(),
+            thinking_effort: None,
             model: "fixture".into(),
             metrics: if missing {
                 BTreeMap::new()
@@ -553,8 +560,47 @@ mod tests {
     fn metric_group_html_uses_a_readable_identity_label() {
         let groups = metric_groups(&[row(false)]).unwrap();
         let html = metric_html(&groups);
-        assert!(html.contains("fixture / fixture / fixture / bug-fix · bundled-fixture"));
+        assert!(html.contains("fixture / fixture / fixture:default / bug-fix · bundled-fixture"));
         assert!(!html.contains("[&quot;fixture&quot;"));
+    }
+
+    #[test]
+    fn thinking_effort_partitions_metric_and_population_groups() {
+        let default = row(false);
+        let mut high = row(false);
+        high.thinking_effort = Some(crate::benchmark::ThinkingEffort::High);
+
+        assert_eq!(metric_groups(&[default, high]).unwrap().len(), 2);
+
+        let mut selected_default = row(false);
+        let selection = crate::workloads::TaskSelection {
+            module: None,
+            workload: "bug-fix".into(),
+            task_id: "case".into(),
+            dataset: Some(crate::workloads::session::DatasetIdentity {
+                source: "fixture".into(),
+                revision: "revision".into(),
+                split: "test".into(),
+            }),
+            evaluation_kind: "bundled-fixture".into(),
+            population_size: Some(1),
+        };
+        selected_default.selection = Some(selection.clone());
+        let mut selected_high = row(false);
+        selected_high.selection = Some(selection);
+        selected_high.thinking_effort = Some(crate::benchmark::ThinkingEffort::High);
+        let groups = populations(&[selected_default, selected_high]).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(
+            groups
+                .values()
+                .any(|group| group.label.contains("fixture:default"))
+        );
+        assert!(
+            groups
+                .values()
+                .any(|group| group.label.contains("fixture:high"))
+        );
     }
 
     #[test]

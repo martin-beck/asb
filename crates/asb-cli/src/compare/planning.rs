@@ -37,7 +37,7 @@ impl PreparedReport {
                 ("benchmark", &row.label),
                 ("agent", &row.agent),
                 ("provider", &row.provider),
-                ("model", &row.model),
+                ("model", &super::model_display(row)),
                 ("workload", &row.workload),
             ] {
                 dimensions.entry(dimension).or_default().push(value.clone());
@@ -63,6 +63,7 @@ impl PreparedReport {
                     &row.agent,
                     &row.provider,
                     &row.model,
+                    row.thinking_effort,
                     &row.workload,
                     coverage::group_kind(row),
                     &row.module,
