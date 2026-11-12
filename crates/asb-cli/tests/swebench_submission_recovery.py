@@ -60,7 +60,7 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(task.checked(['git', 'status']), b'ok')
         options = task.workspace.execute.call_args.kwargs
         self.assertEqual(options['timeout'], 600)
-        self.assertEqual(options['preparation_timeout'], 600)
+        self.assertEqual(options['preparation_timeout'], 7200)
         task.checked(['git', 'status'], timeout=4)
         self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 4)
         task.preparing_repository = False

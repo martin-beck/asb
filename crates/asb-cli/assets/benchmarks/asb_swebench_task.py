@@ -17,7 +17,13 @@ from asb_resources import ResourceJournal
 SUBMISSION_GIT_DIR = "/opt/asb-swebench-baseline.git"
 SUBMISSION_WORKTREE = "/testbed"
 # Repository setup has its own bounds; neither is an agent execution budget.
-_REPOSITORY_GATE_PREPARATION_SECONDS = 600
+# Repository checks run through the same host-wide Docker gate as every
+# concurrent replay replica.  Their own command runtime remains bounded at
+# ten minutes, but queued gate admission must fit inside the workload's
+# documented SWE-bench environment-preparation ceiling.  Otherwise a healthy
+# command can finish with exit 0 after its local gate watchdog has already
+# expired under a large cohort.
+_REPOSITORY_GATE_PREPARATION_SECONDS = 7200
 _REPOSITORY_COMMAND_SECONDS = 600
 _PREPARED_BASELINE_RAW_CACHE_VERSION = "swebench-prepared-baseline-v1"
 _PREPARED_BASELINE_MATERIAL_CACHE_VERSION = "swebench-prepared-baseline-v2"
