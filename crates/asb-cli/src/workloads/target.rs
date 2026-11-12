@@ -138,6 +138,25 @@ pub(crate) fn verify(value: &serde_json::Value) -> Result<LocalTarget, String> {
     verify_descendant_at(value, Path::new("/proc"))
 }
 
+/// Whether a failed local observation can settle while Docker publishes a
+/// newly-stopped process tree.  Identity/schema failures are deliberately
+/// excluded: retrying malformed controller data must not weaken admission.
+pub(crate) fn retryable_verification_error(error: &str) -> bool {
+    matches!(
+        error,
+        "cannot read isolated process identity; check local /proc access"
+            | "invalid isolated process start time"
+            | "isolated target lacks namespace PID evidence"
+            | "isolated target has invalid namespace PID evidence"
+            | "isolated target is stale, not stopped, or does not match this host PID namespace"
+            | "isolated measurement requires identifiable cgroup-v2 membership"
+            | "isolated target does not match its owned container cgroup or changed during verification"
+            | "isolated target candidate scan exceeded its deadline"
+            | "isolated driver changed during target resolution"
+            | "cannot identify the stopped agent under its owned driver"
+    )
+}
+
 /// Prove that the exact stopped target previously admitted to the cohort has
 /// actually resumed.  Docker accepting a control archive only proves delivery
 /// to the daemon; it does not prove that the stopped process consumed it.
