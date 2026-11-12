@@ -79,6 +79,14 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(options['timeout'], 60)
         self.assertEqual(options['preparation_timeout'], 1234)
         budget.remaining.assert_called_once_with()
+        ambient_budget = MagicMock()
+        ambient_budget.remaining.return_value = 2345
+        task._asb_preparation_budget = ambient_budget
+        task.checked(['git', 'status'], timeout=60)
+        options = task.workspace.execute.call_args.kwargs
+        self.assertEqual(options['timeout'], 60)
+        self.assertEqual(options['preparation_timeout'], 2345)
+        ambient_budget.remaining.assert_called_once_with()
 
     def test_history_fetch_has_a_separate_bounded_setup_budget(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
