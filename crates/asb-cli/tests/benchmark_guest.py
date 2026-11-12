@@ -113,19 +113,25 @@ class GuestBootstrapTests(unittest.TestCase):
 
     def test_shared_preparation_budget_is_scoped_to_agent_setup(self):
         budget = PreparationBudget(1800)
-        task = SimpleNamespace()
-        observed = []
-        def capture(*args):
-            observed.append(getattr(task, "_asb_preparation_budget"))
-            return {}
-        with patch("asb_guest._execute_agent", side_effect=capture):
-            execute_agent(task, {}, None, None, None, preparation_budget=budget)
-        self.assertEqual(observed, [budget])
-        self.assertFalse(hasattr(task, "_asb_preparation_budget"))
-        with patch("asb_guest._execute_agent", side_effect=ExecutionError("fixture failure")):
-            with self.assertRaisesRegex(ExecutionError, "fixture failure"):
+        with tempfile.TemporaryDirectory() as directory:
+            task = SimpleNamespace(artifacts=Path(directory))
+            observed = []
+            def capture(*args):
+                observed.append(getattr(task, "_asb_preparation_budget"))
+                return {}
+            with patch("asb_guest._execute_agent", side_effect=capture):
                 execute_agent(task, {}, None, None, None, preparation_budget=budget)
-        self.assertFalse(hasattr(task, "_asb_preparation_budget"))
+            self.assertEqual(observed, [budget])
+            self.assertFalse(hasattr(task, "_asb_preparation_budget"))
+            self.assertEqual(json.loads((task.artifacts / "agent-preparation-budget.json").read_text()), {
+                "requested_seconds": None, "schema_version": 1, "scope": "agent-preparation-budget-v1"})
+            with patch("asb_guest._execute_agent", side_effect=ExecutionError("fixture failure")):
+                with self.assertRaisesRegex(ExecutionError, "fixture failure"):
+                    execute_agent(task, {}, None, None, None, preparation_budget=budget)
+            self.assertFalse(hasattr(task, "_asb_preparation_budget"))
+            failure = json.loads((task.artifacts / "agent-preparation-failure.json").read_text())
+            self.assertEqual(failure["scope"], "agent-preparation-budget-failure-v1")
+            self.assertFalse(failure["expired"])
 
     def test_shared_cohort_window_is_forwarded_only_when_bounded(self):
         with tempfile.TemporaryDirectory() as directory:

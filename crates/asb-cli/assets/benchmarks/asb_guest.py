@@ -27,6 +27,23 @@ MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 
+def write_preparation_budget_artifact(task, name, value):
+    artifacts = getattr(task, "artifacts", None)
+    if not isinstance(artifacts, Path):
+        return
+    if name not in {"agent-preparation-budget.json", "agent-preparation-failure.json"}:
+        raise ExecutionError("invalid preparation budget artifact name")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    descriptor = os.open(artifacts / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        written = 0
+        while written < len(encoded):
+            written += os.write(descriptor, encoded[written:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def experimental_snapshot_roots(configured):
     if configured is None:
         return []
@@ -614,6 +631,14 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
         preparation_budget = PreparationBudget(seconds)
     if preparation_budget is not None:
         preparation_budget.on_failure = on_preparation_failure
+        try:
+            write_preparation_budget_artifact(task, "agent-preparation-budget.json", {
+                "schema_version": 1,
+                "scope": "agent-preparation-budget-v1",
+                "requested_seconds": seconds,
+            })
+        except FileExistsError:
+            pass
     upstream = cancelled
     if preparation_budget is not None:
         cancelled = ForwardingCancellation(lambda: preparation_budget.expired() or
@@ -629,7 +654,15 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
         try:
             return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted)
         except BaseException:
-            if preparation_budget is not None:preparation_budget.fail()
+            if preparation_budget is not None:
+                remaining = max(0.0, preparation_budget.deadline - time.monotonic())
+                write_preparation_budget_artifact(task, "agent-preparation-failure.json", {
+                    "schema_version": 1,
+                    "scope": "agent-preparation-budget-failure-v1",
+                    "remaining_seconds": round(remaining, 3),
+                    "expired": preparation_budget.expired(),
+                })
+                preparation_budget.fail()
             raise
         finally:
             if previous_budget is absent:
