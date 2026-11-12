@@ -965,9 +965,10 @@ class ExecutionTests(unittest.TestCase):
             def close(self):
                 super().close()
                 raise RUNTIME.ExecutionError("launcher worker did not settle")
-        with workspace,self.assertRaisesRegex(RUNTIME.ExecutionError,"launcher worker"):
+        with workspace,self.assertRaisesRegex(RUNTIME.ExecutionError,"launcher worker") as raised:
             workspace.execute(["agent"],transport_factory=FailedClose)
         self.assertIn("kill",container.events)
+        self.assertEqual(raised.exception.asb_preparation_phase,"gate-release")
 
     def test_default_transport_close_is_idempotent_but_never_forgets_failure(self):
         class Cancelled(BaseException):pass
