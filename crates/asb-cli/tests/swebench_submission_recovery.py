@@ -137,6 +137,30 @@ class SubmissionRecoveryTests(unittest.TestCase):
             with self.assertRaises(task_module.ExecutionError):
                 task.agent_environment({})
 
+    def test_agent_environment_retries_only_read_only_probes(self):
+        task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
+        task.row = {'base_commit':'a' * 40}
+        calls = []
+        def checked(argv, **options):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise task_module.ExecutionError('transient fixture failure')
+            if argv[0] == '/bin/bash':
+                return (b'/opt/miniconda3/envs/testbed/bin\0/opt/miniconda3/envs/testbed\0'
+                        b'testbed\0' + b'1\0')
+            return b'1637276904\n'
+        task.checked = checked
+        sdk = types.ModuleType('swebench.image_builder.constants')
+        sdk.CONTAINER_ENV_NAME = 'testbed'
+        with patch.dict(sys.modules, {'swebench':types.ModuleType('swebench'),
+                                     'swebench.image_builder':types.ModuleType('swebench.image_builder'),
+                                     'swebench.image_builder.constants':sdk}), \
+                patch.object(task_module.time, 'sleep') as sleep:
+            result = task.agent_environment({})
+        self.assertEqual(result['CONDA_DEFAULT_ENV'], 'testbed')
+        self.assertEqual([call[0] for call in calls], ['/bin/bash', '/bin/bash', 'git'])
+        sleep.assert_called_once_with(0.1)
+
     def test_full_git_object_ids_preserve_distinct_commits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
