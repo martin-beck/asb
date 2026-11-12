@@ -619,11 +619,26 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
         cancelled = ForwardingCancellation(lambda: preparation_budget.expired() or
             (upstream.is_set() if upstream is not None else False), [])
     with ExitStack() as resources:
+        absent = object()
+        previous_budget = getattr(task, "_asb_preparation_budget", absent)
+        if preparation_budget is not None:
+            # Workload adapters may issue several private Docker helper
+            # commands while preparing the final agent. Give all of those
+            # commands the one cohort-wide startup budget.
+            task._asb_preparation_budget = preparation_budget
         try:
             return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted)
         except BaseException:
             if preparation_budget is not None:preparation_budget.fail()
             raise
+        finally:
+            if previous_budget is absent:
+                try:
+                    delattr(task, "_asb_preparation_budget")
+                except AttributeError:
+                    pass
+            else:
+                task._asb_preparation_budget = previous_budget
 
 
 def isolate_snapshot_replay_network(task):

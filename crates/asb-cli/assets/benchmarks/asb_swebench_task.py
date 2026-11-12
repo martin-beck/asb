@@ -357,10 +357,11 @@ class SweBenchTask:
             timeout = _REPOSITORY_COMMAND_SECONDS
         options = {"environment": environment, "timeout": timeout,
                    "output_limit": output_limit, "cancelled": self.cancelled}
+        if preparation_budget is None:
+            preparation_budget = getattr(self, "_asb_preparation_budget", None)
         if preparation_budget is not None:
-            # Agent-environment activation precedes the stopped target, so its
-            # Docker exec startup belongs to the cohort-wide launch budget.
-            # Preserve the helper's own short command timeout independently.
+            # Every helper before the stopped target shares the cohort-wide
+            # startup deadline, while retaining its own command timeout.
             options["preparation_timeout"] = preparation_budget.remaining()
         elif self.preparing_repository:
             options["preparation_timeout"] = _REPOSITORY_GATE_PREPARATION_SECONDS
