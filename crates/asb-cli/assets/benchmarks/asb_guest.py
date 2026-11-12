@@ -62,10 +62,18 @@ def preparation_failure_code(error):
         ("one command is already running in this task workspace", "workspace-busy"),
         ("container execution gate stderr exceeded", "gate-stderr-limit"),
         ("execution transport returned no valid child exit status", "gate-transport-status"),
+        ("Docker did not identify the running execution target", "target-unavailable"),
+        ("execution transport returned a contradictory target identity", "target-identity"),
         ("cannot read isolated measurement identity", "measurement-identity"),
         ("isolated process did not return valid measurement identity", "measurement-identity"),
         ("container execution gate could not be resumed", "gate-release"),
+        ("container application gate could not be resumed", "gate-release"),
         ("application gate resume control", "gate-release"),
+        ("Docker did not create application gate resume control", "gate-release"),
+        ("execution was cancelled before collector attachment completed", "collector-attachment"),
+        ("execution release was accepted without a valid target identity", "release-identity"),
+        ("ASB controller disconnected", "controller-disconnected"),
+        ("ASB controller did not respond before the protocol deadline", "controller-timeout"),
     ]:
         if message.startswith(prefix):
             return code
