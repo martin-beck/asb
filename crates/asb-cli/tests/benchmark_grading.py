@@ -57,6 +57,17 @@ class RetainedGradingTests(unittest.TestCase):
             if path.is_file():path.chmod(0o600)
         return fixture,value,directory
 
+    def test_retained_unresolved_grade_requires_official_test_application_receipt(self):
+        fixture,value = self.new(ungraded=False)
+        directory = fixture.root/("evaluation-"+"e"*32)
+        (directory/swe.TEST_APPLICATION_RECEIPT).write_text(json.dumps({
+            "schema_version":1,"harness_revision":swe.HARNESS_REVISION,
+            "task_id":"case-1","official_test_patch_applied":False}))
+        with patch.object(swe,"sdk_identity",return_value=fixture.sdk), \
+             patch.object(swe,"read_task",return_value=self.catalog(fixture)):
+            with self.assertRaisesRegex(retained.RetainedError,"test patch was applied"):
+                swe.grade_retained(value,"unused",threading.Event())
+
     def reconstruct(self,fixture,value):
         with patch.object(swe,"sdk_identity",return_value=fixture.sdk), \
              patch.object(swe,"read_task",return_value=self.catalog(fixture)), \

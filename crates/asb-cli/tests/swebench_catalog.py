@@ -227,7 +227,7 @@ class EvaluationTests(unittest.TestCase):
                                            directory / "submission.patch", directory / suffix,
                                            60, executor)
 
-    def executor(self, resolved, wrong_task=False, applied=True, expected_image=None):
+    def executor(self, resolved, wrong_task=False, applied=True, test_patch_applied=True, expected_image=None):
         def execute(arguments, directory, log, timeout):
             self.assertEqual(timeout, 180)
             self.assertEqual(arguments[arguments.index("--max_workers") + 1], "1")
@@ -253,6 +253,12 @@ class EvaluationTests(unittest.TestCase):
             (directory / "sdk-identity.json").write_text(json.dumps({
                 "revision": CATALOG.HARNESS_REVISION, "version": "synthetic",
             }))
+            (directory / CATALOG.TEST_APPLICATION_RECEIPT).write_text(json.dumps({
+                "schema_version": 1,
+                "harness_revision": CATALOG.HARNESS_REVISION,
+                "task_id": "owner__repo-1",
+                "official_test_patch_applied": test_patch_applied,
+            }))
             return 0
         return execute
 
@@ -275,6 +281,29 @@ class EvaluationTests(unittest.TestCase):
                 self.assertFalse(result["resolved"])
                 self.assertEqual(result["outcome"], "evaluation_error")
                 self.assertEqual(result["reason"], reason)
+
+    def test_incomplete_official_test_application_never_becomes_a_binary_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.evaluate(temporary, self.executor(False, test_patch_applied=False))
+            self.assertFalse(result["resolved"])
+            self.assertEqual(result["outcome"], "evaluation_error")
+            self.assertEqual(result["reason"], "official_test_patch_not_applied")
+            self.assertIn("official_report", result)
+            self.assertIn("official_test_application", result)
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.evaluate(temporary, self.executor(False, test_patch_applied=True))
+            self.assertFalse(result["resolved"])
+            self.assertEqual(result["outcome"], "unresolved")
+            self.assertEqual(result["reason"], "official_tests_not_resolved")
+
+        def missing_receipt(arguments, directory, log, timeout):
+            result = self.executor(False)(arguments, directory, log, timeout)
+            (directory / CATALOG.TEST_APPLICATION_RECEIPT).unlink()
+            return result
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.evaluate(temporary, missing_receipt)
+            self.assertEqual(result["outcome"], "evaluation_error")
+            self.assertEqual(result["reason"], "official_test_application_missing")
 
     def test_empty_submission_does_not_launch_the_harness_and_timeouts_are_explicit(self):
         def unexpected(*args):

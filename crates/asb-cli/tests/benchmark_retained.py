@@ -50,6 +50,7 @@ class Fixture:
             submission.update(patch_sha256=digest,patch_bytes=len(body),base_commit="b"*40)
             evaluator_image = {**image,"declared_image":image["image_id"]}
             result.update(patch_sha256=digest,image=evaluator_image,harness_revision=swe.HARNESS_REVISION,official_report="report.json",official_summary="summary.json")
+            result["official_test_application"] = swe.TEST_APPLICATION_RECEIPT
             self.write("evaluation-fixture/dataset.json",[{"instance_id":"case-1","base_commit":"b"*40,"image":image["image_id"]}])
             self.write("evaluation-fixture/evaluation.json",result)
             self.write("evaluation-fixture/submission.jsonl",{"instance_id":"case-1","model_patch":body.decode()})
@@ -57,6 +58,9 @@ class Fixture:
             self.write("evaluation-fixture/summary.json",{"total_instances":1,"submitted_ids":["case-1"],"completed_ids":["case-1"],"resolved_ids":["case-1"] if resolved else []})
             self.write("evaluation-fixture/sdk-identity.json",self.sdk)
             self.write("evaluation-fixture/image-identity.json",evaluator_image)
+            self.write("evaluation-fixture/official-test-application.json",{
+                "schema_version":1,"harness_revision":swe.HARNESS_REVISION,
+                "task_id":"case-1","official_test_patch_applied":True})
         elif workload.endswith("1.0"):
             self.module = terminal
             result.update(test_results={"test_case":"passed" if resolved else "failed"},failure_mode="none",parse_failure="none")
