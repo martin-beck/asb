@@ -811,7 +811,7 @@ class ManagedDockerWorkspace:
             try:
                 if stream is not None:
                     self._close_stream(stream)
-            except BaseException:
+            except BaseException as error:
                 # Closing bridge IO is not proof that its actual client (or
                 # launcher worker) settled. Quiesce the owned namespace too.
                 reset_needed.set()
@@ -819,6 +819,8 @@ class ManagedDockerWorkspace:
                     container.kill()
                 except Exception:
                     pass
+                if isinstance(error, ExecutionError):
+                    error.asb_preparation_phase = preparation_phase
                 raise
             finally:
                 if reset_needed.is_set() and not watchdog.is_alive() and not watchdog_error:
