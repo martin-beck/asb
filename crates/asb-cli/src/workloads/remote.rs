@@ -1536,7 +1536,11 @@ impl Session {
                     Some("docker-daemon-host" | "container-namespace")
                 )
             {
-                return Err("isolated launch gate returned invalid stopped-target identity".into());
+                let error = "isolated launch gate returned invalid stopped-target identity";
+                if let Some(session) = context.measurements.as_deref_mut() {
+                    write_launch_gate_failure(session, error)?;
+                }
+                return Err(error.into());
             }
         }
         if let Some(session) = context.measurements.as_deref_mut() {
@@ -1545,7 +1549,7 @@ impl Session {
                 return Err("isolated execution returned a second measurement target".into());
             }
             let (target, target_sha256) =
-                attach_target_before_launch(context.launch, context.collector_ready, || {
+                match attach_target_before_launch(context.launch, context.collector_ready, || {
                     let target = match verify_stopped_target_until(
                         &event["target"],
                         deadline,
@@ -1576,7 +1580,13 @@ impl Session {
                     }
                     write_cohort_release_receipt(session, &target_sha256, "collector_attached")?;
                     Ok((target, target_sha256))
-                })?;
+                }) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        write_launch_gate_failure(session, &error)?;
+                        return Err(error);
+                    }
+                };
             self.resume_target = Some(target);
             verified_target = Some(target_sha256);
         } else if let Some(launch) = context.launch {
@@ -1826,6 +1836,20 @@ fn target_verification_code(error: &str) -> &'static str {
     }
 }
 
+/// Stable, non-sensitive classification for any shared launch-gate rejection.
+/// This covers the wire-identity check which precedes target verification and
+/// admission failures raised while binding the collector set.
+fn launch_gate_failure_code(error: &str) -> &'static str {
+    match error {
+        "isolated launch gate returned invalid stopped-target identity" => {
+            "invalid-target-identity"
+        }
+        "shared launch preparation deadline exceeded"
+        | "replica failed before shared launch readiness" => "shared-readiness",
+        _ => target_verification_code(error),
+    }
+}
+
 fn write_target_verification_failure(
     session: &crate::measurements::Session,
     error: &str,
@@ -1836,6 +1860,20 @@ fn write_target_verification_failure(
             "schema_version": 1,
             "scope": "isolated-target-verification-failure-v1",
             "failure_code": target_verification_code(error),
+        }),
+    )
+}
+
+fn write_launch_gate_failure(
+    session: &crate::measurements::Session,
+    error: &str,
+) -> Result<(), String> {
+    crate::measurements::write_json(
+        &session.dir.join("launch-gate-failure.json"),
+        &json!({
+            "schema_version": 1,
+            "scope": "isolated-launch-gate-failure-v1",
+            "failure_code": launch_gate_failure_code(error),
         }),
     )
 }
@@ -2128,6 +2166,16 @@ mod tests {
         assert_eq!(
             super::target_verification_code("secret detail must not be persisted"),
             "other"
+        );
+        assert_eq!(
+            super::launch_gate_failure_code(
+                "isolated launch gate returned invalid stopped-target identity"
+            ),
+            "invalid-target-identity"
+        );
+        assert_eq!(
+            super::launch_gate_failure_code("replica failed before shared launch readiness"),
+            "shared-readiness"
         );
     }
 
