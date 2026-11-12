@@ -541,6 +541,8 @@ class GuestBootstrapTests(unittest.TestCase):
                 bootstrap=dict(runtime_tools=["node"],assets=[]),request=dict(config=dict(agent="pi")))
             execute_agent(task,request,None,None,None)
             self.assertEqual([call[0][-1] for call in calls],["node","pi","__asb-agent"])
+            self.assertEqual([call[1]["preparation_timeout"] for call in calls], [1800, 1400, 1000])
+            self.assertEqual([call[1]["timeout"] for call in calls], [900, 900, 12])
             self.assertEqual(deadlines,[1900])
 
     def test_expired_bootstrap_notifies_before_relay_teardown_and_never_launches_client(self):

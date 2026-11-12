@@ -541,6 +541,13 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     for selected in [*runtimes, *([] if package_tree is not None or python_tree is not None or tool in native_tools else [tool])]:
         result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
                                         environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
+                                        # Docker exec startup participates in the same
+                                        # cohort-wide preparation queue as the later
+                                        # stopped application gate. Keep the installer
+                                        # command itself bounded to 15 minutes, but do
+                                        # not silently restore Workspace.execute's
+                                        # shorter default startup deadline here.
+                                        preparation_timeout=preparation_budget.remaining() if preparation_budget else None,
                                         cancelled=ForwardingCancellation(cancelled, relays),
                                         on_preparation_failure=preparation_budget.fail if preparation_budget else None)
         check_budget()
