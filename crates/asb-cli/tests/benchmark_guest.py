@@ -132,6 +132,8 @@ class GuestBootstrapTests(unittest.TestCase):
             failure = json.loads((task.artifacts / "agent-preparation-failure.json").read_text())
             self.assertEqual(failure["scope"], "agent-preparation-budget-failure-v1")
             self.assertFalse(failure["expired"])
+            self.assertFalse(failure["upstream_cancelled"])
+            self.assertEqual(failure["failure_kind"], "execution-error")
 
     def test_shared_cohort_window_is_forwarded_only_when_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
