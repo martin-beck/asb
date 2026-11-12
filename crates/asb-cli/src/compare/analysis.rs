@@ -228,7 +228,10 @@ pub(super) fn cohort_html(report: &crate::measurements::analysis::cohort::Report
                 .as_f64()
                 .map_or_else(|| "unavailable".into(), |v| format!("{v:.3}"))
         };
-        html.push_str(&format!("<tr><td><strong>{}</strong><br>{} / {}<br>{}:{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} {}</td></tr>", text(&c["context"]["agent"]), text(&c["context"]["provider"]), text(&c["context"]["model"]), text(&c["context"]["workload"]), text(&c["context"]["trial"]), c["admitted_replicas"], number("peak_live_principals_lower_bound"), number("multiple_principals_overlap_lower_bound_ms"), number("agent_phase_span_upper_bound_ms"), number("completed_agent_phases_per_second_lower_bound"), text(&c["status"]), c["unavailable_reason"].as_str().map(escape).unwrap_or_default()));
+        let effort = c["context"]["thinking_effort"]
+            .as_str()
+            .unwrap_or("default");
+        html.push_str(&format!("<tr><td><strong>{}</strong><br>{} / {}:{}<br>{}:{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} {}</td></tr>", text(&c["context"]["agent"]), text(&c["context"]["provider"]), text(&c["context"]["model"]), escape(effort), text(&c["context"]["workload"]), text(&c["context"]["trial"]), c["admitted_replicas"], number("peak_live_principals_lower_bound"), number("multiple_principals_overlap_lower_bound_ms"), number("agent_phase_span_upper_bound_ms"), number("completed_agent_phases_per_second_lower_bound"), text(&c["status"]), c["unavailable_reason"].as_str().map(escape).unwrap_or_default()));
     }
     html.push_str("</tbody></table></div></section>");
     html
@@ -248,6 +251,52 @@ pub(super) fn graph_section(name: &str) -> Option<crate::collectors::GraphSectio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cohort_html_uses_model_effort_without_replacing_raw_model_evidence() {
+        let cohort = crate::measurements::ExecutionCohort {
+            id: "a-123".into(),
+            selected_replicas: 1,
+            admitted_slots: vec![1],
+            dispatch: None,
+        };
+        let root = json!({"pid":42,"start_time_ticks":1});
+        let documents = BTreeMap::from([
+            (
+                "execution-window".into(),
+                json!({"schema_version":1,"status":"observed","clock":"CLOCK_MONOTONIC","clock_domain":"a".repeat(64),"scope":"verified-native-agent-principal-lifetime","root":root,"live_observations":3,"release_bound_ns":1_000_000_000_u64,"start_bound_ns":2_000_000_000_u64,"end_bound_ns":7_000_000_000_u64,"exit_bound_ns":10_000_000_000_u64}),
+            ),
+            (
+                "measurement-target".into(),
+                json!({"schema_version":1,"scope":"agent-process-tree","source":"owned-stopped-native-principal","root":root,"excluded_guardian":{"pid":900,"start_time_ticks":1},"excluded_controller_pid":901}),
+            ),
+        ]);
+        let metrics = BTreeMap::new();
+        let report =
+            crate::measurements::analysis::cohort::analyze(&[crate::collectors::ReportRow {
+                label: "fixture",
+                agent: "pi",
+                provider: "openrouter",
+                model: "raw-model-id",
+                thinking_effort: Some(crate::benchmark::ThinkingEffort::XHigh),
+                workload: "bug-fix",
+                trial: "default",
+                configured_concurrency: 1,
+                replica_index: Some(1),
+                execution_cohort: Some(&cohort),
+                metrics: &metrics,
+                components: None,
+                documents: &documents,
+            }]);
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(serialized["cohorts"][0]["context"]["model"], "raw-model-id");
+        assert_eq!(
+            serialized["cohorts"][0]["context"]["thinking_effort"],
+            "xhigh"
+        );
+        assert!(cohort_html(&report).contains("raw-model-id:xhigh"));
+    }
+
     #[test]
     fn grouped_counter_report_is_recomputed_with_quality_and_scope_guards() {
         let counter = |n| json!({"observed_integer_count":n,"observed_rows":1,"unavailable_rows":0,"unknown_quality_rows":0,"known_event_runtime_ns":1000,"min_running_pct":100,"max_running_pct":100});

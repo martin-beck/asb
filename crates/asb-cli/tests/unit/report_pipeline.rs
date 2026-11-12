@@ -1929,8 +1929,20 @@ fn comparison_regenerates_cohort_overlap_from_verified_windows_without_reusing_s
     assert!(
         html.contains("cohort-analysis.json") && html.contains("Observed agent lifetime overlap")
     );
-    assert!(html.contains("cohort-lifetimes-0001.svg") && html.contains("chart-expand"));
-    let svg = fs::read_to_string(report.join("cohort-lifetimes-0001.svg")).unwrap();
+    let lifetime = fs::read_dir(&report)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .filter(|name| name.starts_with("cohort-lifetimes-0001-"))
+                .map(str::to_owned)
+        })
+        .expect("configuration-labeled cohort lifetime graph");
+    assert!(html.contains(&lifetime) && html.contains("chart-expand"));
+    assert!(lifetime.contains("fixture-fixture-fixture-default-bug-fix-default"));
+    let svg = fs::read_to_string(report.join(&lifetime)).unwrap();
     assert!(svg.contains("Replica 1") && svg.contains("Replica 2") && svg.contains("(s)</text>"));
     let window = fixture
         .0
@@ -1947,7 +1959,7 @@ fn comparison_regenerates_cohort_overlap_from_verified_windows_without_reusing_s
         "different_clock_domains"
     );
     assert!(evidence["cohorts"][0]["multiple_principals_overlap_lower_bound_ms"].is_null());
-    assert!(!report.join("cohort-lifetimes-0001.svg").exists());
+    assert!(!report.join(lifetime).exists());
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(window).unwrap()).unwrap(),
         invalid

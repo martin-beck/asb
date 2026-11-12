@@ -560,6 +560,7 @@ mod report_tests {
             agent: "fixture-agent",
             provider: "fixture-provider",
             model: "fixture-model",
+            thinking_effort: None,
             workload: "fixture-workload",
             trial: "fixture-trial",
             configured_concurrency: 1,

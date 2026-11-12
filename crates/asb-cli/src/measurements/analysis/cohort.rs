@@ -1,6 +1,6 @@
 //! Common-clock cohort observations. Dispatch membership alone proves no overlap.
 mod scaling;
-use crate::collectors::{ReportGraph, ReportRow};
+use crate::collectors::{ReportGraph, ReportRow, report_filename_component};
 use serde::Serialize;
 #[cfg(test)]
 use serde_json::Value;
@@ -11,6 +11,8 @@ struct Context {
     agent: String,
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_effort: Option<crate::benchmark::ThinkingEffort>,
     workload: String,
     trial: String,
 }
@@ -20,10 +22,39 @@ impl Context {
             agent: row.agent.into(),
             provider: row.provider.into(),
             model: row.model.into(),
+            thinking_effort: row.thinking_effort,
             workload: row.workload.into(),
             trial: row.trial.into(),
         }
     }
+
+    fn model_display(&self) -> String {
+        format!(
+            "{}:{}",
+            self.model,
+            self.thinking_effort
+                .map_or("default", crate::benchmark::ThinkingEffort::as_str)
+        )
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "{} / {} / {} / {}:{}",
+            self.agent,
+            self.provider,
+            self.model_display(),
+            self.workload,
+            self.trial,
+        )
+    }
+}
+
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 #[derive(Debug, Serialize)]
 struct Window {
@@ -302,7 +333,8 @@ impl Report {
             let container_phase = c.windows.iter().any(|window| window.pid == 0);
             let title = if container_phase { "Observed owned-container execution phases" } else { "Observed agent principal lifetimes" };
             let detail = if container_phase { "Solid: controller-observed execution phase for a verified owned container. It is not an agent PID lifetime or CPU residency." } else { "Solid: verified interior lifetime. Dashed: enclosing agent phase. Sleeping is included; CPU overlap is not inferred." };
-            let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {height}\" role=\"img\" aria-label=\"{title}\"><rect width=\"960\" height=\"{height}\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">{title}</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">{detail}</text>");
+            let configuration = c.context.label();
+            let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {height}\" role=\"img\" aria-label=\"{} — {}\"><rect width=\"960\" height=\"{height}\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">{} — {}</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">{detail}</text>", escape(title), escape(&configuration), escape(title), escape(&configuration));
             let x = |ns: u64| 110.0 + 810.0 * (ns - first) as f64 / duration;
             for (i, w) in c.windows.iter().enumerate() {
                 let y = 77 + 30 * i;
@@ -315,7 +347,7 @@ impl Report {
                 svg.push_str(&format!("<text x=\"{at:.2}\" y=\"{}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">{:.3}</text>", height - 32, duration * tick as f64 / 5_000_000_000.0));
             }
             svg.push_str(&format!("<text x=\"515\" y=\"{}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\">Time since earliest observed release bound (s)</text></svg>", height - 12));
-            ReportGraph { filename: format!("cohort-lifetimes-{:04}.svg", index + 1), svg }
+            ReportGraph { filename: format!("cohort-lifetimes-{:04}-{}.svg", index + 1, report_filename_component(&configuration)), svg }
         }).collect::<Vec<_>>();
         graphs.extend(scaling::graphs(&self.scaling));
         graphs
@@ -353,6 +385,7 @@ mod tests {
             agent: "pi",
             provider: "cli2key",
             model: "test-model",
+            thinking_effort: None,
             workload: "bug-fix",
             trial: "default",
             configured_concurrency: cohort.selected_replicas,
@@ -389,7 +422,11 @@ mod tests {
         assert!(graph.svg.contains("(s)</text>"));
         assert!(graph.svg.contains("Replica 1"));
         assert!(graph.svg.contains("0.000</text>"));
-        assert_eq!(graph.filename, "cohort-lifetimes-0001.svg");
+        assert!(
+            graph
+                .filename
+                .starts_with("cohort-lifetimes-0001-pi-cli2key-test-model-default")
+        );
     }
 
     #[test]
@@ -412,6 +449,73 @@ mod tests {
         let graph = &report.graphs()[0].svg;
         assert!(graph.contains("owned-container execution phase"));
         assert!(!graph.contains("PID 0"));
+    }
+
+    #[test]
+    fn thinking_effort_is_typed_in_cohort_evidence_and_partitions_scaling() {
+        use crate::benchmark::ThinkingEffort;
+
+        let metrics = BTreeMap::new();
+        let first = docs(42, 1, 2, 7, 10);
+        let second = docs(43, 2, 4, 9, 11);
+        let mut default_one = membership(vec![1], 1);
+        default_one.id = "d-001".into();
+        let mut default_two = membership(vec![1, 2], 2);
+        default_two.id = "d-002".into();
+        let mut high_one = membership(vec![1], 1);
+        high_one.id = "e-001".into();
+        let mut high_two = membership(vec![1, 2], 2);
+        high_two.id = "e-002".into();
+
+        let mut high_one_row = row(1, &high_one, &first, &metrics);
+        high_one_row.thinking_effort = Some(ThinkingEffort::High);
+        let mut high_two_first = row(1, &high_two, &first, &metrics);
+        high_two_first.thinking_effort = Some(ThinkingEffort::High);
+        let mut high_two_second = row(2, &high_two, &second, &metrics);
+        high_two_second.thinking_effort = Some(ThinkingEffort::High);
+        let report = analyze(&[
+            row(1, &default_one, &first, &metrics),
+            row(1, &default_two, &first, &metrics),
+            row(2, &default_two, &second, &metrics),
+            high_one_row,
+            high_two_first,
+            high_two_second,
+        ]);
+
+        let value = serde_json::to_value(&report).unwrap();
+        let contexts = value["cohorts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cohort| &cohort["context"])
+            .collect::<Vec<_>>();
+        assert!(
+            contexts
+                .iter()
+                .any(|context| context["thinking_effort"].is_null())
+        );
+        assert!(
+            contexts
+                .iter()
+                .any(|context| context["thinking_effort"] == "high")
+        );
+        assert_eq!(report.scaling.len(), 2);
+        let graphs = report.graphs();
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.svg.contains("test-model:default"))
+        );
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.svg.contains("test-model:high"))
+        );
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.filename.contains("test-model-high"))
+        );
     }
     #[test]
     fn sequential_and_touching_lifetimes_have_observed_zero_overlap() {

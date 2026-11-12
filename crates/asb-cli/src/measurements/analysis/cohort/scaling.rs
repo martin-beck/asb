@@ -1,5 +1,6 @@
 //! Descriptive observations by actual admitted width, never an inferred speedup.
-use super::{Cohort, Context, ReportGraph};
+use super::{Cohort, Context, ReportGraph, escape};
+use crate::collectors::report_filename_component;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,7 +56,8 @@ pub(super) fn graphs(groups: &[Group]) -> Vec<ReportGraph> {
         let max_rate = g.points.iter().map(|p|p.phase_completions_per_second_lower_bound).fold(0.0,f64::max) * 1.1;
         let x = |n: usize| 100.0 + 800.0*n as f64/max_width as f64;
         let y = |rate: f64| 370.0 - 280.0*rate/max_rate;
-        let mut svg = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 440\" role=\"img\" aria-label=\"Observed phase rates by admitted width\"><rect width=\"960\" height=\"440\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">Observed phase rates by admitted width</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">Lower-bound phase completions/s; separate points per cohort. Descriptive observations, not controlled speedup.</text>");
+        let configuration = g.context.label();
+        let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 440\" role=\"img\" aria-label=\"Observed phase rates by admitted width — {}\"><rect width=\"960\" height=\"440\" fill=\"white\"/><text x=\"24\" y=\"28\" font-family=\"sans-serif\" font-size=\"18\">Observed phase rates by admitted width — {}</text><text x=\"24\" y=\"49\" font-family=\"sans-serif\" font-size=\"11\">Lower-bound phase completions/s; separate points per cohort. Descriptive observations, not controlled speedup.</text>", escape(&configuration), escape(&configuration));
         for tick in 0..=5 {
             let rate = max_rate * tick as f64/5.0;
             let label = if rate > 0.0 && rate < 0.001 { format!("{rate:.2e}") } else { format!("{rate:.4}") };
@@ -69,7 +71,7 @@ pub(super) fn graphs(groups: &[Group]) -> Vec<ReportGraph> {
             svg.push_str(&format!("<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"6\" fill=\"#047857\" stroke=\"white\" stroke-width=\"2\"><title>Cohort {}: admitted {}, observed live peak at least {}, phase rate at least {:.6}/s</title></circle>", x(p.admitted_replicas), y(p.phase_completions_per_second_lower_bound), p.cohort_id, p.admitted_replicas, p.observed_peak_live_principals_lower_bound, p.phase_completions_per_second_lower_bound));
         }
         svg.push_str("<text x=\"500\" y=\"425\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\">Actual admitted agent phases (count)</text><text x=\"24\" y=\"230\" transform=\"rotate(-90 24 230)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\">Phase completion rate lower bound (/s)</text></svg>");
-        ReportGraph {filename:format!("cohort-scaling-{:04}.svg",index+1),svg}
+        ReportGraph {filename:format!("cohort-scaling-{:04}-{}.svg",index+1,report_filename_component(&configuration)),svg}
     }).collect()
 }
 

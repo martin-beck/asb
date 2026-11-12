@@ -442,8 +442,14 @@ fn scaling_graphs(rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
             continue;
         }
         let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            row.agent, row.provider, row.model, row.workload, row.trial
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            row.agent,
+            row.provider,
+            row.model,
+            row.thinking_effort
+                .map_or("default", crate::benchmark::ThinkingEffort::as_str),
+            row.workload,
+            row.trial,
         );
         groups
             .entry(key)
@@ -500,8 +506,8 @@ fn scaling_graphs(rows: &[ReportRow<'_>]) -> Vec<ReportGraph> {
         curve.sort_by_key(|point| point.0);
         let parts = key.split('\u{1f}').collect::<Vec<_>>();
         let title = format!(
-            "AgentSysPerf scaling — {} / {} / {} / {} / {}",
-            parts[0], parts[1], parts[2], parts[3], parts[4]
+            "AgentSysPerf scaling — {} / {} / {}:{} / {} / {}",
+            parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
         );
         let filename = format!("agentsysperf-scaling-{}.svg", stable_label_id(&key));
         graphs.push(ReportGraph {
@@ -1078,6 +1084,7 @@ mod tests {
                 agent: "fixture-agent",
                 provider: "fixture-provider",
                 model: "fixture-model",
+                thinking_effort: None,
                 workload: "fixture-workload",
                 trial: "fixture-trial",
                 configured_concurrency: 1,
@@ -1092,6 +1099,7 @@ mod tests {
                 agent: "unmeasured-agent",
                 provider: "fixture-provider",
                 model: "fixture-model",
+                thinking_effort: None,
                 workload: "fixture-workload",
                 trial: "fixture-trial",
                 configured_concurrency: 1,
@@ -1127,6 +1135,7 @@ mod tests {
                     agent: "fixture",
                     provider: "fixture",
                     model: "fixture",
+                    thinking_effort: None,
                     workload: "fixture",
                     trial: "fixture",
                     configured_concurrency: 1,
@@ -1178,6 +1187,7 @@ mod tests {
                 agent: "fixture-agent",
                 provider: "fixture-provider",
                 model: "fixture-model",
+                thinking_effort: None,
                 workload: "fixture-workload",
                 trial: "fixture-trial",
                 configured_concurrency: cohorts[index].selected_replicas,
@@ -1196,5 +1206,68 @@ mod tests {
 
         // A partial cohort cannot become a fabricated scaling point.
         assert!(scaling_graphs(&rows[..rows.len() - 1]).is_empty());
+    }
+
+    #[test]
+    fn scaling_graphs_do_not_combine_thinking_efforts() {
+        let mut metrics = Vec::new();
+        let mut documents = Vec::new();
+        let mut cohorts = Vec::new();
+        let mut labels = Vec::new();
+        let mut efforts = Vec::new();
+        for effort in [None, Some(crate::benchmark::ThinkingEffort::High)] {
+            for concurrency in 1..=3 {
+                for replica in 1..=concurrency {
+                    metrics.push(std::collections::BTreeMap::from([
+                        ("elapsed_ms".into(), (concurrency * 100 + replica) as f64),
+                        ("success_rate".into(), 1.0),
+                    ]));
+                    documents.push(std::collections::BTreeMap::from([(
+                        "agentsysperf".into(),
+                        json!({"status":"observed","scaling_requested":true}),
+                    )]));
+                    cohorts.push(crate::measurements::ExecutionCohort {
+                        id: format!(
+                            "{}-{concurrency}",
+                            effort.map_or("default", crate::benchmark::ThinkingEffort::as_str)
+                        ),
+                        selected_replicas: concurrency,
+                        admitted_slots: (1..=concurrency).collect(),
+                        dispatch: None,
+                    });
+                    labels.push(format!("run-{effort:?}-{concurrency}-{replica}"));
+                    efforts.push(effort);
+                }
+            }
+        }
+        let rows = (0..metrics.len())
+            .map(|index| ReportRow {
+                label: &labels[index],
+                agent: "fixture-agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                thinking_effort: efforts[index],
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: cohorts[index].selected_replicas,
+                replica_index: None,
+                execution_cohort: Some(&cohorts[index]),
+                metrics: &metrics[index],
+                components: None,
+                documents: &documents[index],
+            })
+            .collect::<Vec<_>>();
+        let graphs = scaling_graphs(&rows);
+        assert_eq!(graphs.len(), 2);
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.svg.contains("fixture-model:default"))
+        );
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.svg.contains("fixture-model:high"))
+        );
     }
 }
