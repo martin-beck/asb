@@ -1,6 +1,8 @@
 //! Structured agent tool-call observations are published by measurement finalization.
 
-use super::super::{CollectorAdapter, ReportGraph, ReportRow};
+use super::super::{
+    CollectorAdapter, ReportGraph, ReportRow, configuration_label, report_filename_component,
+};
 use std::collections::BTreeSet;
 
 pub(super) struct ToolCallsCollector;
@@ -55,7 +57,7 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
     let height = 90.0 + row_height * classes.len() as f64;
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><style>text{{font:12px sans-serif;fill:#18212b}}.axis{{stroke:#9aa5b1}}.cell{{fill:#2563eb}}.duration{{stroke:#f59e0b;stroke-width:3}}</style><text x="20" y="25" font-size="16">LLM tool-call classes over provider-response time — {}</text><text x="{}" y="48">response-observed time (ms from first tool call); orange extension = observed tool execution duration</text>"#,
-        escape(row.label),
+        escape(&configuration_label(row)),
         left
     );
     for (class_index, class) in classes.iter().enumerate() {
@@ -109,7 +111,10 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
     }
     svg.push_str("</svg>");
     Some(ReportGraph {
-        filename: format!("tool-call-heatmap-{index}.svg"),
+        filename: format!(
+            "tool-call-heatmap-{index:04}-{}.svg",
+            report_filename_component(&configuration_label(row))
+        ),
         svg,
     })
 }
@@ -141,6 +146,7 @@ mod tests {
                 agent: "agent",
                 provider: "fixture-provider",
                 model: "fixture-model",
+                thinking_effort: Some(crate::benchmark::ThinkingEffort::High),
                 workload: "fixture-workload",
                 trial: "fixture-trial",
                 configured_concurrency: 1,
@@ -152,7 +158,8 @@ mod tests {
             },
         )
         .expect("tool call graph");
-        assert_eq!(graph.filename, "tool-call-heatmap-0.svg");
+        assert!(graph.filename.starts_with("tool-call-heatmap-0000-"));
+        assert!(graph.svg.contains("fixture-model:high"));
         assert!(graph.svg.contains("filesystem.read"));
         assert!(graph.svg.contains("execution 25 ms"));
     }

@@ -228,6 +228,9 @@ pub(crate) struct ReportRow<'a> {
     pub agent: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
+    /// Kept separately from the provider model ID so collectors can preserve
+    /// configuration identity without changing pricing/model lookups.
+    pub thinking_effort: Option<crate::benchmark::ThinkingEffort>,
     pub workload: &'a str,
     pub trial: &'a str,
     pub configured_concurrency: usize,
@@ -236,6 +239,48 @@ pub(crate) struct ReportRow<'a> {
     pub metrics: &'a BTreeMap<String, f64>,
     pub components: Option<&'a serde_json::Value>,
     pub documents: &'a BTreeMap<String, serde_json::Value>,
+}
+
+/// The presentation identity for one configured agent invocation.
+///
+/// The model remains raw in [`ReportRow`]; this label is only for reports.
+pub(crate) fn configuration_label(row: &ReportRow<'_>) -> String {
+    format!(
+        "{} / {} / {}:{} / {}:{}",
+        row.agent,
+        row.provider,
+        row.model,
+        row.thinking_effort
+            .map_or("default", crate::benchmark::ThinkingEffort::as_str),
+        row.workload,
+        row.trial,
+    )
+}
+
+/// Produce a bounded, path-safe report filename component from a presentation
+/// label. The ordinal that callers retain prevents collisions after lossy
+/// normalization.
+pub(crate) fn report_filename_component(label: &str) -> String {
+    let mut result = String::new();
+    let mut separator = false;
+    for character in label.bytes() {
+        if character.is_ascii_alphanumeric() {
+            result.push((character as char).to_ascii_lowercase());
+            separator = false;
+        } else if !result.is_empty() && !separator {
+            result.push('-');
+            separator = true;
+        }
+        if result.len() >= 48 {
+            break;
+        }
+    }
+    let result = result.trim_matches('-');
+    if result.is_empty() {
+        "configuration".into()
+    } else {
+        result.into()
+    }
 }
 
 /// A collector-owned graph ready for generic publication in an offline report.

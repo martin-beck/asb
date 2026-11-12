@@ -133,6 +133,7 @@ impl PreparedReport {
                 agent: &row.agent,
                 provider: &row.provider,
                 model: &row.model,
+                thinking_effort: row.thinking_effort,
                 workload: &row.workload,
                 trial: row
                     .task
