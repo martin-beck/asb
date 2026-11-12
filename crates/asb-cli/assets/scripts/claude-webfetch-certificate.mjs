@@ -1,12 +1,34 @@
 // Per-replica trust for the local recorded-content proxy. These keys never sign
 // releases or leave the attempt runtime; the owner removes the returned tree.
-import {execFile} from 'node:child_process';
+import {spawn} from 'node:child_process';
 import {chmod, mkdtemp, readFile, rm} from 'node:fs/promises';
 import {isIP} from 'node:net';
 import {join} from 'node:path';
-import {promisify} from 'node:util';
 
-const exec = promisify(execFile);
+function runOpenSsl(openssl, arguments_) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    const child = spawn(openssl, arguments_, {stdio: 'ignore', windowsHide: true});
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      error ? reject(error) : resolve();
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, 15_000);
+    child.once('error', () => finish(new Error('OpenSSL certificate generation could not start')));
+    child.once('close', (code) => {
+      if (timedOut) finish(new Error('OpenSSL certificate generation timed out'));
+      else if (code === 0) finish();
+      else finish(new Error('OpenSSL certificate generation failed'));
+    });
+  });
+}
+
 function sanFor(host) {
   if (typeof host !== 'string' || !host || host.length > 253) throw new TypeError('Claude WebFetch proxy hostname is invalid');
   const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
@@ -31,11 +53,11 @@ export async function createWebFetchCertificate(runtime, plan, {openssl = 'opens
   const directory = await mkdtemp(join(runtime, 'webfetch-tls-'));
   const keyPath = join(directory, 'key.pem'), certPath = join(directory, 'cert.pem');
   try {
-    // Node's execFile uses an argument array and no shell. Diagnostics are not
-    // emitted because OpenSSL may include certificate paths or hostnames.
-    await exec(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
+    // OpenSSL's entropy progress can exceed a small bounded pipe while adding
+    // no actionable diagnostic. Run it without a shell or captured output.
+    await runOpenSsl(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
       '-out', certPath, '-days', '1', '-subj', '/CN=ASB local replay',
-      '-addext', `subjectAltName=${names.join(',')}`], {timeout: 15000, maxBuffer: 4096, windowsHide: true});
+      '-addext', `subjectAltName=${names.join(',')}`]);
     await chmod(keyPath, 0o600);
     await chmod(certPath, 0o644);
     // The Claude guest can traverse and trust the certificate but cannot read
