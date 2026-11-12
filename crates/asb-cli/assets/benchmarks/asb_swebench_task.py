@@ -28,6 +28,7 @@ _REPOSITORY_COMMAND_SECONDS = 600
 _PREPARED_BASELINE_RAW_CACHE_VERSION = "swebench-prepared-baseline-v1"
 _PREPARED_BASELINE_MATERIAL_CACHE_VERSION = "swebench-prepared-baseline-v2"
 _PREPARED_BASELINE_LOCK_SECONDS = 600
+_AGENT_ENVIRONMENT_PROBE_ATTEMPTS = 3
 
 
 def _validated_prepared_baseline_inputs(source_image_id, task_id, base_commit, material_sha256):
@@ -382,10 +383,21 @@ class SweBenchTask:
             raise ExecutionError("invalid SWE-bench environment name")
         def remaining():
             return min(60, preparation_budget.remaining()) if preparation_budget else 60
+        def probe(argv, **options):
+            """Retry bounded read-only environment probes under Docker pressure."""
+            for attempt in range(_AGENT_ENVIRONMENT_PROBE_ATTEMPTS):
+                try:
+                    return self.checked(argv, **options)
+                except ExecutionError:
+                    if attempt + 1 == _AGENT_ENVIRONMENT_PROBE_ATTEMPTS:
+                        raise
+                    if preparation_budget is not None:
+                        preparation_budget.remaining()
+                    time.sleep(0.1 * (attempt + 1))
         # Only PATH is passed to the probe: provider credentials and HOME must
         # never enter probe output or be overwritten by conda activation.
         probe_environment = {"PATH": environment["PATH"]} if "PATH" in environment else None
-        output = self.checked(["/bin/bash", "-c",
+        output = probe(["/bin/bash", "-c",
             'source /opt/miniconda3/bin/activate "$1" >/dev/null && '
             'printf "%s\\0%s\\0%s\\0%s\\0" "$PATH" "$CONDA_PREFIX" "$CONDA_DEFAULT_ENV" "$CONDA_SHLVL"',
             "asb-swe-env", CONTAINER_ENV_NAME], environment=probe_environment, timeout=remaining(),
@@ -399,7 +411,7 @@ class SweBenchTask:
                 raise ValueError()
         except (UnicodeDecodeError, ValueError):
             raise ExecutionError("SWE-bench task environment activation returned invalid metadata") from None
-        timestamp = self.checked(["git", "show", "-s", "--format=%ct", self.row["base_commit"]],
+        timestamp = probe(["git", "show", "-s", "--format=%ct", self.row["base_commit"]],
                                  timeout=remaining(), preparation_budget=preparation_budget).strip()
         if not re.fullmatch(rb"[0-9]{1,12}", timestamp):
             raise ExecutionError("SWE-bench base commit timestamp is invalid")
