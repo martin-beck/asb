@@ -33,6 +33,12 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
+/// Docker's exec inspection and `/proc` publication are host-global.  Dense
+/// cohorts must not make dozens of stopped-target scans race through the same
+/// short-lived driver trees.
+static STOPPED_TARGET_VERIFICATION: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 /// Keep a paused target's verified identity adjacent to collector attachment.
 ///
 /// A cohort launch rendezvous may wait for many peers. Enter it only after
@@ -67,6 +73,10 @@ fn verify_stopped_target_until(
     mut verify: impl FnMut(&Value) -> Result<super::target::LocalTarget, String>,
 ) -> Result<super::target::LocalTarget, String> {
     let retry_deadline = deadline.min(Instant::now() + TARGET_VERIFICATION_RETRY);
+    let _verification = STOPPED_TARGET_VERIFICATION
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| "stopped target verification synchronization failed")?;
     loop {
         match verify(event) {
             Ok(target) => return Ok(target),

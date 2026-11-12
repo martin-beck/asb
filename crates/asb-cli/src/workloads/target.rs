@@ -153,6 +153,7 @@ pub(crate) fn retryable_verification_error(error: &str) -> bool {
             | "isolated target does not match its owned container cgroup or changed during verification"
             | "isolated target candidate scan exceeded its deadline"
             | "isolated driver changed during target resolution"
+            | "isolated driver does not belong to its owned container"
             | "cannot identify the stopped agent under its owned driver"
     )
 }
