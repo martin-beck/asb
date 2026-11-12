@@ -80,6 +80,30 @@ def preparation_failure_code(error):
     return "execution-error-other"
 
 
+def preparation_failure_origin(error):
+    """Return an allowlisted implementation origin without persisting traceback text."""
+    allowed = {
+        ("asb_execution.py", "_execute"),
+        ("asb_execution.py", "execution_target"),
+        ("asb_execution.py", "resume_application_gate"),
+        ("asb_execution.py", "release_gate"),
+        ("asb_execution.py", "target"),
+        ("asb_task_server.py", "attach"),
+        ("asb_guest.py", "attach"),
+    }
+    trace = getattr(error, "__traceback__", None)
+    origin = None
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        candidate = (os.path.basename(code.co_filename), code.co_name)
+        if candidate in allowed:
+            origin = candidate
+        trace = trace.tb_next
+    if origin is None:
+        return "other"
+    return origin[0][:-3] + ":" + origin[1]
+
+
 def experimental_snapshot_roots(configured):
     if configured is None:
         return []
@@ -711,6 +735,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
                     "failure_kind": failure_kind,
                     "stage": preparation_stage[0],
                     "failure_code": preparation_failure_code(error),
+                    "failure_origin": preparation_failure_origin(error),
                 })
                 preparation_budget.fail()
             raise
