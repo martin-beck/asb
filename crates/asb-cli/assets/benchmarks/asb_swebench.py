@@ -8,6 +8,7 @@ tests can run entirely offline using Python's standard library.
 
 import argparse
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import importlib.metadata
@@ -32,6 +33,8 @@ MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_CATALOG_BYTES = 16 * 1024 * 1024
 MAX_PATCH_BYTES = 64 * 1024 * 1024
 HARNESS_REVISION = "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e"
+TEST_APPLICATION_RECEIPT = "official-test-application.json"
+TEST_APPLICATION_MARKER = "ASB_OFFICIAL_TEST_PATCH_APPLIED=1"
 
 
 def install_session_cancel_handlers():
@@ -306,6 +309,7 @@ def evaluate_submission(catalog_path, task_id, patch_path, artifacts, timeout, e
                 report_dir = artifacts / "logs/evaluation" / run_id
                 summary_path = report_dir / "results.json"
                 instance_path = report_dir / "asb" / task_id / "report.json"
+                receipt_path = artifacts / TEST_APPLICATION_RECEIPT
                 if not summary_path.is_file() or not instance_path.is_file():
                     result["reason"] = "official_report_missing"
                 else:
@@ -328,11 +332,27 @@ def evaluate_submission(catalog_path, task_id, patch_path, artifacts, timeout, e
                             or (image_identity is not None and image.get("image_id") != image_identity["image_id"])
                             or sdk.get("revision") != HARNESS_REVISION):
                         raise CatalogError("official evaluator image or SDK identity does not match the attempt")
-                    result.update(resolved=resolved, outcome="resolved" if resolved else "unresolved",
-                                  reason=None if resolved else "official_tests_not_resolved",
-                                  image=image, sdk=sdk,
+                    result.update(image=image, sdk=sdk,
                                   official_summary=str(summary_path.relative_to(artifacts)),
-                                  official_report=str(instance_path.relative_to(artifacts)))
+                                  official_report=str(instance_path.relative_to(artifacts)),
+                                  official_test_application=TEST_APPLICATION_RECEIPT)
+                    if not receipt_path.is_file():
+                        result.update(outcome="evaluation_error",
+                                      reason="official_test_application_missing")
+                    else:
+                        receipt = json.loads(read_limited(receipt_path, MAX_METADATA_BYTES))
+                        if (receipt.get("schema_version") != 1
+                                or receipt.get("harness_revision") != HARNESS_REVISION
+                                or receipt.get("task_id") != task_id
+                                or type(receipt.get("official_test_patch_applied")) is not bool):
+                            result.update(outcome="evaluation_error",
+                                          reason="official_test_application_invalid")
+                        elif receipt["official_test_patch_applied"]:
+                            result.update(resolved=resolved, outcome="resolved" if resolved else "unresolved",
+                                          reason=None if resolved else "official_tests_not_resolved")
+                        else:
+                            result.update(outcome="evaluation_error",
+                                          reason="official_test_patch_not_applied")
             except subprocess.TimeoutExpired:
                 result.update(outcome="evaluation_timeout", reason="official_harness_deadline_exceeded")
             except InterruptedError:
@@ -451,12 +471,19 @@ def reconstruct_evaluation(retained, source, catalog, row, cancelled, owner_lock
                 and type(report[retained.identity["task_id"]].get("resolved")) is bool,
                 "raw official report has no completed task outcome")
         resolved = report[retained.identity["task_id"]]["resolved"]
+        receipt = probe.object(prefix+TEST_APPLICATION_RECEIPT)
+        require(receipt.get("schema_version") == 1
+                and receipt.get("harness_revision") == HARNESS_REVISION
+                and receipt.get("task_id") == retained.identity["task_id"]
+                and receipt.get("official_test_patch_applied") is True,
+                "raw official evaluator did not prove its test patch was applied")
         result = {"schema_version":1,"workload":catalog["workload"],"task_id":retained.identity["task_id"],
             "dataset":catalog["dataset"],"run_id":run_id,"patch_sha256":retained.submission["patch_sha256"],
             "harness_revision":HARNESS_REVISION,"resolved":resolved,"outcome":"resolved" if resolved else "unresolved",
             "reason":None if resolved else "official_tests_not_resolved", "source_image":row.get("image"),
             "image":probe.object(prefix+"image-identity.json"),"sdk":probe.object(prefix+"sdk-identity.json"),
-            "official_report":relative_report,"official_summary":relative_summary}
+            "official_report":relative_report,"official_summary":relative_summary,
+            "official_test_application":TEST_APPLICATION_RECEIPT}
         # Full frozen evaluator row equality binds the selected pinned test data,
         # not merely an instance/base shared by several original populations.
         expected_row = dict(row,image=retained.task["image"]["image_id"])
@@ -464,7 +491,7 @@ def reconstruct_evaluation(retained, source, catalog, row, cancelled, owner_lock
                 "raw evaluator input differs from the installed pinned task")
         probe.select_grade(result)
         verify_retained(probe,prefix=prefix,result=result)
-        files = ["dataset.json","submission.jsonl","sdk-identity.json","image-identity.json",relative_report,relative_summary,
+        files = ["dataset.json","submission.jsonl","sdk-identity.json","image-identity.json",TEST_APPLICATION_RECEIPT,relative_report,relative_summary,
                  "resources.json","cleanup.json"]
         require(len(set(files)) == len(files),"raw evaluator artifacts overlap")
         inputs = {}
@@ -680,6 +707,8 @@ def verify_retained(retained, prefix=None, result=None):
             and submitted.get("model_patch") == patch.decode("utf-8"), "retained evaluator submission differs")
     require(all(isinstance(result.get(key),str) and result[key] for key in ["official_report","official_summary"]),
             "retained official report paths are malformed")
+    require(result.get("official_test_application") == TEST_APPLICATION_RECEIPT,
+            "retained official test-application receipt path is malformed")
     report = retained.object(prefix + result["official_report"])
     summary = retained.object(prefix + result["official_summary"])
     task = retained.identity["task_id"]
@@ -689,6 +718,12 @@ def verify_retained(retained, prefix=None, result=None):
             and summary.get("resolved_ids") == ([task] if result["resolved"] else [])
             and (not result["resolved"] or report[task].get("patch_successfully_applied") is True),
             "retained official SWE-bench reports disagree")
+    receipt = retained.object(prefix + result["official_test_application"])
+    require(receipt.get("schema_version") == 1
+            and receipt.get("harness_revision") == HARNESS_REVISION
+            and receipt.get("task_id") == task
+            and receipt.get("official_test_patch_applied") is True,
+            "retained official evaluator did not prove its test patch was applied")
     require(result.get("sdk") == retained.object(prefix + "sdk-identity.json")
             and result.get("sdk") == retained.task.get("sdk")
             and result.get("image") == retained.object(prefix + "image-identity.json")
@@ -702,7 +737,7 @@ def verify_retained(retained, prefix=None, result=None):
                 and receipt["source"]+"/" != prefix and isinstance(receipt.get("inputs"),dict)
                 and 1 <= len(receipt["inputs"]) <= 16,"reconstructed evaluator provenance is malformed")
         expected_sources = {receipt["source"]+"/"+relative for relative in [
-            "dataset.json","submission.jsonl","sdk-identity.json","image-identity.json",result["official_report"],
+            "dataset.json","submission.jsonl","sdk-identity.json","image-identity.json",result["official_test_application"],result["official_report"],
             result["official_summary"],"resources.json","cleanup.json","evaluation.json"]}
         require(set(receipt["inputs"]) == expected_sources,"reconstructed evaluator source population is incomplete")
         for relative,expected in receipt["inputs"].items():
@@ -743,6 +778,23 @@ def attempt_report(reporter):
     return report
 
 
+def instrument_test_application(test_spec, start_marker):
+    """Add an ASB receipt immediately before the pinned test-output boundary.
+
+    The upstream script performs its own checkout and test-patch application
+    before this boundary.  `set -e` is part of the pinned TestSpec, so reaching
+    the marker is explicit evidence that those commands completed.  This does
+    not inspect or reject the candidate's changes to tests.
+    """
+    positions = [index for index, line in enumerate(test_spec.eval_script_list)
+                 if start_marker in line]
+    if len(positions) != 1 or not any("git apply" in line for line in test_spec.eval_script_list[:positions[0]]):
+        raise CatalogError("pinned SWE-bench evaluator has no recognizable official test-patch boundary")
+    lines = list(test_spec.eval_script_list)
+    lines.insert(positions[0], f"printf '%s\\n' '{TEST_APPLICATION_MARKER}'")
+    return dataclasses.replace(test_spec, eval_script_list=lines)
+
+
 def verify_evaluator_start(container, cpu_set, verify):
     """Interpose on the harness start before it can apply or evaluate a patch."""
     if cpu_set is None:
@@ -761,6 +813,7 @@ def official_harness(arguments):
     from asb_docker import DockerSession
     from asb_resources import ResourceJournal, RecoveryError
     from swebench.harness import run_evaluation
+    from swebench.harness.constants import LOG_TEST_OUTPUT, RUN_EVALUATION_LOG_DIR, START_TEST_OUTPUT
     from asb_execution import _parse_cpu_list, verify_container_cpu_set
     import docker.errors
     identity = sdk_identity()
@@ -803,6 +856,7 @@ def official_harness(arguments):
             def __getattr__(self, name):
                 return getattr(client, name)
         original_create = run_evaluation.create_container
+        original_run_instance = run_evaluation.run_instance
         def create_container(test_spec, docker_client, run_id, logger):
             if cancelled.is_set():
                 raise InterruptedError("ASB evaluation was cancelled before container creation")
@@ -841,6 +895,24 @@ def official_harness(arguments):
                 logger.info("Removed ASB attempt container through scoped Docker transport")
             except docker.errors.NotFound:
                 pass
+        def run_instance_with_receipt(test_spec, prediction, *args, **kwargs):
+            checked = instrument_test_application(test_spec, START_TEST_OUTPUT)
+            try:
+                return original_run_instance(checked, prediction, *args, **kwargs)
+            finally:
+                log_path = (RUN_EVALUATION_LOG_DIR / arguments.run_id
+                            / prediction["model_name_or_path"].replace("/", "__")
+                            / test_spec.instance_id / LOG_TEST_OUTPUT)
+                try:
+                    prefix = read_limited(log_path, 64 * 1024).decode("utf-8", "replace")
+                except OSError:
+                    prefix = ""
+                atomic_write(Path.cwd() / TEST_APPLICATION_RECEIPT, encoded({
+                    "schema_version": 1,
+                    "harness_revision": HARNESS_REVISION,
+                    "task_id": test_spec.instance_id,
+                    "official_test_patch_applied": TEST_APPLICATION_MARKER in prefix,
+                }))
         def caretaker():
             while not finished.is_set():
                 if cancelled.wait(0.05):
@@ -853,6 +925,7 @@ def official_harness(arguments):
         try:
             run_evaluation._docker_client = lambda: client
             run_evaluation.create_container = create_container
+            run_evaluation.run_instance = run_instance_with_receipt
             # This SDK revision shells out to an unprivileged Docker CLI for
             # cleanup. Route its equivalent operation through the same scoped
             # client as creation, avoiding permission failures and leftovers.
