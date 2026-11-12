@@ -104,6 +104,14 @@ def preparation_failure_origin(error):
     return origin[0][:-3] + ":" + origin[1]
 
 
+def preparation_failure_phase(error):
+    """Return the finite internal gate phase attached by the execution owner."""
+    value = getattr(error, "asb_preparation_phase", None)
+    if value in {"gate-transport", "gate-readiness", "gate-target", "collector-attachment", "gate-release"}:
+        return value
+    return "other"
+
+
 def experimental_snapshot_roots(configured):
     if configured is None:
         return []
@@ -736,6 +744,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
                     "stage": preparation_stage[0],
                     "failure_code": preparation_failure_code(error),
                     "failure_origin": preparation_failure_origin(error),
+                    "failure_phase": preparation_failure_phase(error),
                 })
                 preparation_budget.fail()
             raise

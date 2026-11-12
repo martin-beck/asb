@@ -15,7 +15,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, preparation_failure_code, preparation_failure_origin, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, preparation_failure_code, preparation_failure_origin, preparation_failure_phase, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 from asb_guest import experimental_snapshot_roots, isolate_snapshot_replay_network
@@ -141,6 +141,13 @@ class GuestBootstrapTests(unittest.TestCase):
             execution_target(None, None, 2)
         except AttributeError as error:
             self.assertEqual(preparation_failure_origin(error), "asb_execution:execution_target")
+
+    def test_preparation_failure_phase_is_allowlisted(self):
+        error = ExecutionError("fixture")
+        error.asb_preparation_phase = "gate-target"
+        self.assertEqual(preparation_failure_phase(error), "gate-target")
+        error.asb_preparation_phase = "untrusted"
+        self.assertEqual(preparation_failure_phase(error), "other")
 
     def test_shared_launch_preparation_budget_accepts_long_setup_but_is_bounded(self):
         with patch("asb_guest.time.monotonic", return_value=100):
