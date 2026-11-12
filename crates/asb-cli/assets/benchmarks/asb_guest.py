@@ -653,14 +653,24 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
             task._asb_preparation_budget = preparation_budget
         try:
             return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted)
-        except BaseException:
+        except BaseException as error:
             if preparation_budget is not None:
                 remaining = max(0.0, preparation_budget.deadline - time.monotonic())
+                if isinstance(error, ExecutionError):
+                    failure_kind = "execution-error"
+                elif isinstance(error, KeyboardInterrupt):
+                    failure_kind = "interrupted"
+                elif isinstance(error, SystemExit):
+                    failure_kind = "system-exit"
+                else:
+                    failure_kind = "unexpected-error"
                 write_preparation_budget_artifact(task, "agent-preparation-failure.json", {
                     "schema_version": 1,
                     "scope": "agent-preparation-budget-failure-v1",
                     "remaining_seconds": round(remaining, 3),
                     "expired": preparation_budget.expired(),
+                    "upstream_cancelled": upstream.is_set() if upstream is not None else False,
+                    "failure_kind": failure_kind,
                 })
                 preparation_budget.fail()
             raise
