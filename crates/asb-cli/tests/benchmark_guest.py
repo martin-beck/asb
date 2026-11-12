@@ -134,6 +134,7 @@ class GuestBootstrapTests(unittest.TestCase):
             self.assertFalse(failure["expired"])
             self.assertFalse(failure["upstream_cancelled"])
             self.assertEqual(failure["failure_kind"], "execution-error")
+            self.assertEqual(failure["stage"], "agent-setup")
 
     def test_shared_cohort_window_is_forwarded_only_when_bounded(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -640,6 +640,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
         except FileExistsError:
             pass
     upstream = cancelled
+    preparation_stage = ["agent-setup"]
     if preparation_budget is not None:
         cancelled = ForwardingCancellation(lambda: preparation_budget.expired() or
             (upstream.is_set() if upstream is not None else False), [])
@@ -652,7 +653,8 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
             # commands the one cohort-wide startup budget.
             task._asb_preparation_budget = preparation_budget
         try:
-            return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted)
+            return _execute_agent(task, request, before_resume, on_output, cancelled, resources, [], on_ended, preparation_budget, on_release_accepted,
+                                  preparation_stage)
         except BaseException as error:
             if preparation_budget is not None:
                 remaining = max(0.0, preparation_budget.deadline - time.monotonic())
@@ -671,6 +673,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
                     "expired": preparation_budget.expired(),
                     "upstream_cancelled": upstream.is_set() if upstream is not None else False,
                     "failure_kind": failure_kind,
+                    "stage": preparation_stage[0],
                 })
                 preparation_budget.fail()
             raise
@@ -709,14 +712,17 @@ def isolate_snapshot_replay_network(task):
         raise ExecutionError('snapshot replay container still has a routed address')
 
 
-def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget, on_release_accepted):
+def _execute_agent(task, request, before_resume, on_output, cancelled, resources, relays, on_ended, preparation_budget, on_release_accepted,
+                   preparation_stage):
     if request.get("network") and getattr(task, 'tool_mode', None) == 'replay':
         raise ExecutionError('replay cannot attach an external task network')
+    preparation_stage[0] = "guest-setup"
     guest,environment = prepare_agent(task,request,cancelled,resources,relays,preparation_budget)
     # The workload may select an already-prepared runtime for the client.
     # Do this after installation so its Python and tools remain independent.
     prepare_environment = getattr(task, "agent_environment", None)
     if prepare_environment is not None:
+        preparation_stage[0] = "agent-environment"
         environment = prepare_environment(environment, preparation_budget)
     if preparation_budget is not None:
         preparation_budget.remaining()
@@ -725,6 +731,7 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
     # Only final client execution uses a workload-owned launcher. Install and
     # bootstrap commands remain ordinary managed Docker executions.
     prepare_transport = getattr(task,"prepare_agent_transport",None)
+    preparation_stage[0] = "agent-transport"
     transport = prepare_transport(request) if prepare_transport is not None else None
     if preparation_budget is not None:preparation_budget.remaining()
     if transport is not None:
@@ -814,6 +821,7 @@ def _execute_agent(task, request, before_resume, on_output, cancelled, resources
             del tail[:-256 * 1024]
         if on_output is not None:
             on_output(stream, chunk)
+    preparation_stage[0] = "agent-launch-gate"
     result = task.workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], environment=environment,
                                     timeout=request.get("timeout", getattr(task, "agent_timeout", 900)), output_limit=256 * 1024,
                                     gate="application", before_resume=attach,
