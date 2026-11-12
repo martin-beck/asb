@@ -667,6 +667,15 @@ class ExecutionTests(unittest.TestCase):
                 workspace.execute(["agent"], on_release_accepted=resumed.append)
         self.assertEqual(resumed, [])
 
+    def test_release_notification_failure_retains_gate_release_phase(self):
+        workspace, container, _, _ = self.workspace()
+        def notify(_target):
+            raise RUNTIME.ExecutionError("controller notification closed")
+        with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "controller notification") as raised:
+            workspace.execute(["agent"], on_release_accepted=notify)
+        self.assertEqual(raised.exception.asb_preparation_phase, "gate-release")
+        self.assertIn("kill", container.events)
+
     def test_accepted_gate_release_reports_delivery_not_effective_target_resume(self):
         workspace, container, api, _ = self.workspace()
         accepted = []

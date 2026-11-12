@@ -726,7 +726,15 @@ class ManagedDockerWorkspace:
             # the release request. The Rust controller separately proves the
             # stopped host PID has resumed before admitting execution output.
             if on_release_accepted is not None:
-                on_release_accepted(target)
+                try:
+                    on_release_accepted(target)
+                except BaseException as error:
+                    # The controller notification is still part of the gate
+                    # release: no agent output can be admitted until it has
+                    # accepted this target identity.
+                    if isinstance(error, ExecutionError):
+                        error.asb_preparation_phase = "gate-release"
+                    raise
             stdout, stderr = bytearray(), gate_stderr
             truncated = False
             frames = WorkloadFrames(namespace_pid, workload_owner, on_execution_end) if workload_owner else None
