@@ -158,7 +158,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 "{} / {} / {} / {}",
                 row.agent,
                 row.provider,
-                row.model,
+                super::model_display(row),
                 super::attempt_label(row)
             );
         }
@@ -211,7 +211,8 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             }
         }
     }
-    let benchmark_rows = benchmark_data.iter().map(|benchmark| json!({
+    let benchmark_rows = benchmark_data.iter().map(|benchmark| {
+        let mut row = json!({
             "id": benchmark.id,
             "approximate_replay": benchmark.approximate_replay,
             "execution": benchmark.execution,
@@ -252,7 +253,12 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             "series_rendering": benchmark.series.iter().map(|(name,series)|(name,series.rendering_metadata())).collect::<BTreeMap<_,_>>(),
             "status": benchmark.status,
             "artifacts": benchmark.artifacts,
-        })).collect::<Vec<_>>();
+        });
+        row["thinking_effort"] = serde_json::to_value(benchmark.thinking_effort)
+            .expect("thinking effort serializes");
+        row["model_display"] = Value::String(super::model_display(benchmark));
+        row
+    }).collect::<Vec<_>>();
     let summary = json!({
         "schema_version": 2,
         "cohort_analysis": prepared.cohort_analysis,

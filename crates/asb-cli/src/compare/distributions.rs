@@ -142,6 +142,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             trial_label(row),
             &row.provider,
             &row.model,
+            row.thinking_effort,
             serde_json::to_string(&dataset).expect("dataset identity serializes"),
             serde_json::to_string(&row.module).expect("module identity serializes"),
         );
@@ -157,7 +158,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             escape(&first.workload),
             escape(trial_label(first)),
             escape(&first.provider),
-            escape(&first.model)
+            escape(&super::model_display(first))
         ));
     }
     html.push_str("</ul></nav></section>");
@@ -208,7 +209,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             .into_iter()
             .collect::<Vec<_>>()
             .join(", ");
-        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&first.model), group.len(), concurrencies));
+        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&super::model_display(first)), group.len(), concurrencies));
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }

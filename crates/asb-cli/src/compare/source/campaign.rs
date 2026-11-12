@@ -106,6 +106,7 @@ pub(super) fn rows(
         workload: configuration.workload.clone(),
         provider: configuration.provider.clone(),
         model: configuration.model.clone(),
+        thinking_effort: configuration.thinking_effort,
         concurrency: configuration.concurrency,
         batch: None,
         expected_execution: None,

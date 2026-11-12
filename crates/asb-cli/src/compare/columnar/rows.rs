@@ -16,7 +16,7 @@ fn record(
             serde_json::to_string(&benchmark.id).map_err(failure)?,
             benchmark.agent.clone(),
             benchmark.provider.clone(),
-            benchmark.model.clone(),
+            super::super::model_display(benchmark),
             benchmark.workload.clone(),
             trial_label(benchmark).into(),
             family.into(),
