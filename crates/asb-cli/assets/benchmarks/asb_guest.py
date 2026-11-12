@@ -44,6 +44,26 @@ def write_preparation_budget_artifact(task, name, value):
         os.close(descriptor)
 
 
+def preparation_failure_code(error):
+    """Return an allowlisted cause code without persisting error text."""
+    if not isinstance(error, ExecutionError):
+        return None
+    message = str(error)
+    for prefix, code in [
+        ("container execution gate did not become ready", "gate-not-ready"),
+        ("container execution gate returned", "gate-invalid-readiness"),
+        ("container gate did not identify", "gate-invalid-pid"),
+        ("container execution preparation was cancelled", "gate-preparation-cancelled"),
+        ("cannot read isolated measurement identity", "measurement-identity"),
+        ("isolated process did not return valid measurement identity", "measurement-identity"),
+        ("container execution gate could not be resumed", "gate-release"),
+        ("application gate resume control", "gate-release"),
+    ]:
+        if message.startswith(prefix):
+            return code
+    return "execution-error-other"
+
+
 def experimental_snapshot_roots(configured):
     if configured is None:
         return []
@@ -674,6 +694,7 @@ def execute_agent(task, request, before_resume, on_output, cancelled, on_ended=N
                     "upstream_cancelled": upstream.is_set() if upstream is not None else False,
                     "failure_kind": failure_kind,
                     "stage": preparation_stage[0],
+                    "failure_code": preparation_failure_code(error),
                 })
                 preparation_budget.fail()
             raise
