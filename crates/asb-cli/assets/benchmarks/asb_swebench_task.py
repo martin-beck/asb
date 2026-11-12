@@ -348,7 +348,8 @@ class SweBenchTask:
         finally:
             self.preparing_repository = False
 
-    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None, description=None):
+    def checked(self, argv, output_limit=256 * 1024, environment=None, timeout=None, description=None,
+                preparation_budget=None):
         if timeout is None:
             # Staging and submission helpers run outside repository setup but
             # still precede or follow the agent's separately timed execution.
@@ -356,7 +357,12 @@ class SweBenchTask:
             timeout = _REPOSITORY_COMMAND_SECONDS
         options = {"environment": environment, "timeout": timeout,
                    "output_limit": output_limit, "cancelled": self.cancelled}
-        if self.preparing_repository:
+        if preparation_budget is not None:
+            # Agent-environment activation precedes the stopped target, so its
+            # Docker exec startup belongs to the cohort-wide launch budget.
+            # Preserve the helper's own short command timeout independently.
+            options["preparation_timeout"] = preparation_budget.remaining()
+        elif self.preparing_repository:
             options["preparation_timeout"] = _REPOSITORY_GATE_PREPARATION_SECONDS
         result = self.workspace.execute(argv, **options)
         if result["output_truncated"] and not result["timed_out"] and not result["cancelled"] and result["exit_code"] == 0:
@@ -381,7 +387,8 @@ class SweBenchTask:
         output = self.checked(["/bin/bash", "-c",
             'source /opt/miniconda3/bin/activate "$1" >/dev/null && '
             'printf "%s\\0%s\\0%s\\0%s\\0" "$PATH" "$CONDA_PREFIX" "$CONDA_DEFAULT_ENV" "$CONDA_SHLVL"',
-            "asb-swe-env", CONTAINER_ENV_NAME], environment=probe_environment, timeout=remaining())
+            "asb-swe-env", CONTAINER_ENV_NAME], environment=probe_environment, timeout=remaining(),
+                              preparation_budget=preparation_budget)
         try:
             fields = output.decode("utf-8").split("\0")
             if len(fields) != 5 or fields[-1] or not all(fields[:4]):
@@ -392,7 +399,7 @@ class SweBenchTask:
         except (UnicodeDecodeError, ValueError):
             raise ExecutionError("SWE-bench task environment activation returned invalid metadata") from None
         timestamp = self.checked(["git", "show", "-s", "--format=%ct", self.row["base_commit"]],
-                                 timeout=remaining()).strip()
+                                 timeout=remaining(), preparation_budget=preparation_budget).strip()
         if not re.fullmatch(rb"[0-9]{1,12}", timestamp):
             raise ExecutionError("SWE-bench base commit timestamp is invalid")
         result = dict(environment, PATH=path, CONDA_PREFIX=prefix,

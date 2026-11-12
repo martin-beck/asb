@@ -72,6 +72,13 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 600)
         task.checked(['id', '-g'], timeout=4)
         self.assertEqual(task.workspace.execute.call_args.kwargs['timeout'], 4)
+        budget = MagicMock()
+        budget.remaining.return_value = 1234
+        task.checked(['git', 'status'], timeout=60, preparation_budget=budget)
+        options = task.workspace.execute.call_args.kwargs
+        self.assertEqual(options['timeout'], 60)
+        self.assertEqual(options['preparation_timeout'], 1234)
+        budget.remaining.assert_called_once_with()
 
     def test_history_fetch_has_a_separate_bounded_setup_budget(self):
         task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
@@ -112,6 +119,12 @@ class SubmissionRecoveryTests(unittest.TestCase):
             custom = task.agent_environment({'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.abbrev', 'GIT_CONFIG_VALUE_0': '12'})
             self.assertEqual(custom['GIT_CONFIG_VALUE_0'], '12')
             self.assertEqual(calls[0][1]['environment'], {'PATH':'/custom/bin'})
+            calls.clear()
+            budget = MagicMock()
+            budget.remaining.return_value = 7200
+            task.agent_environment({'PATH':'/custom/bin'}, preparation_budget=budget)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(call[1]['preparation_budget'] is budget for call in calls))
             task.checked = lambda *args, **kwargs: b'invalid'
             with self.assertRaises(task_module.ExecutionError):
                 task.agent_environment({})
