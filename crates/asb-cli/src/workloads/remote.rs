@@ -28,6 +28,7 @@ const COHORT_IDLE_ALLOWANCE: Duration = Duration::from_secs(120);
 const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
 const RESUME_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+const TARGET_VERIFICATION_RETRY: Duration = Duration::from_secs(30);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
@@ -54,6 +55,30 @@ fn attach_target_before_launch<T>(
         collector_ready.arm()?;
     }
     Ok(attached)
+}
+
+/// A Docker exec target can be announced just before all of its host `/proc`
+/// details are coherent.  Retry only the known local-publication observations
+/// while the target remains stopped; malformed controller identity is never
+/// retried or admitted.
+fn verify_stopped_target_until(
+    event: &Value,
+    deadline: Instant,
+    mut verify: impl FnMut(&Value) -> Result<super::target::LocalTarget, String>,
+) -> Result<super::target::LocalTarget, String> {
+    let retry_deadline = deadline.min(Instant::now() + TARGET_VERIFICATION_RETRY);
+    loop {
+        match verify(event) {
+            Ok(target) => return Ok(target),
+            Err(error)
+                if super::target::retryable_verification_error(&error)
+                    && Instant::now() < retry_deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn preparation_seconds(workload: &str, configured: Option<u64>) -> u64 {
@@ -1511,7 +1536,11 @@ impl Session {
             }
             let (target, target_sha256) =
                 attach_target_before_launch(context.launch, context.collector_ready, || {
-                    let target = super::target::verify(&event["target"])?;
+                    let target = verify_stopped_target_until(
+                        &event["target"],
+                        deadline,
+                        super::target::verify,
+                    )?;
                     let target_evidence = json!({
                         "schema_version":1,"scope":"verified-local-isolated-process-tree",
                         "host_pid":target.pid,"namespace_pid":target.namespace_pid,
@@ -1981,6 +2010,48 @@ mod tests {
             *events.borrow(),
             ["attached", "launch", "collector-arm", "collector-ready"]
         );
+    }
+
+    #[test]
+    fn stopped_target_verification_retries_only_transient_local_observations() {
+        let target = serde_json::json!({"fixture": true});
+        let attempts = std::cell::Cell::new(0);
+        let result = super::verify_stopped_target_until(
+            &target,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err("cannot identify the stopped agent under its owned driver".into())
+                } else {
+                    Ok(crate::workloads::target::LocalTarget {
+                        pid: 2,
+                        namespace_pid: 2,
+                        start_time_ticks: 1,
+                        cgroup: std::path::PathBuf::from("/sys/fs/cgroup/fixture"),
+                    })
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(result.pid, 2);
+
+        let attempts = std::cell::Cell::new(0);
+        let error = super::verify_stopped_target_until(
+            &target,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err("isolated measurement target has invalid identity fields".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "isolated measurement target has invalid identity fields"
+        );
+        assert_eq!(attempts.get(), 1);
     }
 
     #[test]
