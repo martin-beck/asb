@@ -472,9 +472,12 @@ fn write_progress(
             .map(|ch| if ch.is_control() { ' ' } else { ch })
             .collect::<String>()
     };
+    let thinking_effort = config
+        .thinking_effort
+        .map_or("default", |effort| effort.as_str());
     writeln!(
         output,
-        "Starting benchmark ({}/{}; {}% reached): {} — {}, {}, {}, {}, trial {} (concurrency {})",
+        "Starting benchmark ({}/{}; {}% reached): {} — {}, {}, {}, {}, trial {} (thinking effort {}, concurrency {})",
         index + 1,
         total,
         (index + 1) * 100 / total,
@@ -484,6 +487,7 @@ fn write_progress(
         one_line(&config.model),
         one_line(&config.workload),
         one_line(config.trial.as_deref().unwrap_or("default")),
+        thinking_effort,
         config.concurrency,
     )
     .and_then(|_| output.flush())
@@ -741,9 +745,33 @@ mod tests {
         let text = String::from_utf8(capture.bytes).unwrap();
         assert!(capture.flushed);
         assert!(text.contains("(2/3; 66% reached): bad name.toml"));
-        assert!(text.contains("trial default (concurrency 1)"));
+        assert!(text.contains("trial default (thinking effort default, concurrency 1)"));
         assert_eq!(text.lines().count(), 1);
         assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn progress_distinguishes_configured_thinking_effort() {
+        let high: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='local'\nmodel='model'\nthinking_effort='high'\n",
+        )
+        .unwrap();
+        let mut xhigh = high.clone();
+        xhigh.thinking_effort = Some(crate::benchmark::ThinkingEffort::XHigh);
+
+        for (config, effort) in [(high, "high"), (xhigh, "xhigh")] {
+            let mut output = Vec::new();
+            write_progress(
+                &mut output,
+                0,
+                2,
+                std::path::Path::new("test.toml"),
+                &config,
+            )
+            .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains(&format!("thinking effort {effort}")));
+        }
     }
 
     #[test]
