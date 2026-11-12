@@ -196,7 +196,8 @@ class GradeImportTests(unittest.TestCase):
             shutil.copytree(original,target)
             inputs = {}
             for relative in ["dataset.json","submission.jsonl","sdk-identity.json","image-identity.json",
-                             "report.json","summary.json","resources.json","cleanup.json","evaluation.json"]:
+                             "official-test-application.json","report.json","summary.json","resources.json",
+                             "cleanup.json","evaluation.json"]:
                 body = (original/relative).read_bytes()
                 inputs[source+"/"+relative] = {"sha256":hashlib.sha256(body).hexdigest(),"bytes":len(body)}
             result["reconstruction"] = {"schema_version":1,"scope":"existing-official-reports-not-test-retry",
@@ -230,6 +231,12 @@ class GradeImportTests(unittest.TestCase):
         compared = fixture.run("compare","sweep.toml")
         self.assertEqual(compared.returncode,0,compared.stderr.decode())
         before = {path:path.read_bytes() for path in fixture.imports()}
+        receipt = originals[0]/"official-test-application.json"
+        receipt_bytes = receipt.read_bytes()
+        receipt.unlink()
+        self.assertNotEqual(fixture.run("compare","sweep.toml").returncode,0)
+        self.assertEqual(before,{path:path.read_bytes() for path in fixture.imports()})
+        receipt.write_bytes(receipt_bytes)
         for index in range(3):
             edited = flip_derived(index)
             self.assertNotEqual(fixture.run("compare","sweep.toml").returncode,0)
