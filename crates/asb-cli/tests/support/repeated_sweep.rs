@@ -215,6 +215,86 @@ pub(super) fn registered_project(concurrency: usize) -> Project {
 }
 
 #[test]
+fn portable_bundle_replays_a_recorded_sweep_in_a_fresh_initialized_project() {
+    let source = registered_project(1);
+    let provider = RecordingProvider::new();
+    let recorded = sweep(
+        &source,
+        Some(&provider),
+        &["--record", "--cassette-root", "recordings"],
+    );
+    assert!(
+        recorded.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recorded.stdout),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let bundle = source.0.join("portable-sweep.zip");
+    let exported = Command::new(env!("CARGO_BIN_EXE_asb"))
+        .current_dir(&source.0)
+        .isolated_env()
+        .env("HOME", &source.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args([
+            "cassette",
+            "export",
+            "sweep.toml",
+            "--cassette-root",
+            "recordings",
+            "--output",
+        ])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&exported.stdout),
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert!(bundle.is_file());
+
+    let target = registered_project(1);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asb"));
+    command.current_dir(&target.0).isolated_env();
+    retain_host_rust_toolchain(&mut command);
+    let replayed = command
+        .env("HOME", &target.0)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(["cassette", "replay"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(
+        replayed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        records(&fs::read(target.0.join("attempts.jsonl")).unwrap()).len(),
+        1
+    );
+    let stages = target.0.join(".asb/cassette-replays");
+    let entries = fs::read_dir(stages)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].path().join("sweep.toml").is_file());
+    assert!(entries[0].path().join("configs/000000.toml").is_file());
+    assert!(
+        entries[0]
+            .path()
+            .join("cassettes/000-000000/recording.asb.zip")
+            .is_file()
+    );
+}
+
+#[test]
 fn replay_sweep_ignores_only_selected_failures_and_persists_policy() {
     let project = registered_project(1);
     let input = project.0.join("replay-input/000-benchmark/cassettes");
