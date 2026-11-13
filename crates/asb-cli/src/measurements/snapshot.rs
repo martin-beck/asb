@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -20,8 +20,36 @@ type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
 
 // A snapshot cancellation can first spend the gate's bounded owned-cleanup
 // window. Keep a small scheduler margin so its owner does not report an
-// otherwise bounded cleanup as unconfirmed at the same deadline.
+// otherwise bounded cleanup as unconfirmed at the same deadline. Dense
+// cohorts cancel many pidstat-style subprocesses together, so make that
+// margin proportional to the locally active snapshot population while keeping
+// a firm upper bound.
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
+const SETTLEMENT_SNAPSHOTS_PER_SECOND: usize = 8;
+const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(60);
+static ACTIVE_SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
+
+struct SnapshotReservation;
+
+impl SnapshotReservation {
+    fn acquire() -> Self {
+        ACTIVE_SNAPSHOTS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for SnapshotReservation {
+    fn drop(&mut self) {
+        ACTIVE_SNAPSHOTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn settlement_budget(active_snapshots: usize) -> Duration {
+    let extra_seconds = active_snapshots.div_ceil(SETTLEMENT_SNAPSHOTS_PER_SECOND) as u64;
+    SETTLEMENT_BUDGET
+        .saturating_add(Duration::from_secs(extra_seconds))
+        .min(MAX_SETTLEMENT_BUDGET)
+}
 
 fn record_stop_deadline(slot: &Mutex<Option<Instant>>, deadline: Instant) {
     let mut slot = slot.lock().unwrap_or_else(|error| error.into_inner());
@@ -89,7 +117,9 @@ impl ProcessTreeSnapshot {
         let cancelled = Arc::clone(&stop);
         let stop_deadline = Arc::new(Mutex::new(None));
         let cancellation_deadline = Arc::clone(&stop_deadline);
+        let reservation = SnapshotReservation::acquire();
         let handle = spawn(Box::new(move || {
+            let _reservation = reservation;
             // A cohort attaches collectors to a stopped target before the
             // shared launch rendezvous. Do not let that admission interval
             // become a pidstat-style measurement sample; native execution
@@ -149,8 +179,8 @@ impl ProcessTreeSnapshot {
         record_stop_deadline(&self.stop_deadline, deadline);
         self.stop.store(true, Ordering::Release);
     }
-    pub(super) const fn stop_budget() -> Duration {
-        SETTLEMENT_BUDGET
+    pub(super) fn stop_budget() -> Duration {
+        settlement_budget(ACTIVE_SNAPSHOTS.load(Ordering::Acquire))
     }
     pub(super) fn stop_before_with_owner(
         mut self,
@@ -572,6 +602,15 @@ mod io_tests {
         record_stop_deadline(&deadlines, outer);
         record_stop_deadline(&deadlines, Instant::now() + Duration::from_secs(8));
         assert_eq!(stop_deadline(Some(&deadlines)), outer);
+    }
+
+    #[test]
+    fn snapshot_settlement_budget_scales_for_dense_cohorts_and_stays_bounded() {
+        assert_eq!(settlement_budget(0), Duration::from_secs(8));
+        assert_eq!(settlement_budget(8), Duration::from_secs(9));
+        assert_eq!(settlement_budget(128), Duration::from_secs(24));
+        assert_eq!(settlement_budget(256), Duration::from_secs(40));
+        assert_eq!(settlement_budget(1_000), Duration::from_secs(60));
     }
 
     #[test]
