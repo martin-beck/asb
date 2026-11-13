@@ -73,6 +73,14 @@ fn resume_ack_timeout(cohort_size: usize) -> Duration {
         .saturating_add(RESUME_ACK_QUEUE_ALLOWANCE_PER_MEMBER.saturating_mul(queued_members))
 }
 
+fn effective_resume_deadline(
+    now: Instant,
+    execution_deadline: Instant,
+    cohort_size: usize,
+) -> Instant {
+    execution_deadline.max(now + resume_ack_timeout(cohort_size))
+}
+
 /// A Docker exec target can be announced just before all of its host `/proc`
 /// details are coherent.  Retry only the known local-publication observations
 /// while the target remains stopped; malformed controller identity is never
@@ -1451,6 +1459,12 @@ impl Session {
                         return Err("isolated execution returned a second launch target".into());
                     }
                     self.resume_measured_target(context, &event, deadline)?;
+                    if let Some(resume_deadline) = self.resume_ack_deadline {
+                        // Cohort release happens before agent execution. Its
+                        // bounded queue must not consume the selected agent
+                        // execution budget.
+                        deadline = deadline.max(resume_deadline);
+                    }
                     launched = true;
                     // Recording and replay can be silent until the first
                     // provider response. Show the same immediate live frame
@@ -1460,7 +1474,10 @@ impl Session {
                     }
                 }
                 Some(EventKind::ReleaseAccepted) => {
-                    self.verify_effective_resume(context, &event)?
+                    self.verify_effective_resume(context, &event)?;
+                    // Start the selected execution allowance only after the
+                    // workload has durably accepted the shared release.
+                    deadline = Instant::now() + self.agent_timeout;
                 }
                 Some(EventKind::PreparationFailed) => {
                     preparation_failed = true;
@@ -1656,8 +1673,11 @@ impl Session {
         ) {
             write_cohort_release_receipt(session, target_sha256, "resume_sent")?;
         }
-        self.resume_ack_deadline =
-            Some((Instant::now() + resume_ack_timeout(context.config.concurrency)).min(deadline));
+        self.resume_ack_deadline = Some(effective_resume_deadline(
+            Instant::now(),
+            deadline,
+            context.config.concurrency,
+        ));
         self.resume_exec_id = Some(event["target"]["exec_id"].clone());
         self.resume_target_sha256 = verified_target;
         Ok(())

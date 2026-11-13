@@ -35,6 +35,19 @@ fn effective_resume_ack_timeout_includes_a_bounded_dense_cohort_queue_allowance(
     );
 }
 
+#[test]
+fn effective_resume_deadline_never_truncates_the_dense_cohort_queue() {
+    let now = Instant::now();
+    assert_eq!(
+        effective_resume_deadline(now, now + Duration::from_secs(90), 128),
+        now + Duration::from_secs(314)
+    );
+    assert_eq!(
+        effective_resume_deadline(now, now + Duration::from_secs(600), 128),
+        now + Duration::from_secs(600)
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
