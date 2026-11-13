@@ -800,10 +800,13 @@ class GuestBootstrapTests(unittest.TestCase):
                 class Relay:
                     ports = (10001, 10002)
                     closed = False
-                    def __init__(self, targets, command, cancellation, diagnostic_path):
+                    def __init__(self, targets, command, cancellation, diagnostic_path, process_start):
                         self.targets = targets
                         self.cancellation = cancellation
                         self.diagnostic_path = diagnostic_path
+                        self.process_start = process_start
+                        self.process = process_start(["relay-fixture"])
+                        self.ready_outside_serialized_start = not active[0]
                         resources.append(self)
                     def close(self):
                         self.closed = True
@@ -827,13 +830,19 @@ class GuestBootstrapTests(unittest.TestCase):
                     "bootstrap":{"runtime_tools":[],"assets":[]},
                     "request":{"config":{"agent":"pi"},"connection":{"base_url":"http://localhost:8000/v1"}}}
                 sections = []
+                active = [False]
                 @contextmanager
                 def serialized(aborted):
                     sections.append(aborted)
                     self.assertFalse(aborted())
-                    yield
+                    active[0] = True
+                    try:
+                        yield
+                    finally:
+                        active[0] = False
                 with patch("asb_guest.HostRelay", Relay), \
                      patch("asb_guest._gate_resume_section", side_effect=serialized), \
+                     patch("asb_guest.subprocess.Popen", return_value=object()), \
                      patch("asb_docker.docker_command", return_value=["docker-fixture"]):
                     if failure:
                         with self.assertRaises(ExecutionError):
@@ -842,6 +851,7 @@ class GuestBootstrapTests(unittest.TestCase):
                         execute_agent(task,request,None,None,None)
                 self.assertTrue(resources[0].closed)
                 self.assertEqual(len(sections), 1)
+                self.assertTrue(resources[0].ready_outside_serialized_start)
                 self.assertEqual(resources[0].targets, [("localhost",8000),("localhost",3128)])
                 self.assertIsNone(resources[0].cancellation)
                 self.assertEqual(resources[0].diagnostic_path, root / "endpoint-relay-0.json")

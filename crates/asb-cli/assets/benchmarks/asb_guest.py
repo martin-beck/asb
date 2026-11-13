@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import subprocess
 import tarfile
 import tempfile
 import time
@@ -599,14 +600,16 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         def relay_start_aborted():
             return ((cancelled is not None and cancelled.is_set()) or
                     (preparation_budget is not None and preparation_budget.expired()))
-        # The relay is another Docker exec control-plane client. Starting all
-        # relays at once can close one stream before its guest has attached.
-        # Reuse the bounded host-wide gate section; agent execution remains
-        # outside this lock and therefore concurrent.
-        with _gate_resume_section(relay_start_aborted):
-            relay = HostRelay(targets, [*docker_command(), "exec", "-i", container.id,
-                                       "/opt/asb-runtime/asb", "__asb-relay"], cancelled,
-                              task.artifacts / f"endpoint-relay-{len(relays)}.json")
+        def start_relay_process(arguments, **options):
+            # Starting all Docker exec control streams at once can close one
+            # before its guest attaches. Serialize only the spawn: relay
+            # readiness must remain concurrent across the cohort.
+            with _gate_resume_section(relay_start_aborted):
+                return subprocess.Popen(arguments, **options)
+        relay = HostRelay(targets, [*docker_command(), "exec", "-i", container.id,
+                                   "/opt/asb-runtime/asb", "__asb-relay"], cancelled,
+                          task.artifacts / f"endpoint-relay-{len(relays)}.json",
+                          start_relay_process)
         resources.callback(relay.close)
         relays.append(relay)
         return relay
