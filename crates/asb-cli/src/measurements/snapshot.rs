@@ -22,12 +22,12 @@ type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
 // window. Keep a small scheduler margin so its owner does not report an
 // otherwise bounded cleanup as unconfirmed at the same deadline. Dense
 // cohorts cancel many pidstat-style subprocesses together, so make that
-// margin proportional to the locally active snapshot population while keeping
-// a firm upper bound.
+// margin proportional to queued gate waves while keeping a firm upper bound.
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
-const SETTLEMENT_SNAPSHOTS_PER_SECOND: usize = 4;
-const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(60);
-const MAX_CONCURRENT_SNAPSHOT_COMMANDS: usize = 16;
+const SNAPSHOT_WAVE_SETTLEMENT_BUDGET: Duration = Duration::from_secs(15);
+const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+const MIN_CONCURRENT_SNAPSHOT_COMMANDS: usize = 4;
+const MAX_CONCURRENT_SNAPSHOT_COMMANDS: usize = 64;
 static ACTIVE_SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
 static SNAPSHOT_COMMAND_SLOTS: OnceLock<SnapshotCommandSlots> = OnceLock::new();
 
@@ -46,25 +46,53 @@ impl Drop for SnapshotReservation {
     }
 }
 
-fn settlement_budget(active_snapshots: usize) -> Duration {
-    let extra_seconds = active_snapshots.div_ceil(SETTLEMENT_SNAPSHOTS_PER_SECOND) as u64;
+fn snapshot_command_limit_for(available_parallelism: usize) -> usize {
+    available_parallelism.div_ceil(2).clamp(
+        MIN_CONCURRENT_SNAPSHOT_COMMANDS,
+        MAX_CONCURRENT_SNAPSHOT_COMMANDS,
+    )
+}
+
+fn snapshot_command_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .map(snapshot_command_limit_for)
+        .unwrap_or(MIN_CONCURRENT_SNAPSHOT_COMMANDS)
+}
+
+fn settlement_budget_for(active_snapshots: usize, command_limit: usize) -> Duration {
+    let waves = active_snapshots.div_ceil(command_limit.max(1)) as u64;
     SETTLEMENT_BUDGET
-        .saturating_add(Duration::from_secs(extra_seconds))
+        .saturating_add(SNAPSHOT_WAVE_SETTLEMENT_BUDGET.saturating_mul(waves as u32))
         .min(MAX_SETTLEMENT_BUDGET)
 }
 
+fn settlement_budget(active_snapshots: usize) -> Duration {
+    settlement_budget_for(active_snapshots, snapshot_command_limit())
+}
+
+fn observation_runtime_for(
+    requested: Duration,
+    active_snapshots: usize,
+    command_limit: usize,
+) -> Duration {
+    requested.saturating_mul(active_snapshots.div_ceil(command_limit.max(1)).max(1) as u32)
+}
+
 fn observation_runtime(requested: Duration, active_snapshots: usize) -> Duration {
-    requested.saturating_add(settlement_budget(active_snapshots).saturating_sub(SETTLEMENT_BUDGET))
+    observation_runtime_for(requested, active_snapshots, snapshot_command_limit())
 }
 
 struct SnapshotCommandSlots {
+    limit: usize,
     used: Mutex<usize>,
     available: Condvar,
 }
 
 impl SnapshotCommandSlots {
-    const fn new() -> Self {
+    const fn new(limit: usize) -> Self {
         Self {
+            limit,
             used: Mutex::new(0),
             available: Condvar::new(),
         }
@@ -76,7 +104,7 @@ impl SnapshotCommandSlots {
         deadline: Instant,
     ) -> Result<Option<SnapshotCommandReservation<'_>>, String> {
         let mut used = self.used.lock().unwrap_or_else(|error| error.into_inner());
-        while *used >= MAX_CONCURRENT_SNAPSHOT_COMMANDS {
+        while *used >= self.limit {
             if cancelled.load(Ordering::Acquire) {
                 return Ok(None);
             }
@@ -116,7 +144,7 @@ impl Drop for SnapshotCommandReservation<'_> {
 }
 
 fn snapshot_command_slots() -> &'static SnapshotCommandSlots {
-    SNAPSHOT_COMMAND_SLOTS.get_or_init(SnapshotCommandSlots::new)
+    SNAPSHOT_COMMAND_SLOTS.get_or_init(|| SnapshotCommandSlots::new(snapshot_command_limit()))
 }
 
 fn record_stop_deadline(slot: &Mutex<Option<Instant>>, deadline: Instant) {
@@ -680,39 +708,50 @@ mod io_tests {
     }
 
     #[test]
-    fn snapshot_settlement_budget_scales_for_dense_cohorts_and_stays_bounded() {
-        assert_eq!(settlement_budget(0), Duration::from_secs(8));
-        assert_eq!(settlement_budget(4), Duration::from_secs(9));
-        assert_eq!(settlement_budget(128), Duration::from_secs(40));
-        assert_eq!(settlement_budget(256), Duration::from_secs(60));
-        assert_eq!(settlement_budget(1_000), Duration::from_secs(60));
+    fn snapshot_command_limit_tracks_host_capacity_with_firm_bounds() {
+        assert_eq!(snapshot_command_limit_for(1), 4);
+        assert_eq!(snapshot_command_limit_for(8), 4);
+        assert_eq!(snapshot_command_limit_for(32), 16);
+        assert_eq!(snapshot_command_limit_for(128), 64);
+        assert_eq!(snapshot_command_limit_for(1_000), 64);
     }
 
     #[test]
-    fn snapshot_observation_runtime_has_the_same_bounded_dense_queue_allowance() {
+    fn snapshot_settlement_budget_covers_bounded_queue_waves() {
+        assert_eq!(settlement_budget_for(0, 64), Duration::from_secs(8));
+        assert_eq!(settlement_budget_for(128, 64), Duration::from_secs(38));
+        assert_eq!(settlement_budget_for(256, 64), Duration::from_secs(68));
+        assert_eq!(settlement_budget_for(256, 16), Duration::from_secs(248));
+        assert_eq!(settlement_budget_for(1_000, 4), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn snapshot_observation_runtime_covers_the_current_queue_depth() {
         assert_eq!(
-            observation_runtime(Duration::from_secs(6), 0),
+            observation_runtime_for(Duration::from_secs(6), 0, 64),
             Duration::from_secs(6)
         );
         assert_eq!(
-            observation_runtime(Duration::from_secs(6), 128),
-            Duration::from_secs(38)
+            observation_runtime_for(Duration::from_secs(6), 128, 64),
+            Duration::from_secs(12)
         );
         assert_eq!(
-            observation_runtime(Duration::from_secs(6), 256),
-            Duration::from_secs(58)
+            observation_runtime_for(Duration::from_secs(6), 256, 64),
+            Duration::from_secs(24)
+        );
+        assert_eq!(
+            observation_runtime_for(Duration::from_secs(6), 256, 16),
+            Duration::from_secs(96)
         );
     }
 
     #[test]
     fn queued_snapshot_command_cancels_before_acquiring_a_slot() {
-        let slots = SnapshotCommandSlots::new();
+        let slots = SnapshotCommandSlots::new(1);
         let cancelled = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut held = Vec::new();
-        for _ in 0..MAX_CONCURRENT_SNAPSHOT_COMMANDS {
-            held.push(slots.acquire(&cancelled, deadline).unwrap().unwrap());
-        }
+        held.push(slots.acquire(&cancelled, deadline).unwrap().unwrap());
         cancelled.store(true, Ordering::Release);
         assert!(slots.acquire(&cancelled, deadline).unwrap().is_none());
         drop(held);
