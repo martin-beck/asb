@@ -25,7 +25,7 @@ type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
 // margin proportional to the locally active snapshot population while keeping
 // a firm upper bound.
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
-const SETTLEMENT_SNAPSHOTS_PER_SECOND: usize = 8;
+const SETTLEMENT_SNAPSHOTS_PER_SECOND: usize = 4;
 const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(60);
 static ACTIVE_SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -49,6 +49,10 @@ fn settlement_budget(active_snapshots: usize) -> Duration {
     SETTLEMENT_BUDGET
         .saturating_add(Duration::from_secs(extra_seconds))
         .min(MAX_SETTLEMENT_BUDGET)
+}
+
+fn observation_runtime(requested: Duration, active_snapshots: usize) -> Duration {
+    requested.saturating_add(settlement_budget(active_snapshots).saturating_sub(SETTLEMENT_BUDGET))
 }
 
 fn record_stop_deadline(slot: &Mutex<Option<Instant>>, deadline: Instant) {
@@ -438,7 +442,8 @@ fn observe(
         .and_then(|()| nonblocking(&err))
         .map_err(|error| error.to_string())?;
     gate.resume().map_err(|error| error.to_string())?;
-    let deadline = Instant::now() + request.runtime;
+    let deadline = Instant::now()
+        + observation_runtime(request.runtime, ACTIVE_SNAPSHOTS.load(Ordering::Acquire));
     let mut output = [Vec::new(), Vec::new()];
     let mut eof = [false; 2];
     let mut exited = false;
@@ -607,10 +612,26 @@ mod io_tests {
     #[test]
     fn snapshot_settlement_budget_scales_for_dense_cohorts_and_stays_bounded() {
         assert_eq!(settlement_budget(0), Duration::from_secs(8));
-        assert_eq!(settlement_budget(8), Duration::from_secs(9));
-        assert_eq!(settlement_budget(128), Duration::from_secs(24));
-        assert_eq!(settlement_budget(256), Duration::from_secs(40));
+        assert_eq!(settlement_budget(4), Duration::from_secs(9));
+        assert_eq!(settlement_budget(128), Duration::from_secs(40));
+        assert_eq!(settlement_budget(256), Duration::from_secs(60));
         assert_eq!(settlement_budget(1_000), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn snapshot_observation_runtime_has_the_same_bounded_dense_queue_allowance() {
+        assert_eq!(
+            observation_runtime(Duration::from_secs(6), 0),
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            observation_runtime(Duration::from_secs(6), 128),
+            Duration::from_secs(38)
+        );
+        assert_eq!(
+            observation_runtime(Duration::from_secs(6), 256),
+            Duration::from_secs(58)
+        );
     }
 
     #[test]
