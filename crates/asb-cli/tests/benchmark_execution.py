@@ -984,6 +984,19 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(raised.exception.asb_preparation_phase, "gate-release")
         self.assertIn("kill", container.events)
 
+    def test_pre_output_watchdog_failure_retains_gate_release_phase(self):
+        workspace, container, api, _ = self.workspace()
+        original_kill = container.kill
+        def kill():
+            original_kill()
+            raise RuntimeError("fixture daemon refusal")
+        container.kill = kill
+        api.hang = True
+        with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "could not stop") as raised:
+            workspace.execute(["agent"], timeout=.02, preparation_timeout=1)
+        self.assertEqual(raised.exception.asb_preparation_phase, "gate-release")
+        self.assertIn("kill", container.events)
+
     def test_transport_close_failure_quiesces_namespace_instead_of_claiming_completion(self):
         workspace,container,api,_ = self.workspace()
         class FailedClose(RUNTIME.DockerExecTransport):
