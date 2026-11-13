@@ -231,6 +231,61 @@ def workload_sessions(binary, parent, path):
             assert [trial["id"] for trial in config["trials"]] == ids, (scenario, config)
 
 
+def local_arrow_sessions(binary, parent):
+    """Opt-in PTY regression for actual Left/Right setup navigation."""
+    root = parent / "local-arrow-navigation"
+    for directory in [".asb", "workloads", "home", ".asb-tools/pi/node_modules/.bin"]:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+    (root / ".asb/project.toml").write_text(
+        "tools_dir='.asb-tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n"
+    )
+    (root / "workloads/bug-fix.txt").write_text("Offline task, never executed.\n")
+    agent = root / ".asb-tools/pi/node_modules/.bin/pi"
+    agent.write_text("#!/bin/sh\nprintf unexpected > invoked-agent\nexit 99\n")
+    agent.chmod(0o755)
+
+    # F12 is intentionally unsupported. The following sequence uses the
+    # actual terminal escape codes for Right and Left, takes one step back,
+    # and publishes one concurrency-two configuration only after every pane unlocks.
+    keys = (
+        b"\x1b[24~pi \x1b[C\x1b[D\x1b[Clocal \x1b[C \x1b[C\x1b[C"
+        b"bug-fix \x1b[C\x1b[C\x1b[B \x1b[C\x1b[C"
+    )
+    code, transcript = session(binary, root, ["setup", "tui"], keys, "")
+    assert code == 0, transcript[-3000:]
+    sweeps = list(root.glob("asb-sweep-*.toml"))
+    assert len(sweeps) == 1, transcript[-3000:]
+    manifest = tomllib.loads(sweeps[0].read_text())
+    assert len(manifest["configs"]) == 1
+    config = tomllib.loads((root / manifest["configs"][0]).read_text())
+    assert config["agent"] == "pi" and config["provider"] == "local"
+    assert config["workload"] == "bug-fix" and config["concurrency"] == 2, (
+        config,
+        transcript[-3000:],
+    )
+    assert not (root / "invoked-agent").exists()
+
+    cancelled = parent / "local-arrow-cancel"
+    for directory in [".asb", "workloads", "home", ".asb-tools/pi/node_modules/.bin"]:
+        (cancelled / directory).mkdir(parents=True, exist_ok=True)
+    (cancelled / ".asb/project.toml").write_text(
+        "tools_dir='.asb-tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n"
+    )
+    (cancelled / "workloads/bug-fix.txt").write_text("Offline task, never executed.\n")
+    cancelled_agent = cancelled / ".asb-tools/pi/node_modules/.bin/pi"
+    cancelled_agent.write_bytes(agent.read_bytes())
+    cancelled_agent.chmod(0o755)
+    code, transcript = session(
+        binary,
+        cancelled,
+        ["setup", "tui"],
+        b"pi \x1b[C\x1b[D\x03",
+        "",
+    )
+    assert code != 0 and b"cancelled" in transcript, transcript[-3000:]
+    assert not list(cancelled.glob("asb-sweep-*.toml"))
+
+
 def main():
     reaped_child_tail_regression()
     binary = str(Path(sys.argv[1]).resolve())
@@ -409,6 +464,8 @@ def main():
 
         workload_sessions(binary, root, str(fixture_bin))
         assert not (root / "invoked-agent").exists()
+        if os.environ.get("ASB_TUI_LOCAL_STRESS") == "1":
+            local_arrow_sessions(binary, root)
 
 
 if __name__ == "__main__":
