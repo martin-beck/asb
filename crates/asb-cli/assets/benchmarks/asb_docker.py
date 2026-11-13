@@ -29,6 +29,10 @@ _API_TIMEOUT_SECONDS = 600.0
 _ACCESS_PROBE_TIMEOUT_SECONDS = 120.0
 _CLOSE_SECONDS = 3.0
 _TERM_GRACE = 2.0
+# Each SDK connection is a `docker system dial-stdio` child.  Keep a small
+# reusable pool so a dense replay cohort cannot turn transient SDK concurrency
+# into an unbounded population of Docker CLI processes.
+_TRANSPORT_POOL_MAXSIZE = 2
 
 
 class _CloseRecord:
@@ -338,6 +342,14 @@ class DockerSession:
                 self.sock = connections.connect(self.timeout)
 
         class Pool(UnixHTTPConnectionPool):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                # docker-py's Unix pool does not expose urllib3's `block`
+                # constructor option. Set its inherited admission behavior
+                # after construction so a saturated bounded pool waits for a
+                # reusable transport rather than spawning another CLI tunnel.
+                self.block = True
+
             def _new_conn(self):
                 return Connection(self.base_url, "unused", self.timeout)
 
@@ -346,7 +358,8 @@ class DockerSession:
                 with self.pools.lock:
                     pool = self.pools.get(url)
                     if pool is None:
-                        pool = Pool(url, "unused", self.timeout, maxsize=self.max_pool_size)
+                        pool = Pool(url, "unused", self.timeout,
+                                    maxsize=_TRANSPORT_POOL_MAXSIZE)
                         self.pools[url] = pool
                     return pool
 
