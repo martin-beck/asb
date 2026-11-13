@@ -68,7 +68,7 @@ pub(crate) fn export_sweep_at(
         let staged_entry = sweep_entry_name(index, Path::new(&format!("{index:06}.toml")));
         let cassette = match &source_root {
             Some(root) => cassette_under(root, &source_entry)?,
-            None => discover_default_cassette(base, &source_entry)?,
+            None => discover_default_cassette(parent, &source_entry)?,
         };
         // Validate the sealed inner cassette before publishing it in a portable
         // wrapper. The replay side validates it again through the normal path.
@@ -769,6 +769,77 @@ mod tests {
                 .unwrap()
                 .contains("Portable sweep replay bundle")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_discovers_default_recordings_next_to_a_nested_sweep() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("asb-portable-default-{stamp}"));
+        let sweep_dir = root.join("generated");
+        fs::create_dir_all(sweep_dir.join("cassettes/sweep-one/000-demo")).unwrap();
+        fs::write(
+            sweep_dir.join("demo.toml"),
+            "agent='pi'\nworkload='bug-fix'\nprovider='fixture'\nmodel='fixture'\n",
+        )
+        .unwrap();
+        fs::write(sweep_dir.join("sweep.toml"), "configs=['demo.toml']\n").unwrap();
+        let cassette = sweep_dir.join("cassettes/sweep-one/000-demo/recording.asb.zip");
+        let manifest = CassetteManifest {
+            schema_version: crate::cassette::SCHEMA_VERSION,
+            recording_id: "fixture-recording".into(),
+            compatibility: Compatibility {
+                agent: "pi".into(),
+                provider: "fixture".into(),
+                model: "fixture".into(),
+                workload: "bug-fix".into(),
+                task: "default".into(),
+                dataset_sha256: None,
+                prompt_sha256: crate::cassette::digest(b"prompt"),
+                material_sha256: crate::cassette::digest(b"material"),
+                protocol_sha256: None,
+                normalization_sha256: None,
+            },
+            concurrency: 1,
+            tracks: vec![Track {
+                recorder: None,
+                recorded_max_steps: None,
+                id: 1,
+                batch: 1,
+                replica: 1,
+                complete: true,
+                process_success: Some(true),
+                workload_success: Some(true),
+                bytes: 3,
+                sha256: crate::cassette::digest(b"{}\n"),
+                statistics: Statistics::default(),
+                native: None,
+                artifacts: Vec::new(),
+            }],
+            provenance: None,
+        };
+        let mut writer = ZipWriter::new(File::create(&cassette).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer.start_file("manifest.json", options).unwrap();
+        writer
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        writer.start_file("tracks/1.jsonl", options).unwrap();
+        writer.write_all(b"{}\n").unwrap();
+        writer.finish().unwrap();
+
+        export_sweep_at(
+            &root,
+            Path::new("generated/sweep.toml"),
+            None,
+            Some(Path::new("bundle.zip")),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(root.join("bundle.zip").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 }
