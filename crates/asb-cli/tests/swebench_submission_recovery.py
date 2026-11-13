@@ -89,7 +89,7 @@ class SubmissionRecoveryTests(unittest.TestCase):
                         {"workload": "swe-bench", "dataset": {}}, {"base_commit": "a" * 40})), \
                      patch.object(task_module, "sdk_identity", return_value={}), \
                      patch.object(task_module, "ResourceJournal", return_value=journal), \
-                     patch("asb_docker._session_bootstrap_section", side_effect=lambda: Lock(entered)), \
+                     patch("asb_docker._docker_control_section", side_effect=lambda: Lock(entered)), \
                      patch.object(task_module, "resolve_image", side_effect=resolve):
                     with self.assertRaises(StopLookup):
                         task.__enter__()

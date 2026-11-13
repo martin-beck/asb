@@ -96,7 +96,7 @@ class ConnectionTests(unittest.TestCase):
             def __exit__(self, *_error):
                 bootstrap.append("exited")
         with patch.object(RUNTIME, "StdioConnections", return_value=transport), \
-             patch.object(RUNTIME, "_session_bootstrap_section", return_value=Bootstrap()), \
+             patch.object(RUNTIME, "_docker_control_section", return_value=Bootstrap()), \
              patch.object(docker.APIClient, "_get", get), \
              patch.object(docker.APIClient, "ping", return_value=True):
             with RUNTIME.DockerSession() as client:

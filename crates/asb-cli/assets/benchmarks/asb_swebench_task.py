@@ -279,8 +279,8 @@ class SweBenchTask:
             # A dense replay cohort resolves the same retained image and
             # baseline at once. Serialize only these daemon control requests;
             # workspace preparation and all benchmark execution stay parallel.
-            from asb_docker import _session_bootstrap_section
-            control = _session_bootstrap_section() if self.tool_mode == "replay" else nullcontext()
+            from asb_docker import _docker_control_section
+            control = _docker_control_section() if self.tool_mode == "replay" else nullcontext()
             with control:
                 image, source = resolve_image(self.client, spec.image, lambda: build_image(
                     self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,

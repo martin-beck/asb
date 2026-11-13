@@ -39,12 +39,64 @@ class ExecutionError(RuntimeError):
 # Python processes used by a sweep. Agent and evaluator execution remain fully
 # concurrent.
 _GATE_RESUME_LOCK = threading.Lock()
+_WORKSPACE_CONTROL_LOCK = threading.Lock()
 
 
 def _gate_resume_lock_path():
     """Return a user-private, host-wide advisory-lock path for Docker resumes."""
     uid = os.getuid() if hasattr(os, "getuid") else 0
     return Path(tempfile.gettempdir()) / f"asb-docker-gate-resume-{uid}.lock"
+
+
+def _workspace_control_lock_path():
+    """Match the Docker session control lock without importing its asset."""
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return Path(tempfile.gettempdir()) / f"asb-docker-control-{uid}.lock"
+
+
+@contextmanager
+def _workspace_control_section(wait_seconds=600):
+    """Serialize bounded workspace create/start calls across local workers."""
+    if (isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
+            or wait_seconds <= 0):
+        raise ExecutionError("workspace Docker control requires a positive wait allowance")
+    with _WORKSPACE_CONTROL_LOCK:
+        if fcntl is None:
+            yield
+            return
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise ExecutionError("cannot safely coordinate workspace Docker control")
+        flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(_workspace_control_lock_path(), flags, 0o600)
+        except OSError as error:
+            raise ExecutionError("cannot open workspace Docker-control coordination lock") from error
+        try:
+            metadata = os.fstat(fd)
+            expected_uid = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
+                raise ExecutionError("workspace Docker-control lock is not a private regular file")
+            os.fchmod(fd, 0o600)
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ExecutionError("workspace Docker control did not obtain its bounded coordination lock")
+                    time.sleep(0.02)
+                except OSError as error:
+                    raise ExecutionError("cannot acquire workspace Docker-control coordination lock") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 @contextmanager
@@ -505,14 +557,18 @@ class ManagedDockerWorkspace:
         if self.journal is not None:
             self.journal.direct_container(creation)
         try:
-            self.container = self.client.containers.create(**creation)
+            # Docker create/start are short daemon control-plane operations.
+            # A dense cohort may still execute concurrently after each owned
+            # workspace has crossed this daemon-sensitive boundary.
+            with _workspace_control_section():
+                self.container = self.client.containers.create(**creation)
+                self.cleanup_status = "pending"
+                self.container.start()
         except Exception as error:
             if self.cpu_set is not None:
                 raise ExecutionError(f"cannot create managed container with CPU allocation {self.cpu_set}: {error}") from error
             raise
-        self.cleanup_status = "pending"
         try:
-            self.container.start()
             self.verify_cpu_set()
             return self
         except BaseException as error:
