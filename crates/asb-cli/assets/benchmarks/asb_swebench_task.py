@@ -157,6 +157,13 @@ def prepared_baseline_lock(catalog_path, tag, cancelled=None):
             os.close(descriptor)
 
 
+def prepared_baseline_lock_if_missing(catalog_path, tag, baseline, cancelled=None):
+    """Lock only a replay cache miss; cached baselines are safe to open in parallel."""
+    if baseline is None:
+        return prepared_baseline_lock(catalog_path, tag, cancelled)
+    return nullcontext()
+
+
 def snapshot_storage_path(artifacts, attempt, tool_mode):
     """Allocate optional replay scratch and retain its location with the attempt."""
     configured = os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT_STORAGE_ROOT') if tool_mode == 'replay' else None
@@ -285,11 +292,24 @@ class SweBenchTask:
             self.verified_replay_material = material_identity
             cache_tag, _cache_labels = prepared_baseline_labels(
                 image, self.task_id, base, material_identity)
-            cache_lock = (prepared_baseline_lock(self.catalog_path, cache_tag, self.cancelled)
-                          if self.tool_mode == "replay" else nullcontext())
+            # A verified replay cache hit is immutable and can be opened by all
+            # cohort peers concurrently. Serialize only the first creator.
+            baseline = (
+                load_prepared_baseline(self.client, image, self.task_id, base, material_identity)
+                if self.tool_mode == "replay" else None
+            )
+            cache_lock = (
+                prepared_baseline_lock_if_missing(
+                    self.catalog_path, cache_tag, baseline, self.cancelled)
+                if self.tool_mode == "replay" else nullcontext()
+            )
             with cache_lock:
-                baseline = (load_prepared_baseline(self.client, image, self.task_id, base, material_identity)
-                            if self.tool_mode == "replay" else None)
+                # Another peer may have created the baseline while this peer
+                # waited for the miss lock. Re-read under the lock before
+                # deciding whether this workspace must create it.
+                if baseline is None and self.tool_mode == "replay":
+                    baseline = load_prepared_baseline(
+                        self.client, image, self.task_id, base, material_identity)
                 workspace_image = baseline or image
                 self.workspace = ManagedDockerWorkspace(self.client, workspace_image, self.attempt, CONTAINER_WORKDIR,
                                                         journal=self.journal, snapshot=self.snapshot,

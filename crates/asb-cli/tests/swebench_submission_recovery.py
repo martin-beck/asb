@@ -26,6 +26,32 @@ class LocalWorkspace:
 
 
 class SubmissionRecoveryTests(unittest.TestCase):
+    def test_prepared_baseline_cache_hit_skips_creator_lock(self):
+        cached = object()
+        with patch.object(task_module, 'prepared_baseline_lock') as lock:
+            with task_module.prepared_baseline_lock_if_missing(
+                    'catalog.json', 'asb-swebench-baseline:' + 'a' * 64, cached):
+                pass
+        lock.assert_not_called()
+
+    def test_prepared_baseline_cache_miss_uses_creator_lock(self):
+        entered = []
+
+        class Lock:
+            def __enter__(self):
+                entered.append(True)
+
+            def __exit__(self, *unused):
+                return False
+
+        with patch.object(task_module, 'prepared_baseline_lock', return_value=Lock()) as lock:
+            with task_module.prepared_baseline_lock_if_missing(
+                    'catalog.json', 'asb-swebench-baseline:' + 'a' * 64, None):
+                pass
+        lock.assert_called_once_with(
+            'catalog.json', 'asb-swebench-baseline:' + 'a' * 64, None)
+        self.assertEqual(entered, [True])
+
     def test_large_submission_patch_is_captured_and_limit_is_explained(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); worktree = root / 'worktree'; worktree.mkdir()
