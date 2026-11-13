@@ -29,10 +29,15 @@ _API_TIMEOUT_SECONDS = 600.0
 _ACCESS_PROBE_TIMEOUT_SECONDS = 120.0
 _CLOSE_SECONDS = 3.0
 _TERM_GRACE = 2.0
-# Each SDK connection is a `docker system dial-stdio` child.  Keep a small
+# Each SDK connection is a `docker system dial-stdio` child. Keep a small,
 # reusable pool so a dense replay cohort cannot turn transient SDK concurrency
-# into an unbounded population of Docker CLI processes.
-_TRANSPORT_POOL_MAXSIZE = 2
+# into an unbounded population of Docker CLI processes. An execution attach
+# stream remains checked out for the lifetime of an agent run; a controller
+# can concurrently need a staging stream plus Docker control requests to
+# inspect and release that execution. Two connections therefore self-starve
+# before an agent can start. Four bounds that normal control-plane shape while
+# retaining a strict per-controller ceiling.
+_TRANSPORT_POOL_MAXSIZE = 4
 
 
 class _CloseRecord:
