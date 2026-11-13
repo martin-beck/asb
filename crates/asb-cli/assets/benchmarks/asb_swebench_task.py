@@ -388,8 +388,10 @@ class SweBenchTask:
             for attempt in range(_AGENT_ENVIRONMENT_PROBE_ATTEMPTS):
                 try:
                     return self.checked(argv, **options)
-                except ExecutionError:
+                except Exception as error:
                     if attempt + 1 == _AGENT_ENVIRONMENT_PROBE_ATTEMPTS:
+                        if not isinstance(error, ExecutionError):
+                            raise ExecutionError("SWE-bench task environment probe failed") from None
                         raise
                     if preparation_budget is not None:
                         preparation_budget.remaining()

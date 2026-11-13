@@ -161,6 +161,22 @@ class SubmissionRecoveryTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ['/bin/bash', '/bin/bash', 'git'])
         sleep.assert_called_once_with(0.1)
 
+    def test_agent_environment_retries_and_sanitizes_unexpected_probe_errors(self):
+        task = task_module.SweBenchTask(None, 'catalog', 'fixture', 'artifacts')
+        task.row = {'base_commit':'a' * 40}
+        task.checked = MagicMock(side_effect=RuntimeError('private transport detail'))
+        sdk = types.ModuleType('swebench.image_builder.constants')
+        sdk.CONTAINER_ENV_NAME = 'testbed'
+        with patch.dict(sys.modules, {'swebench':types.ModuleType('swebench'),
+                                     'swebench.image_builder':types.ModuleType('swebench.image_builder'),
+                                     'swebench.image_builder.constants':sdk}), \
+                patch.object(task_module.time, 'sleep') as sleep, \
+                self.assertRaisesRegex(task_module.ExecutionError, 'environment probe failed') as raised:
+            task.agent_environment({'PATH':'/fixture'})
+        self.assertNotIn('private transport detail', str(raised.exception))
+        self.assertEqual(task.checked.call_count, task_module._AGENT_ENVIRONMENT_PROBE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, task_module._AGENT_ENVIRONMENT_PROBE_ATTEMPTS - 1)
+
     def test_full_git_object_ids_preserve_distinct_commits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
