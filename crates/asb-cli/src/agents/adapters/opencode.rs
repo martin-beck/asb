@@ -528,7 +528,12 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "ASB_AGENT_API_KEY",
             connection.credential.as_deref().unwrap_or("asb-local"),
         )
-        .env("OPENCODE_CONFIG_CONTENT", configuration.to_string());
+        .env("OPENCODE_CONFIG_CONTENT", configuration.to_string())
+        // ASB supplies the complete provider and model configuration.  The
+        // public catalog refresh is both irrelevant and unavailable inside
+        // the isolated benchmark network, and a concurrent replay must not
+        // leave one startup task retrying that fetch before the task loop.
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "true");
     // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
     // materialization can give the same files a different directory-entry
     // order, which otherwise changes only the ordering of an identical tool
@@ -1046,6 +1051,9 @@ mod tests {
         assert!(command.get_envs().any(|(name, value)| {
             name == "OPENCODE_DB"
                 && value.is_some_and(|value| value == root.join("runtime/opencode-state.sqlite"))
+        }));
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "OPENCODE_DISABLE_MODELS_FETCH" && value.is_some_and(|value| value == "true")
         }));
         std::fs::remove_dir_all(root).unwrap();
     }
