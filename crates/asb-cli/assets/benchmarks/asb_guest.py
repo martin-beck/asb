@@ -17,7 +17,7 @@ import tempfile
 import time
 import threading
 
-from asb_execution import ExecutionError, principal_observation
+from asb_execution import ExecutionError, _gate_resume_section, principal_observation
 from asb_runtime import bundle, bundle_tool
 from asb_staging import upload, upload_files, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
@@ -596,9 +596,17 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         if resources is None:
             raise ExecutionError("local endpoint forwarding needs an owned execution scope")
         from asb_docker import docker_command
-        relay = HostRelay(targets, [*docker_command(), "exec", "-i", container.id,
-                                   "/opt/asb-runtime/asb", "__asb-relay"], cancelled,
-                          task.artifacts / f"endpoint-relay-{len(relays)}.json")
+        def relay_start_aborted():
+            return ((cancelled is not None and cancelled.is_set()) or
+                    (preparation_budget is not None and preparation_budget.expired()))
+        # The relay is another Docker exec control-plane client. Starting all
+        # relays at once can close one stream before its guest has attached.
+        # Reuse the bounded host-wide gate section; agent execution remains
+        # outside this lock and therefore concurrent.
+        with _gate_resume_section(relay_start_aborted):
+            relay = HostRelay(targets, [*docker_command(), "exec", "-i", container.id,
+                                       "/opt/asb-runtime/asb", "__asb-relay"], cancelled,
+                              task.artifacts / f"endpoint-relay-{len(relays)}.json")
         resources.callback(relay.close)
         relays.append(relay)
         return relay

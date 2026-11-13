@@ -8,6 +8,7 @@ import struct
 import sys
 import tarfile
 import tempfile
+from contextlib import contextmanager
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -825,13 +826,22 @@ class GuestBootstrapTests(unittest.TestCase):
                     "environment":{"HTTP_PROXY":"http://localhost:3128"},
                     "bootstrap":{"runtime_tools":[],"assets":[]},
                     "request":{"config":{"agent":"pi"},"connection":{"base_url":"http://localhost:8000/v1"}}}
-                with patch("asb_guest.HostRelay", Relay), patch("asb_docker.docker_command", return_value=["docker-fixture"]):
+                sections = []
+                @contextmanager
+                def serialized(aborted):
+                    sections.append(aborted)
+                    self.assertFalse(aborted())
+                    yield
+                with patch("asb_guest.HostRelay", Relay), \
+                     patch("asb_guest._gate_resume_section", side_effect=serialized), \
+                     patch("asb_docker.docker_command", return_value=["docker-fixture"]):
                     if failure:
                         with self.assertRaises(ExecutionError):
                             execute_agent(task,request,None,None,None)
                     else:
                         execute_agent(task,request,None,None,None)
                 self.assertTrue(resources[0].closed)
+                self.assertEqual(len(sections), 1)
                 self.assertEqual(resources[0].targets, [("localhost",8000),("localhost",3128)])
                 self.assertIsNone(resources[0].cancellation)
                 self.assertEqual(resources[0].diagnostic_path, root / "endpoint-relay-0.json")
