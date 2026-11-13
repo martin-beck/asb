@@ -75,6 +75,13 @@ impl<'a> PreparedSweep<'a> {
             &sweep,
             options.invocation_dir.unwrap_or_else(|| Path::new(".")),
         )?;
+        for entry in &mut plan.entries {
+            crate::runner::apply_replay_concurrency(
+                &mut entry.configuration,
+                options.mode,
+                options.replay_concurrency,
+            )?;
+        }
         // A sweep is one invocation: reject every statically invalid MCP
         // selection before capacity/dependency preflight or old-result
         // rotation.  Do not let a valid early entry hide a later input error.

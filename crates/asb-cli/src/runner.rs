@@ -303,6 +303,9 @@ pub(crate) struct RunOptions<'a> {
     pub interactive: bool,
     pub measurement_dir: Option<&'a str>,
     pub mode: Option<tape::Mode>,
+    /// Replay-only replica count replacing the source TOML value for this
+    /// invocation. The source configuration is never rewritten.
+    pub replay_concurrency: Option<usize>,
     /// Adapter-local tool recording/replay is independently selectable from
     /// provider recording/replay, while sharing the sealed cassette carrier.
     pub tool_mode: Option<tape::Mode>,
@@ -426,6 +429,35 @@ fn validate_explicit_tool_transport(
     Ok(())
 }
 
+/// Apply the ephemeral CLI replica override before any execution preflight.
+///
+/// Replay compatibility deliberately excludes concurrency, but the effective
+/// value must still drive runtime validation, resource planning, cassette
+/// fan-out, and result metadata. Keeping this here gives direct runs and sweep
+/// planning one validation path.
+pub(crate) fn apply_replay_concurrency(
+    config: &mut BenchmarkConfig,
+    mode: Option<tape::Mode>,
+    override_concurrency: Option<usize>,
+) -> Result<(), Error> {
+    let Some(concurrency) = override_concurrency else {
+        return Ok(());
+    };
+    if mode != Some(tape::Mode::Replay) {
+        return Err(Error::Input(
+            "--concurrency is available only with replay".into(),
+        ));
+    }
+    if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&concurrency) {
+        return Err(Error::Input(format!(
+            "--concurrency must be between 1 and {}",
+            crate::benchmark::MAX_CONCURRENCY
+        )));
+    }
+    config.concurrency = concurrency;
+    Ok(())
+}
+
 fn select_adapter_recording_transport(config: &mut BenchmarkConfig, tool_mode: Option<tape::Mode>) {
     if tool_mode == Some(tape::Mode::Record)
         && agents::find(&config.agent)
@@ -462,6 +494,7 @@ pub(crate) fn run_with_diagnostics(
     let text = read_config(config_path)?;
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
+    apply_replay_concurrency(&mut config, options.mode, options.replay_concurrency)?;
     validate_runtime_configuration(&config)?;
     validate_thinking_effort_configuration(&config)?;
     validate_runtime_target(&config)?;
@@ -2427,6 +2460,63 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_concurrency_override_is_replay_only_and_bounded() {
+        let source: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\nconcurrency=1\n",
+        )
+        .unwrap();
+        let mut effective = source.clone();
+        super::apply_replay_concurrency(&mut effective, Some(crate::tape::Mode::Replay), Some(4))
+            .unwrap();
+        assert_eq!(
+            source.concurrency, 1,
+            "source configuration stays unchanged"
+        );
+        assert_eq!(effective.concurrency, 4);
+
+        let error = super::apply_replay_concurrency(
+            &mut effective,
+            Some(crate::tape::Mode::Record),
+            Some(2),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("only with replay"));
+
+        let error = super::apply_replay_concurrency(
+            &mut effective,
+            Some(crate::tape::Mode::Replay),
+            Some(crate::benchmark::MAX_CONCURRENCY + 1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be between 1"));
+    }
+
+    #[test]
+    fn direct_replay_uses_the_concurrency_override_before_preflight() {
+        let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("benchmark.toml");
+        std::fs::write(
+            &config,
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\nconcurrency=1\n[runtime.cpu_pool]\ncpus='0'\nnum_cpus_per_instance=1\n",
+        )
+        .unwrap();
+
+        let error = super::run_with_tape(
+            config.to_str().unwrap(),
+            RunOptions {
+                mode: Some(crate::tape::Mode::Replay),
+                replay_concurrency: Some(2),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds CPU pool capacity 1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn direct_failure_without_log_reports_directory_and_preserves_error_kind() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());

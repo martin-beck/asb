@@ -331,6 +331,7 @@ pub(crate) fn run_with_interactive(
                     ignore_mcp_mismatch: options.ignore_mcp_mismatch,
                     ignore_compatibility: options.ignore_compatibility,
                     interactive: interactive && !options.json,
+                    replay_concurrency: options.concurrency.map(usize::from),
                     report_source: Some(&report_source),
                     ..Default::default()
                 },
@@ -448,6 +449,7 @@ pub(crate) fn run_with_interactive(
                     quiet_output: !options.verbose,
                     interactive: interactive && !options.json,
                     mode: tape.carrier,
+                    replay_concurrency: options.concurrency.map(usize::from),
                     tool_mode: tape.tool,
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
@@ -1453,6 +1455,9 @@ struct RunArgs {
     mcp_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
+    /// Replay with this many isolated replicas instead of the TOML concurrency.
+    #[arg(long, value_name = "N", requires = "replay-direction", value_parser = clap::value_parser!(u16).range(1..=512))]
+    concurrency: Option<u16>,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     cassette: Option<String>,
     /// Capture a bounded native workspace capsule beside an LLM recording.
@@ -1509,7 +1514,7 @@ struct SweepArgs {
     #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
     preset: Option<String>,
     /// Record and verify sweep trials, replacing failed sampled trials before publication.
-    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings"])]
+    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings", "concurrency"])]
     prepare_replay: bool,
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
@@ -1568,6 +1573,9 @@ struct SweepArgs {
     mcp_replay: bool,
     #[arg(long, help = "replay each response after its recorded response delay")]
     respect_record_timings: bool,
+    /// Replay every configuration with this many isolated replicas instead of its TOML concurrency.
+    #[arg(long, value_name = "N", requires = "replay-direction", value_parser = clap::value_parser!(u16).range(1..=512))]
+    concurrency: Option<u16>,
     #[arg(long)]
     json: bool,
     /// Print execution evidence paths, replay selections, cassette details, and report links.
@@ -2076,6 +2084,32 @@ mod tests {
                 Cli::try_parse_from(["asb", "sweep", "suite.toml", option, "513"]).is_err(),
                 "{option} must still reject values above the shared cap"
             );
+        }
+    }
+
+    #[test]
+    fn replay_concurrency_override_is_bounded_and_requires_replay() {
+        for command in ["run", "sweep"] {
+            let path = if command == "run" {
+                "benchmark.toml"
+            } else {
+                "suite.toml"
+            };
+            Cli::try_parse_from(["asb", command, path, "--replay", "--concurrency", "4"])
+                .expect("replay concurrency override parses");
+            assert!(
+                Cli::try_parse_from(["asb", command, path, "--concurrency", "4"]).is_err(),
+                "{command} must reject a non-replay override"
+            );
+            for value in ["0", "513"] {
+                assert!(
+                    Cli::try_parse_from(
+                        ["asb", command, path, "--replay", "--concurrency", value,]
+                    )
+                    .is_err(),
+                    "{command} must reject concurrency {value}"
+                );
+            }
         }
     }
 
