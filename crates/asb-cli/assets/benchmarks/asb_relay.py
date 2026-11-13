@@ -88,7 +88,8 @@ def project_toml(document):
 
 class HostRelay:
     """One owned exec process, bounded channels and buffers; no HTTP interpretation."""
-    def __init__(self, targets, command, cancelled=lambda: False, diagnostic_path=None):
+    def __init__(self, targets, command, cancelled=lambda: False, diagnostic_path=None,
+                 process_start=None):
         if not 1 <= len(targets) <= 64 or any(
                 loopback_target("http://" + ("[" + host + "]" if ":" in host else host)
                                 + ":" + str(port)) != (host, port) for host, port in targets):
@@ -104,9 +105,10 @@ class HostRelay:
         self.stderr_lock, self.stderr_done = threading.Lock(), threading.Event()
         self.cancelled_by_owner = False
         addresses = ["127.0.0.1" if host == "localhost" else host for host, _ in targets]
-        self.process = subprocess.Popen([*command, str(len(targets)), *addresses],
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
+        process_start = process_start or subprocess.Popen
+        self.process = process_start([*command, str(len(targets)), *addresses],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
         os.set_blocking(self.process.stdin.fileno(), False)
         self.stderr_reader = threading.Thread(target=self.drain_stderr, daemon=True)
         self.stderr_reader.start()
