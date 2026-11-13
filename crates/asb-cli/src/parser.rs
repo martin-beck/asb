@@ -1,8 +1,8 @@
 //! The single typed argument parser for the `asb` executable.
 
 use super::{
-    CliError, Error, completion, config, http_server, install, models, project, runner, sweep,
-    tape, tui,
+    CliError, Error, cassette_bundle, completion, config, http_server, install, models, project,
+    runner, sweep, tape, tui,
 };
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use std::ffi::OsString;
@@ -486,6 +486,23 @@ pub(crate) fn run_with_interactive(
                     }
                 })
         }
+        Some(CommandLine::Cassette(options)) => match options.command {
+            CassetteCommand::Export(options) => cassette_bundle::export_sweep_at(
+                &base,
+                &options.path,
+                options.cassette_root.as_deref(),
+                options.output.as_deref(),
+                stdout,
+            ),
+            CassetteCommand::Replay(options) => cassette_bundle::replay_at(
+                &base,
+                &options.path,
+                options.respect_record_timings,
+                options.show_output,
+                interactive,
+                stdout,
+            ),
+        },
         Some(CommandLine::Provider(options)) => match options.command {
             ProviderCommand::Models(args) => models::list(args.into(), stdout),
         },
@@ -593,7 +610,7 @@ fn close_command(args: &[OsString]) -> Option<&'static str> {
             first,
             &[
                 "init", "setup", "run", "sweep", "compare", "provider", "tool", "workload",
-                "measure",
+                "measure", "cassette",
             ],
         ),
     };
@@ -1238,6 +1255,7 @@ enum CommandLine {
     Run(RunArgs),
     Sweep(SweepArgs),
     Compare(CompareArgs),
+    Cassette(CassetteArgs),
     Provider(ProviderArgs),
     Tool(ToolArgs),
     Workload(WorkloadArgs),
@@ -1582,6 +1600,46 @@ struct CompareArgs {
     /// Open the generated HTML report in the default web browser.
     #[arg(long)]
     report: bool,
+}
+
+#[derive(Debug, Args)]
+struct CassetteArgs {
+    #[command(subcommand)]
+    command: CassetteCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CassetteCommand {
+    /// Create one portable replay bundle from a recorded sweep and its cassette root.
+    Export(CassetteExportArgs),
+    /// Install required project-local replay inputs, then replay a portable bundle.
+    Replay(CassetteReplayArgs),
+}
+
+#[derive(Debug, Args)]
+struct CassetteExportArgs {
+    /// Recorded sweep TOML to package.
+    #[arg(value_name = "SWEEP", value_hint = clap::ValueHint::FilePath)]
+    path: PathBuf,
+    /// Root passed to the original `asb sweep --record --cassette-root` invocation.
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    cassette_root: Option<PathBuf>,
+    /// Destination ZIP. The default is `<sweep-stem>.asb-sweep.zip`.
+    #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct CassetteReplayArgs {
+    /// Portable replay bundle created by `asb cassette export`.
+    #[arg(value_name = "BUNDLE", value_hint = clap::ValueHint::FilePath)]
+    path: PathBuf,
+    /// Replay provider responses using their recorded relative delays.
+    #[arg(long)]
+    respect_record_timings: bool,
+    /// Stream agent output while replaying configurations sequentially.
+    #[arg(long = "show-output")]
+    show_output: bool,
 }
 #[derive(Debug, Args)]
 struct ProviderArgs {

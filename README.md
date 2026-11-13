@@ -18,6 +18,8 @@ asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-
 asb sweep SWEEP.toml [--prepare-replay|--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
 asb sweep --preset PRESET.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--json]
 asb compare BENCHMARK_OR_SWEEP.toml [--report] [--parquet]
+asb cassette export SWEEP.toml [--cassette-root DIR] [--output FILE]
+asb cassette replay SWEEP.asb-sweep.zip [--respect-record-timings] [--show-output]
 ```
 
 Before starting each sweep configuration, ASB prints its filename, agent,
@@ -605,6 +607,30 @@ asb run benchmark.toml --record --repeat 5 --cassette trials.asb.zip
 asb run benchmark.toml --replay --repeat 10 --cassette trials.asb.zip --seed 42
 asb run benchmark.toml --replay --cassette trials.asb.zip --track max:tokens
 ```
+
+### Portable sweep replay bundles
+
+After recording a sweep, package its exact source TOML files and sealed cassette
+archives into one portable ZIP:
+
+```bash
+asb cassette export sweep.toml --cassette-root recordings
+```
+
+The default output is `sweep.asb-sweep.zip`. It is a private recording artifact:
+it contains recorded provider/tool evidence and must not be treated as a source
+distribution. On another initialized ASB project, replay it with:
+
+```bash
+asb cassette replay sweep.asb-sweep.zip
+```
+
+ASB validates every bundled digest, stages the original sweep and benchmark TOMLs
+under that project, installs missing project-local agents, external workloads, and
+collector dependencies through the ordinary installer, then runs the standard
+offline sweep replay. It never installs a live provider bridge for this path.
+Existing standalone `.asb.zip` cassettes remain unchanged and continue to replay
+with `asb run CONFIG --replay --cassette FILE`.
 
 `--tool-record` and `--tool-replay` enable ASB's sealed
 adapter-local tool transport. A replay serves the exact recorded result and

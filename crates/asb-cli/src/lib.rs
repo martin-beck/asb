@@ -4,6 +4,7 @@ mod agents;
 mod benchmark;
 mod benchmark_paths;
 pub mod cassette;
+mod cassette_bundle;
 mod collectors;
 mod compare;
 mod completion;
