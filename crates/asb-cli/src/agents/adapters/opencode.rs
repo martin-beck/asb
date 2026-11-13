@@ -113,6 +113,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DB",
 ]);
 
 /// OpenCode emits one JSONL `step_finish` event for every completed agent step.
@@ -545,7 +546,15 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
             "cannot write deterministic OpenCode search configuration: {error}"
         ))
     })?;
-    context.command.env("RIPGREP_CONFIG_PATH", ripgrep_config);
+    // OpenCode otherwise chooses its default state database. Concurrent
+    // replicas can then contend on that path before their first MCP request.
+    // The runtime directory is private to this attempt and already mounted
+    // for the guest, so use it for the adapter's mutable state as well.
+    let database = context.runtime_dir.join("opencode-state.sqlite");
+    context
+        .command
+        .env("RIPGREP_CONFIG_PATH", ripgrep_config)
+        .env("OPENCODE_DB", database);
     Ok(())
 }
 
@@ -1033,6 +1042,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "--sort=path\n");
         assert!(command.get_envs().any(|(name, value)| {
             name == "RIPGREP_CONFIG_PATH" && value.is_some_and(|value| value == config)
+        }));
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "OPENCODE_DB"
+                && value.is_some_and(|value| value == root.join("runtime/opencode-state.sqlite"))
         }));
         std::fs::remove_dir_all(root).unwrap();
     }
