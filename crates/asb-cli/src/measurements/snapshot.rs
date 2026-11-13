@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -27,7 +27,9 @@ type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
 const SETTLEMENT_SNAPSHOTS_PER_SECOND: usize = 4;
 const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(60);
+const MAX_CONCURRENT_SNAPSHOT_COMMANDS: usize = 16;
 static ACTIVE_SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
+static SNAPSHOT_COMMAND_SLOTS: OnceLock<SnapshotCommandSlots> = OnceLock::new();
 
 struct SnapshotReservation;
 
@@ -53,6 +55,68 @@ fn settlement_budget(active_snapshots: usize) -> Duration {
 
 fn observation_runtime(requested: Duration, active_snapshots: usize) -> Duration {
     requested.saturating_add(settlement_budget(active_snapshots).saturating_sub(SETTLEMENT_BUDGET))
+}
+
+struct SnapshotCommandSlots {
+    used: Mutex<usize>,
+    available: Condvar,
+}
+
+impl SnapshotCommandSlots {
+    const fn new() -> Self {
+        Self {
+            used: Mutex::new(0),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(
+        &self,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Option<SnapshotCommandReservation<'_>>, String> {
+        let mut used = self.used.lock().unwrap_or_else(|error| error.into_inner());
+        while *used >= MAX_CONCURRENT_SNAPSHOT_COMMANDS {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err("process-tree snapshot scheduling deadline exceeded".into());
+            }
+            let wait = (deadline - now).min(Duration::from_millis(5));
+            let (next, _) = self
+                .available
+                .wait_timeout(used, wait)
+                .unwrap_or_else(|error| error.into_inner());
+            used = next;
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        *used += 1;
+        Ok(Some(SnapshotCommandReservation { slots: self }))
+    }
+}
+
+struct SnapshotCommandReservation<'a> {
+    slots: &'a SnapshotCommandSlots,
+}
+
+impl Drop for SnapshotCommandReservation<'_> {
+    fn drop(&mut self) {
+        let mut used = self
+            .slots
+            .used
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *used = used.saturating_sub(1);
+        self.slots.available.notify_one();
+    }
+}
+
+fn snapshot_command_slots() -> &'static SnapshotCommandSlots {
+    SNAPSHOT_COMMAND_SLOTS.get_or_init(SnapshotCommandSlots::new)
 }
 
 fn record_stop_deadline(slot: &Mutex<Option<Instant>>, deadline: Instant) {
@@ -414,6 +478,14 @@ fn observe(
     if cancelled.load(Ordering::Acquire) {
         return Ok(None);
     }
+    let deadline = Instant::now()
+        + observation_runtime(request.runtime, ACTIVE_SNAPSHOTS.load(Ordering::Acquire));
+    // Limit only the short-lived native sampling command. Waiting workers
+    // remain cancellable, so a dense cohort cannot turn shutdown into hundreds
+    // of simultaneous gate cancellations.
+    let Some(_slot) = snapshot_command_slots().acquire(cancelled, deadline)? else {
+        return Ok(None);
+    };
     let mut launch = crate::launch::ProcessLaunch::new(executable);
     for argument in &request.arguments {
         launch.arg(argument);
@@ -442,8 +514,6 @@ fn observe(
         .and_then(|()| nonblocking(&err))
         .map_err(|error| error.to_string())?;
     gate.resume().map_err(|error| error.to_string())?;
-    let deadline = Instant::now()
-        + observation_runtime(request.runtime, ACTIVE_SNAPSHOTS.load(Ordering::Acquire));
     let mut output = [Vec::new(), Vec::new()];
     let mut eof = [false; 2];
     let mut exited = false;
@@ -632,6 +702,20 @@ mod io_tests {
             observation_runtime(Duration::from_secs(6), 256),
             Duration::from_secs(58)
         );
+    }
+
+    #[test]
+    fn queued_snapshot_command_cancels_before_acquiring_a_slot() {
+        let slots = SnapshotCommandSlots::new();
+        let cancelled = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_SNAPSHOT_COMMANDS {
+            held.push(slots.acquire(&cancelled, deadline).unwrap().unwrap());
+        }
+        cancelled.store(true, Ordering::Release);
+        assert!(slots.acquire(&cancelled, deadline).unwrap().is_none());
+        drop(held);
     }
 
     #[test]
