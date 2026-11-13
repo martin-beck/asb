@@ -100,6 +100,8 @@ class ConnectionTests(unittest.TestCase):
                 pool = adapter.get_connection("http+docker://localhost/version")
                 self.assertEqual(pool.pool.maxsize, RUNTIME._TRANSPORT_POOL_MAXSIZE)
                 self.assertTrue(pool.block)
+                self.assertIs(pool, adapter.get_connection(
+                    "http+docker://localhost/v1.52/containers/fixture/json"))
         self.assertEqual(requests, ["http+docker://localhost/version"])
 
     def test_blocked_inflight_spawn_cannot_extend_close_budget_or_lose_its_eventual_child(self):
