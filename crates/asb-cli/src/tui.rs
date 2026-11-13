@@ -475,7 +475,7 @@ impl App {
             native_snapshot_record: false,
             runtime_wizard: crate::runtime::wizard::RuntimeWizard::default(),
             runtime_edit: None,
-            message: "Space selects; arrows move; Tab or Enter advances; Esc cancels.".into(),
+            message: "Space selects; Up/Down move; Left/Right or Tab navigate; Enter advances; Esc cancels.".into(),
             message_color: Color::Yellow,
             message_until: None,
         };
@@ -1016,10 +1016,6 @@ impl App {
         expanded
     }
 
-    fn refresh_models(&mut self) -> Option<String> {
-        self.refresh_models_with(models::discover_for_setup)
-    }
-
     fn refresh_models_with(
         &mut self,
         mut discover: impl FnMut(&str) -> Result<Vec<String>, Error>,
@@ -1104,6 +1100,13 @@ impl App {
     }
 
     fn advance(&mut self) -> Result<Option<Generated>, Error> {
+        self.advance_with_model_discovery(models::discover_for_setup)
+    }
+
+    fn advance_with_model_discovery(
+        &mut self,
+        discover: impl FnMut(&str) -> Result<Vec<String>, Error>,
+    ) -> Result<Option<Generated>, Error> {
         if self.step == PaneKind::Runtime
             && let Err(error) = self.runtime_settings()
         {
@@ -1140,7 +1143,7 @@ impl App {
             return Ok(None);
         }
         let model_warning = (self.step == PaneKind::Providers)
-            .then(|| self.refresh_models())
+            .then(|| self.refresh_models_with(discover))
             .flatten();
         if self.step == PaneKind::Workloads {
             self.refresh_extensions()?;
@@ -1195,6 +1198,38 @@ const TEMPORARY_MESSAGE: std::time::Duration = std::time::Duration::from_secs(4)
 fn is_install_key(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('i') | KeyCode::Tab)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupNavigation {
+    Back,
+    Forward,
+}
+
+/// Decode pane navigation once so arrows remain equivalent to the existing
+/// keyboard controls. Install shortcuts are handled before this decoder.
+fn setup_navigation(key: &KeyEvent) -> Option<SetupNavigation> {
+    match key {
+        KeyEvent {
+            code: KeyCode::Tab,
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::SHIFT) => Some(SetupNavigation::Back),
+        KeyEvent {
+            code: KeyCode::BackTab | KeyCode::Left,
+            ..
+        } => Some(SetupNavigation::Back),
+        KeyEvent {
+            code: KeyCode::Tab | KeyCode::Enter | KeyCode::Right,
+            ..
+        } => Some(SetupNavigation::Forward),
+        _ => None,
+    }
+}
+
+fn is_setup_cancel_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Esc)
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 fn set_message(
@@ -2239,42 +2274,20 @@ fn run_loop(
                 }
             }
             KeyEvent {
-                code: KeyCode::Esc, ..
-            } => {
-                return Err(Error::Usage("setup TUI cancelled"));
-            }
-            KeyEvent {
                 code: KeyCode::Char('n'),
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) => {
                 app.toggle_native_snapshot_record();
             }
-            KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
+            key if is_setup_cancel_key(&key) => {
                 return Err(Error::Usage("setup TUI cancelled"));
             }
             key if is_install_key(&key) => {
                 install_setup_selection(terminal, app)?;
             }
-            KeyEvent {
-                code: KeyCode::Tab,
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::SHIFT) => {
-                app.back();
-            }
-            KeyEvent {
-                code: KeyCode::BackTab,
-                ..
-            } => app.back(),
-            KeyEvent {
-                code: KeyCode::Tab | KeyCode::Enter,
-                ..
-            } => {
+            key if setup_navigation(&key) == Some(SetupNavigation::Back) => app.back(),
+            key if setup_navigation(&key) == Some(SetupNavigation::Forward) => {
                 if app.step == PaneKind::Measurements {
                     let selected = app.panes[PaneKind::Measurements.index()]
                         .selected_choices()
@@ -3595,6 +3608,170 @@ fn selected_workload_trials(app: &App, choice: &ChoiceKey) -> Result<TrialSelect
 #[cfg(test)]
 #[path = "../tests/unit/tui_generation.rs"]
 mod generation_tests;
+
+#[cfg(test)]
+mod local_stress_tests {
+    use super::{
+        App, Availability, Choice, ChoiceKey, Pane, PaneKind, SetupNavigation, is_setup_cancel_key,
+        setup_navigation,
+    };
+    use crate::project::ProjectConfig;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::{Path, PathBuf};
+
+    struct LocalRoot(PathBuf);
+
+    impl LocalRoot {
+        fn new(name: &str) -> Self {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/local-tui-stress")
+                .join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("local TUI stress root");
+            Self(path)
+        }
+    }
+
+    impl Drop for LocalRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn choice(label: &str, key: ChoiceKey) -> Choice {
+        Choice {
+            label: label.into(),
+            key,
+            availability: Availability::Available,
+        }
+    }
+
+    fn fixture_app(root: &Path, agents: &[&str]) -> App {
+        let mut app = App::new(root.to_path_buf(), ProjectConfig::default());
+        app.panes[PaneKind::Agents.index()] = Pane::new(
+            agents
+                .iter()
+                .map(|agent| choice(agent, ChoiceKey::Agent((*agent).into())))
+                .collect(),
+        );
+        app.panes[PaneKind::Agents.index()].selected.fill(true);
+        app.panes[PaneKind::Providers.index()] = Pane::new(vec![choice(
+            "openrouter",
+            ChoiceKey::Provider("openrouter".into()),
+        )]);
+        app.panes[PaneKind::Workloads.index()] =
+            Pane::new(vec![choice("bug-fix", ChoiceKey::Prompt("bug-fix".into()))]);
+        app.panes[PaneKind::Workloads.index()].selected[0] = true;
+        app.panes[PaneKind::Measurements.index()] = Pane::new(vec![choice(
+            "system",
+            ChoiceKey::Collector("system".into()),
+        )]);
+        app.panes[PaneKind::Measurements.index()].selected[0] = true;
+        app
+    }
+
+    fn right(app: &mut App) -> Result<Option<super::Generated>, crate::Error> {
+        assert_eq!(
+            setup_navigation(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Some(SetupNavigation::Forward)
+        );
+        app.advance_with_model_discovery(|provider| {
+            assert_eq!(provider, "openrouter");
+            Ok(vec!["fixture-tool-model".into()])
+        })
+    }
+
+    #[test]
+    #[ignore = "local-only intensive TUI navigation; run cargo test --lib local_tui_stress_tests -- --ignored"]
+    fn arrows_drive_a_complete_single_configuration_without_provider_io() {
+        let root = LocalRoot::new("single");
+        let mut app = fixture_app(&root.0, &["pi"]);
+
+        assert!(right(&mut app).unwrap().is_none());
+        assert_eq!(app.step, PaneKind::Providers);
+
+        assert_eq!(
+            setup_navigation(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            Some(SetupNavigation::Back)
+        );
+        app.back();
+        assert_eq!(app.step, PaneKind::Agents);
+        assert!(right(&mut app).unwrap().is_none());
+
+        app.pane_mut(PaneKind::Providers).selected[0] = true;
+        assert!(right(&mut app).unwrap().is_none());
+        assert_eq!(app.step, PaneKind::Models);
+        app.pane_mut(PaneKind::Models).selected[0] = true;
+
+        for expected in [
+            PaneKind::ThinkingEffort,
+            PaneKind::Workloads,
+            PaneKind::Measurements,
+            PaneKind::Concurrency,
+            PaneKind::Runtime,
+        ] {
+            assert!(right(&mut app).unwrap().is_none());
+            assert_eq!(app.step, expected);
+        }
+        let generated = right(&mut app)
+            .unwrap()
+            .expect("configuration is generated");
+        assert_eq!(generated.tests, 1);
+        let manifest = crate::sweep::read_manifest(&generated.sweep).expect("sweep manifest");
+        assert_eq!(manifest.configs.len(), 1);
+        assert!(root.0.join(&manifest.configs[0]).is_file());
+    }
+
+    #[test]
+    #[ignore = "local-only intensive TUI navigation; run cargo test --lib local_tui_stress_tests -- --ignored"]
+    fn arrows_generate_a_multi_agent_matrix_from_the_same_pane_path() {
+        let root = LocalRoot::new("matrix");
+        let mut app = fixture_app(&root.0, &["pi", "opencode"]);
+
+        assert!(right(&mut app).unwrap().is_none());
+        app.pane_mut(PaneKind::Providers).selected[0] = true;
+        assert!(right(&mut app).unwrap().is_none());
+        app.pane_mut(PaneKind::Models).selected[0] = true;
+        while app.step != PaneKind::Runtime {
+            assert!(right(&mut app).unwrap().is_none());
+        }
+        let generated = right(&mut app).unwrap().expect("matrix is generated");
+        assert_eq!(generated.tests, 2);
+        let manifest = crate::sweep::read_manifest(&generated.sweep).expect("sweep manifest");
+        assert_eq!(manifest.configs.len(), 2);
+    }
+
+    #[test]
+    #[ignore = "local-only intensive TUI navigation; run cargo test --lib local_tui_stress_tests -- --ignored"]
+    fn navigation_boundaries_cancel_and_unknown_keys_do_not_publish_configurations() {
+        let root = LocalRoot::new("boundaries");
+        let mut app = fixture_app(&root.0, &["pi"]);
+        app.pane_mut(PaneKind::Agents).selected.fill(false);
+
+        assert!(right(&mut app).unwrap().is_none());
+        assert_eq!(app.step, PaneKind::Agents);
+        assert!(app.message.contains("Select at least one item"));
+        app.back();
+        assert_eq!(app.step, PaneKind::Agents);
+        assert_eq!(
+            setup_navigation(&KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)),
+            None
+        );
+        assert!(is_setup_cancel_key(&KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(is_setup_cancel_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!is_setup_cancel_key(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+        assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    }
+}
 
 #[cfg(test)]
 mod tests {
