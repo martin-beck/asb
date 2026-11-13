@@ -1453,11 +1453,11 @@ impl Session {
                     self.verify_effective_resume(context, &event)?
                 }
                 Some(EventKind::PreparationFailed) => {
-                    abort_launch_boundaries(context);
                     preparation_failed = true;
-                    // Peers are already cancelled. Retain the adapter's bounded
-                    // failure reason after its transport finalizers return,
-                    // rather than discarding it in cancellation's raw drain.
+                    // The task emits its bounded error immediately after this
+                    // marker. Keep its controller open until that error is
+                    // received; aborting peers here closes the controller pipe
+                    // and turns the original failure into a disconnect.
                     deadline = deadline.min(Instant::now() + CANCELLATION_TIMEOUT);
                 }
                 Some(EventKind::Output) => {
