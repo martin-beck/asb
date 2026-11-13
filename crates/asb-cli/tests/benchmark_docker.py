@@ -95,7 +95,11 @@ class ConnectionTests(unittest.TestCase):
             with RUNTIME.DockerSession() as client:
                 self.assertEqual(client.api._version, "1.52")
                 self.assertEqual(client.api.timeout, 600.0)
-                self.assertEqual(client.api.get_adapter("http+docker://localhost").timeout, 600.0)
+                adapter = client.api.get_adapter("http+docker://localhost")
+                self.assertEqual(adapter.timeout, 600.0)
+                pool = adapter.get_connection("http+docker://localhost/version")
+                self.assertEqual(pool.pool.maxsize, RUNTIME._TRANSPORT_POOL_MAXSIZE)
+                self.assertTrue(pool.block)
         self.assertEqual(requests, ["http+docker://localhost/version"])
 
     def test_blocked_inflight_spawn_cannot_extend_close_budget_or_lose_its_eventual_child(self):
