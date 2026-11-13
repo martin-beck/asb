@@ -89,7 +89,14 @@ class ConnectionTests(unittest.TestCase):
             response.raise_for_status = lambda: None
             return response
         transport = SimpleNamespace(close=lambda: None)
+        bootstrap = []
+        class Bootstrap:
+            def __enter__(self):
+                bootstrap.append("entered")
+            def __exit__(self, *_error):
+                bootstrap.append("exited")
         with patch.object(RUNTIME, "StdioConnections", return_value=transport), \
+             patch.object(RUNTIME, "_session_bootstrap_section", return_value=Bootstrap()), \
              patch.object(docker.APIClient, "_get", get), \
              patch.object(docker.APIClient, "ping", return_value=True):
             with RUNTIME.DockerSession() as client:
@@ -104,6 +111,7 @@ class ConnectionTests(unittest.TestCase):
                 self.assertIs(pool, adapter.get_connection(
                     "http+docker://localhost/v1.52/containers/fixture/json"))
         self.assertEqual(requests, ["http+docker://localhost/version"])
+        self.assertEqual(bootstrap, ["entered", "exited"])
 
     def test_blocked_inflight_spawn_cannot_extend_close_budget_or_lose_its_eventual_child(self):
         transport = RUNTIME.StdioConnections([sys.executable,"-c","import sys;sys.stdin.buffer.read()"])

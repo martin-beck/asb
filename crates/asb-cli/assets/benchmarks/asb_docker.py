@@ -6,15 +6,23 @@ If Docker already needs passwordless sudo, only the installed Docker binary
 is elevated; the benchmark controller and dataset code remain unprivileged.
 """
 
+from contextlib import contextmanager
 import os
 import ipaddress
 import shutil
 import signal
 import socket
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Docker Desktop does not expose POSIX locks.
+    fcntl = None
 
 
 class DockerAccessError(RuntimeError):
@@ -38,6 +46,59 @@ _TERM_GRACE = 2.0
 # before an agent can start. Four bounds that normal control-plane shape while
 # retaining a strict per-controller ceiling.
 _TRANSPORT_POOL_MAXSIZE = 4
+
+
+def _session_bootstrap_lock_path():
+    """Return the user-private lock for short Docker SDK session handshakes."""
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return os.path.join(tempfile.gettempdir(), f"asb-docker-session-bootstrap-{uid}.lock")
+
+
+@contextmanager
+def _session_bootstrap_section():
+    """Serialize Docker SDK version negotiation across a dense local cohort.
+
+    Every controller opens a long-lived dial-stdio transport during API version
+    negotiation. Starting an entire cohort at once can wedge a native daemon
+    before the workload-specific gate can apply. This covers only version and
+    ping, never the benchmark's Docker operations or execution streams.
+    """
+    if fcntl is None:
+        yield
+        return
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise DockerAccessError("cannot safely coordinate Docker session bootstrap")
+    flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(_session_bootstrap_lock_path(), flags, 0o600)
+    except OSError as error:
+        raise DockerAccessError("cannot open Docker session-bootstrap coordination lock") from error
+    try:
+        metadata = os.fstat(fd)
+        expected_uid = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
+            raise DockerAccessError("Docker session-bootstrap coordination lock is not a private regular file")
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + _ACCESS_PROBE_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DockerAccessError("Docker session bootstrap did not obtain its bounded coordination lock")
+                time.sleep(0.02)
+            except OSError as error:
+                raise DockerAccessError("cannot acquire Docker session-bootstrap coordination lock") from error
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 class _CloseRecord:
@@ -379,9 +440,10 @@ class DockerSession:
             # the actual daemon version, including newer minimum API versions.
             self.client = BoundedDockerClient(base_url="unix:///unused", version="1.41", timeout=_API_TIMEOUT_SECONDS)
             self.client.api.mount("http+docker://", Adapter("http+unix:///unused", timeout=_API_TIMEOUT_SECONDS))
-            version = self.client.api.version(api_version=False)["ApiVersion"]
-            self.client.api._version = version
-            self.client.ping()
+            with _session_bootstrap_section():
+                version = self.client.api.version(api_version=False)["ApiVersion"]
+                self.client.api._version = version
+                self.client.ping()
             return self.client
         except BaseException:
             self.__exit__(None, None, None)
