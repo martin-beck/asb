@@ -1008,6 +1008,19 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("kill",container.events)
         self.assertEqual(raised.exception.asb_preparation_phase,"gate-release")
 
+    def test_transport_close_failure_does_not_mask_primary_preparation_failure(self):
+        workspace,container,api,_ = self.workspace()
+        class FailedClose(RUNTIME.DockerExecTransport):
+            def close(self):
+                super().close()
+                raise RUNTIME.ExecutionError("relay control stream closed")
+        def reject_attachment(_target):
+            raise RUNTIME.ExecutionError("collector attachment rejected")
+        with workspace,self.assertRaisesRegex(RUNTIME.ExecutionError,"collector attachment rejected") as raised:
+            workspace.execute(["agent"],before_resume=reject_attachment,transport_factory=FailedClose)
+        self.assertIn("kill",container.events)
+        self.assertEqual(raised.exception.asb_preparation_phase,"collector-attachment")
+
     def test_default_transport_close_is_idempotent_but_never_forgets_failure(self):
         class Cancelled(BaseException):pass
         for error_type in [None,ValueError,Cancelled]:
