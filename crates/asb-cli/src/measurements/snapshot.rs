@@ -750,8 +750,7 @@ mod io_tests {
         let slots = SnapshotCommandSlots::new(1);
         let cancelled = AtomicBool::new(false);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let mut held = Vec::new();
-        held.push(slots.acquire(&cancelled, deadline).unwrap().unwrap());
+        let held = vec![slots.acquire(&cancelled, deadline).unwrap().unwrap()];
         cancelled.store(true, Ordering::Release);
         assert!(slots.acquire(&cancelled, deadline).unwrap().is_none());
         drop(held);
