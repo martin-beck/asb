@@ -968,6 +968,22 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("kill",container.events)
                 self.assertEqual(transports[0].close_calls,1)
 
+    def test_pre_output_transport_failure_retains_gate_release_phase(self):
+        workspace, container, api, _ = self.workspace()
+        class FailedAfterRelease(Stream):
+            def __next__(self):
+                if self.index == 0:
+                    return super().__next__()
+                raise RUNTIME.ExecutionError("controller stream closed")
+        def start(*_args, **_kwargs):
+            api.stream = FailedAfterRelease(api)
+            return api.stream
+        api.exec_start = start
+        with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "controller stream closed") as raised:
+            workspace.execute(["agent"])
+        self.assertEqual(raised.exception.asb_preparation_phase, "gate-release")
+        self.assertIn("kill", container.events)
+
     def test_transport_close_failure_quiesces_namespace_instead_of_claiming_completion(self):
         workspace,container,api,_ = self.workspace()
         class FailedClose(RUNTIME.DockerExecTransport):

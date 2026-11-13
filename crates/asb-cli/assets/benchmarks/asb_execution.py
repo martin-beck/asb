@@ -607,6 +607,7 @@ class ManagedDockerWorkspace:
         watchdog.start()
         stream = None
         result = None
+        execution_observed = False
         preparation_phase = "gate-transport"
         try:
             release_path = None
@@ -739,6 +740,7 @@ class ManagedDockerWorkspace:
             truncated = False
             frames = WorkloadFrames(namespace_pid, workload_owner, on_execution_end) if workload_owner else None
             for out, err in stream:
+                execution_observed |= bool(out or err)
                 if frames is not None and out:
                     out = frames.feed(out)
                 for name, destination, chunk in [("stdout", stdout, out), ("stderr", stderr, err)]:
@@ -806,7 +808,7 @@ class ManagedDockerWorkspace:
                 container.kill()
             except Exception:
                 pass
-            if execution_started is None:
+            if execution_started is None or not execution_observed:
                 try:
                     if isinstance(error, ExecutionError):
                         error.asb_preparation_phase = preparation_phase
