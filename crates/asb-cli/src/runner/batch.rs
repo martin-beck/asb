@@ -834,6 +834,12 @@ impl crate::workloads::session::LaunchReadiness for LaunchAdmission<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .abort("replica failed before shared launch readiness");
     }
+    fn abort_with_reason(&self, reason: &str) {
+        self.arrival
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .abort(reason);
+    }
     fn remaining(&self) -> Result<Duration, String> {
         let arrival = self.arrival.lock().map_err(|_| unavailable().to_string())?;
         let state = arrival
@@ -898,6 +904,9 @@ impl crate::workloads::session::LaunchReadiness for CollectorAdmission<'_> {
     fn abort(&self) {
         self.gate
             .abort("replica failed before shared collector readiness");
+    }
+    fn abort_with_reason(&self, reason: &str) {
+        self.gate.abort(reason);
     }
 
     fn remaining(&self) -> Result<Duration, String> {

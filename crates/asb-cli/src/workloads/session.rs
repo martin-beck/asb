@@ -275,6 +275,10 @@ pub(crate) trait LaunchReadiness {
     }
     fn ready(&self) -> Result<(), String>;
     fn abort(&self);
+    /// Abort a shared boundary with the initiating bounded failure reason.
+    fn abort_with_reason(&self, _reason: &str) {
+        self.abort();
+    }
     fn remaining(&self) -> Result<std::time::Duration, String>;
 }
 

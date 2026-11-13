@@ -698,12 +698,13 @@ fn actual_python_late_bad_grade_or_error_revokes_close_and_preserves_instead() {
 #[test]
 fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation() {
     use super::super::session::LaunchReadiness;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     struct Launch<'a> {
         fixture: &'a Fixture,
         fail_ready: bool,
         ready: Cell<usize>,
         aborted: Cell<bool>,
+        abort_reason: RefCell<Option<String>>,
     }
     impl LaunchReadiness for Launch<'_> {
         fn ready(&self) -> Result<(), String> {
@@ -720,6 +721,10 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
                 "peers must be notified before namespace cancellation"
             );
             self.aborted.set(true);
+        }
+        fn abort_with_reason(&self, reason: &str) {
+            self.abort();
+            *self.abort_reason.borrow_mut() = Some(reason.into());
         }
         fn remaining(&self) -> Result<Duration, String> {
             Ok(Duration::from_secs(1800))
@@ -756,12 +761,14 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
             fail_ready: fault == "ready-failure",
             ready: Cell::new(0),
             aborted: Cell::new(false),
+            abort_reason: RefCell::new(None),
         };
         let collector_ready = Launch {
             fixture: &fixture,
             fail_ready: fault == "collector-ready-failure",
             ready: Cell::new(0),
             aborted: Cell::new(false),
+            abort_reason: RefCell::new(None),
         };
         let mut context = ExecutionContext {
             ignore_tool_mismatch: false,
@@ -801,6 +808,11 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
                     .err()
                     .unwrap()
                     .contains("selected agent runtime installation failed")
+            );
+            assert!(
+                launch.abort_reason.borrow().as_deref().is_some_and(
+                    |reason| reason.contains("selected agent runtime installation failed")
+                )
             );
         }
         assert_eq!(

@@ -1773,8 +1773,8 @@ impl Session {
         context: &mut ExecutionContext<'_>,
         mut result: Result<ExecutionResult, String>,
     ) -> Result<ExecutionResult, String> {
-        if result.is_err() {
-            abort_launch_boundaries(context);
+        if let Err(error) = &result {
+            abort_launch_boundaries(context, error);
         }
         if result.is_err() && self.preparation_active {
             self.preparation_active = false;
@@ -1896,12 +1896,23 @@ fn write_launch_gate_failure(
     )
 }
 
-fn abort_launch_boundaries(context: &ExecutionContext<'_>) {
+fn abort_launch_boundaries(context: &ExecutionContext<'_>, error: &str) {
+    // Controller errors are already bounded protocol diagnostics. Keep a
+    // finite summary for peers without carrying an unbounded failure through
+    // the shared batch state.
+    let mut end = error.len().min(512);
+    while end > 0 && !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    let reason = format!(
+        "replica failed before shared launch readiness: {}",
+        &error[..end]
+    );
     if let Some(launch) = context.launch {
-        launch.abort();
+        launch.abort_with_reason(&reason);
     }
     if let Some(collector_ready) = context.collector_ready {
-        collector_ready.abort();
+        collector_ready.abort_with_reason(&reason);
     }
 }
 
