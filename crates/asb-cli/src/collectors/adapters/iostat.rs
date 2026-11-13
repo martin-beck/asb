@@ -16,35 +16,18 @@ impl CollectorAdapter for IostatCollector {
     fn environment_flag(&self) -> Option<&'static str> {
         Some("ASB_MEASURE_IOSTAT")
     }
-    fn tool_id(&self) -> Option<&'static str> {
-        Some("iostat")
-    }
     fn requires_pid(&self) -> bool {
         true
-    }
-    fn preflight_unavailable(
-        &self,
-        selected: &[String],
-        tools: Option<&std::path::Path>,
-    ) -> Option<super::super::PreflightUnavailable> {
-        super::super::selected_or_environment("iostat", selected)
-            .then(|| super::pidstat::preflight_unavailable(tools))
-            .flatten()
-    }
-    fn preflight(&self, context: &mut super::super::PreflightContext<'_>) -> Result<(), String> {
-        if super::super::selected_or_environment("iostat", context.selected) {
-            super::pidstat::preflight(context.tool_dir, "-d")
-        } else {
-            Ok(())
-        }
     }
     fn configure(
         &self,
         session: &mut measurements::Session,
         selected: &[String],
     ) -> Result<(), String> {
-        session.state::<IoState>().borrow_mut().enabled =
-            super::super::selected_or_environment("iostat", selected);
+        session
+            .state::<super::pidstat::State>()
+            .borrow_mut()
+            .io_enabled = super::super::selected_or_environment("iostat", selected);
         Ok(())
     }
     fn process(
@@ -55,8 +38,27 @@ impl CollectorAdapter for IostatCollector {
         process(session, context)
     }
     fn attach_pid(&self, session: &mut measurements::Session, pid: u32) -> Result<(), String> {
-        let enabled = session.state::<IoState>().borrow().enabled;
-        super::pidstat::start_snapshot(session, "iostat", enabled, pid, "-d")
+        super::pidstat::activate(session, pid);
+        Ok(())
+    }
+    fn activate_isolated_pid(
+        &self,
+        session: &mut measurements::Session,
+        pid: u32,
+    ) -> Result<(), String> {
+        super::pidstat::activate(session, pid);
+        Ok(())
+    }
+    fn lifecycle_event(
+        &self,
+        session: &mut measurements::Session,
+        event: super::super::LifecycleEvent,
+    ) -> Result<(), String> {
+        super::pidstat::lifecycle(session, event);
+        Ok(())
+    }
+    fn finish(&self, session: &mut measurements::Session) -> Result<(), String> {
+        super::pidstat::write_io(session)
     }
 }
 
@@ -102,11 +104,6 @@ fn samples(output: &str) -> super::pidstat::Samples {
             )
         },
     )
-}
-
-#[derive(Default)]
-struct IoState {
-    enabled: bool,
 }
 
 pub(crate) fn parse_pidstat_io_metrics(output: &str) -> BTreeMap<String, f64> {

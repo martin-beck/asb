@@ -1,4 +1,9 @@
 //! Cancellable, bounded observations; the worker retains any uncertain custody.
+//!
+//! The process-tree snapshot implementation remains test-only compatibility
+//! coverage while live CPU and I/O collectors use the direct `/proc` sampler.
+#![allow(dead_code)]
+#[allow(unused_imports)]
 use super::{ProcessIdentity, TreeSnapshotArguments, measurement_interval_ms, process_tree_pids};
 use std::fs::File;
 use std::io::{self, Read, Write};
