@@ -3,6 +3,17 @@ use super::{
     PromptDelivery, StaticAdapter,
 };
 use crate::{Error, install::Recipe};
+use std::ffi::OsString;
+use std::io::{BufRead, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const REPLAY_SUPERVISOR: &str = "replay-supervisor";
+// The remote workload controller performs a final identity observation after
+// the terminal event. Keep the measured bridge principal alive long enough
+// for that bounded observation, then terminate the otherwise-idle MCP tree.
+const REPLAY_TERMINAL_GRACE: Duration = Duration::from_secs(5);
 
 // OpenCode's Bedrock integration currently resolves two AWS SDK entries whose
 // published registry metadata can outpace their tarballs. This repair belongs
@@ -69,6 +80,7 @@ pub(super) static ADAPTER: StaticAdapter = StaticAdapter::new(
 .with_tape_wire_extension(TAPE_WIRE_EXTENSION)
 .with_tool_replay(prepare_tool_replay)
 .with_approximate_local_tool_replay()
+.with_bridge_entry(bridge_entry)
 .with_native_tool_transport()
 .with_guest_replay_evidence(extract_guest_replay_evidence)
 .with_guest_service(start_native_service)
@@ -306,18 +318,174 @@ fn output_usage(stdout: &str, _stderr: &str, _: bool) -> crate::measurements::To
 
 fn command(context: &CommandContext<'_>) -> CommandSpec {
     let model = format!("asb/{}", context.config.model);
+    let mut args = vec![
+        "run".into(),
+        "--dir".into(),
+        context.config.workspace.clone(),
+        "--model".into(),
+        model,
+        "--format".into(),
+        "json".into(),
+    ];
+    // OpenCode 1.19 can retain its MCP client after a completed replay.  Use
+    // an adapter-owned supervisor only for the non-native local-tool replay
+    // protocol; native snapshot replay owns a distinct lifecycle service.
+    if context.native_tool_mode == Some(crate::tape::Mode::Replay) && context.native_tool.is_none()
+    {
+        let program = crate::process_gate::executable()
+            .expect("ASB runtime executable is available while preparing an agent command");
+        let mut supervised = vec![
+            "__asb-agent-bridge".into(),
+            "opencode".into(),
+            REPLAY_SUPERVISOR.into(),
+            // Retain the resolved project-local OpenCode launcher; the guest
+            // PATH intentionally does not expose every tool's private bin.
+            context.executable.into(),
+        ];
+        supervised.append(&mut args);
+        return CommandSpec {
+            program: program.to_string_lossy().into_owned(),
+            args: supervised,
+            prompt_delivery: PromptDelivery::Argument,
+        };
+    }
     CommandSpec {
         program: "opencode".into(),
-        args: vec![
-            "run".into(),
-            "--dir".into(),
-            context.config.workspace.clone(),
-            "--model".into(),
-            model,
-            "--format".into(),
-            "json".into(),
-        ],
+        args,
         prompt_delivery: PromptDelivery::Argument,
+    }
+}
+
+fn bridge_entry(args: &[OsString]) -> std::process::ExitCode {
+    if args.first().is_none_or(|mode| mode != REPLAY_SUPERVISOR) {
+        eprintln!("asb: OpenCode bridge mode is invalid");
+        return std::process::ExitCode::from(2);
+    }
+    match supervise_replay(&args[1..]) {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("asb: OpenCode replay supervisor failed: {error}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+fn terminal_step(line: &[u8]) -> bool {
+    let Ok(event) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return false;
+    };
+    event.get("type").and_then(|value| value.as_str()) == Some("step_finish")
+        && event
+            .pointer("/part/reason")
+            .and_then(|value| value.as_str())
+            == Some("stop")
+}
+
+fn supervise_replay(args: &[OsString]) -> std::io::Result<std::process::ExitCode> {
+    supervise_replay_with_grace(args, REPLAY_TERMINAL_GRACE)
+}
+
+fn supervise_replay_with_grace(
+    args: &[OsString],
+    terminal_grace: Duration,
+) -> std::io::Result<std::process::ExitCode> {
+    let Some((program, child_args)) = args.split_first() else {
+        return Err(std::io::Error::other(
+            "OpenCode replay executable is missing",
+        ));
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(child_args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("OpenCode replay stdout is unavailable"))?;
+    let terminal = Arc::new(AtomicBool::new(false));
+    let terminal_reader = Arc::clone(&terminal);
+    let forwarding_failed = Arc::new(AtomicBool::new(false));
+    let forwarding_failed_reader = Arc::clone(&forwarding_failed);
+    let output = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut sink = std::io::stdout().lock();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let count = match reader.read_until(b'\n', &mut line) {
+                Ok(count) => count,
+                Err(error) => {
+                    forwarding_failed_reader.store(true, Ordering::Release);
+                    return Err(error);
+                }
+            };
+            if count == 0 {
+                return Ok(());
+            }
+            if let Err(error) = sink.write_all(&line).and_then(|_| sink.flush()) {
+                forwarding_failed_reader.store(true, Ordering::Release);
+                return Err(error);
+            }
+            if terminal_step(&line) {
+                terminal_reader.store(true, Ordering::Release);
+            }
+        }
+    });
+    let mut terminal_since = None;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if terminal.load(Ordering::Acquire) {
+            let since = terminal_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= terminal_grace {
+                stop_replay_process_tree(&mut child);
+                break child.wait()?;
+            }
+        }
+        if forwarding_failed.load(Ordering::Acquire) {
+            stop_replay_process_tree(&mut child);
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    output
+        .join()
+        .map_err(|_| std::io::Error::other("OpenCode replay stdout forwarding panicked"))??;
+    if terminal.load(Ordering::Acquire) {
+        Ok(std::process::ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "asb: OpenCode replay ended before a terminal step (exit {})",
+            status.code().unwrap_or(1)
+        );
+        Ok(std::process::ExitCode::from(
+            status.code().unwrap_or(1) as u8
+        ))
+    }
+}
+
+#[allow(unsafe_code)]
+fn stop_replay_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The supervisor creates a private group, so descendants such as the
+        // now-idle MCP bridge cannot outlive a terminal replay.
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
     }
 }
 fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
@@ -642,6 +810,47 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_supervisor_only_accepts_a_terminal_stop_step() {
+        assert!(super::terminal_step(
+            br#"{"type":"step_finish","part":{"reason":"stop"}}"#
+        ));
+        assert!(!super::terminal_step(
+            br#"{"type":"step_finish","part":{"reason":"tool-calls"}}"#
+        ));
+        assert!(!super::terminal_step(
+            br#"{"type":"tool_use","part":{"state":{"status":"completed"}}}"#
+        ));
+        assert!(!super::terminal_step(b"not-json\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_supervisor_ends_a_hung_terminal_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "asb-opencode-supervisor-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\"}}'\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let status = super::supervise_replay_with_grace(
+            &[script.into_os_string()],
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(status, std::process::ExitCode::SUCCESS);
+        assert!(started.elapsed() < std::time::Duration::from_secs(7));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn guest_replay_evidence_contains_only_tool_definitions() {
         let root = std::env::temp_dir().join(format!(
