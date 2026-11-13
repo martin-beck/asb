@@ -533,7 +533,12 @@ fn prepare_adapter(context: &mut PreparationContext<'_>) -> Result<(), Error> {
         // public catalog refresh is both irrelevant and unavailable inside
         // the isolated benchmark network, and a concurrent replay must not
         // leave one startup task retrying that fetch before the task loop.
-        .env("OPENCODE_DISABLE_MODELS_FETCH", "true");
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "true")
+        // Each replica owns a static, isolated workspace.  OpenCode's
+        // inotify watcher is unnecessary for that execution model and a full
+        // SWE-bench checkout per replica can exhaust the host watch budget
+        // before the agent reaches its first workload turn.
+        .env("OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER", "true");
     // OpenCode's repository-search tool invokes ripgrep.  Fresh workload
     // materialization can give the same files a different directory-entry
     // order, which otherwise changes only the ordering of an identical tool
@@ -1054,6 +1059,10 @@ mod tests {
         }));
         assert!(command.get_envs().any(|(name, value)| {
             name == "OPENCODE_DISABLE_MODELS_FETCH" && value.is_some_and(|value| value == "true")
+        }));
+        assert!(command.get_envs().any(|(name, value)| {
+            name == "OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER"
+                && value.is_some_and(|value| value == "true")
         }));
         std::fs::remove_dir_all(root).unwrap();
     }
