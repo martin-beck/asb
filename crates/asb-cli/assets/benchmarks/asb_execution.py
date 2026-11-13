@@ -607,6 +607,7 @@ class ManagedDockerWorkspace:
         watchdog.start()
         stream = None
         result = None
+        primary_error = None
         execution_observed = False
         preparation_phase = "gate-transport"
         try:
@@ -799,6 +800,7 @@ class ManagedDockerWorkspace:
                       "elapsed_seconds": time.monotonic() - execution_started,
                       "preparation_seconds": execution_started - started, "target": target}
         except BaseException as error:
+            primary_error = error
             # A failed collector callback, malformed gate or protocol failure
             # must not leave a paused/live agent behind. Preserve its filesystem
             # by restarting only PID 1 after the complete old tree is gone.
@@ -831,7 +833,11 @@ class ManagedDockerWorkspace:
                     pass
                 if isinstance(error, ExecutionError):
                     error.asb_preparation_phase = preparation_phase
-                raise
+                # Preserve the failure which triggered teardown. A killed
+                # container normally closes its relay/exec stream, and that
+                # secondary cleanup error must not hide the actionable cause.
+                if primary_error is None:
+                    raise
             finally:
                 if reset_needed.is_set() and not watchdog.is_alive() and not watchdog_error:
                     container.wait(timeout=125)

@@ -181,8 +181,10 @@ class SessionTransport:
             if checked.exit_code != 0:
                 raise ExecutionError("SDK session gate is not a descendant of its launched child")
         self.worker.join(timeout=max(0,min(5,self.deadline-time.monotonic())))
-        if self.worker.is_alive() or self.worker_error:
+        if self.worker.is_alive():
             raise ExecutionError("SDK session launch worker did not settle before client admission")
+        if self.worker_error:
+            raise ExecutionError("SDK launch worker failed")
         self.parent_pid, = self._frame("parent",2)
         if self.parent_pid <= 1 or self.parent_pid in (namespace_pid,self.launch_pid):
             raise ExecutionError("SDK session client replaced its parent shell")
