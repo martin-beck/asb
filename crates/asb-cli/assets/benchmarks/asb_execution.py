@@ -837,7 +837,10 @@ class ManagedDockerWorkspace:
                     container.wait(timeout=125)
                     container.start()
         if watchdog.is_alive() or watchdog_error:
-            raise ExecutionError("Docker could not stop the timed-out execution tree")
+            error = ExecutionError("Docker could not stop the timed-out execution tree")
+            if not execution_observed:
+                error.asb_preparation_phase = preparation_phase
+            raise error
         return result
 
     @staticmethod
