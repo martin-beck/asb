@@ -14,8 +14,8 @@ asb provider models [PROVIDER] [--free]
 asb setup tui
 asb setup --preset PRESET.toml [--output FILE]
 asb setup --agent AGENT --workload WORKLOAD --provider PROVIDER --model MODEL [--trial INSTANCE] [--trial-count COUNT] [--trial-set FILE] [--workspace DIR] [--output FILE]
-asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette FILE] [--json] [--measurements DIR]
-asb sweep SWEEP.toml [--prepare-replay|--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
+asb run CONFIG [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--concurrency N] [--cassette FILE] [--json] [--measurements DIR]
+asb sweep SWEEP.toml [--prepare-replay|--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--concurrency N] [--cassette-root DIR] [--respect-record-timings] [--resume] [--json]
 asb sweep --preset PRESET.toml [--record|--replay|--llm-record|--llmreplay|--tool-record|--tool-replay] [--cassette-root DIR] [--json]
 asb compare BENCHMARK_OR_SWEEP.toml [--report] [--parquet]
 asb cassette export SWEEP.toml [--cassette-root DIR] [--output FILE]
@@ -676,7 +676,9 @@ Sweep bundle/repeat integration is a separate delivery step; its existing JSONL
 record/replay path is unchanged. For a sweep, keep entries and their order unchanged, and use the same
 `--cassette-root DIR` for recording and replay (or omit it for both). To record
 once and replay eight concurrent replicas, record with `concurrency = 1` in
-each benchmark TOML, then set `concurrency = 8` in those TOMLs before replay.
+each benchmark TOML, then either set `concurrency = 8` in those TOMLs or pass
+`--concurrency 8` to `asb run --replay` or `asb sweep --replay`. The command-line
+override applies only to that replay invocation and does not rewrite source TOMLs.
 Each replica receives an independent copy of its entry's original cassette and
 an isolated workspace and agent configuration. If no single-replica cassette
 exists, ASB instead looks for the `-concurrency-N` cassettes produced by a

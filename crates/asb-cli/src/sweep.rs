@@ -102,6 +102,9 @@ pub(crate) struct Options<'a> {
     /// make the terminal unreadable.
     pub interactive: bool,
     pub mode: Option<crate::tape::Mode>,
+    /// Replay-only replica count replacing every referenced benchmark TOML's
+    /// value for this invocation without modifying those source files.
+    pub replay_concurrency: Option<usize>,
     pub tool_mode: Option<crate::tape::Mode>,
     pub tool_mode_explicit: bool,
     pub mcp_mode: Option<crate::tape::Mode>,
@@ -142,6 +145,7 @@ impl Default for Options<'_> {
             quiet_output: false,
             interactive: false,
             mode: None,
+            replay_concurrency: None,
             tool_mode: None,
             tool_mode_explicit: false,
             mcp_mode: None,
@@ -592,6 +596,37 @@ mod tests {
     use super::{Options, run, write_progress};
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn replay_concurrency_override_drives_default_sweep_budget() {
+        let source: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\nconcurrency=1\n",
+        )
+        .unwrap();
+        let mut first = source.clone();
+        let mut second = source.clone();
+        for configuration in [&mut first, &mut second] {
+            crate::runner::apply_replay_concurrency(
+                configuration,
+                Some(crate::tape::Mode::Replay),
+                Some(4),
+            )
+            .unwrap();
+        }
+
+        let weights = [first.concurrency, second.concurrency];
+        let defaults = super::scheduler::Scheduling::new(1, None, &weights).unwrap();
+        assert_eq!(defaults.jobs, 1);
+        assert_eq!(defaults.max_active_attempts, 4);
+
+        let parallel = super::scheduler::Scheduling::new(2, None, &weights).unwrap();
+        assert_eq!(parallel.jobs, 2);
+        assert_eq!(parallel.max_active_attempts, 4);
+        assert_eq!(source.concurrency, 1, "source TOML value is not changed");
+
+        let expanded = super::scheduler::Scheduling::new(2, Some(8), &weights).unwrap();
+        assert_eq!(expanded.max_active_attempts, 8);
+    }
 
     fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now()
