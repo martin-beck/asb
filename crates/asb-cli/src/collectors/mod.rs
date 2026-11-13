@@ -880,6 +880,25 @@ mod tests {
 
     #[test]
     fn project_hooks_are_dispatched_and_reset_leases_remain_held() {
+        const ISOLATED: &str = "ASB_TEST_ISOLATED_COLLECTOR_RESET_LEASE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = format!(
+                "{}::project_hooks_are_dispatched_and_reset_leases_remain_held",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         struct Fixture;
         impl CollectorAdapter for Fixture {
             fn id(&self) -> &'static str {

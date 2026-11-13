@@ -430,14 +430,20 @@ exit 0
                 .env(CASE, case)
                 .env("PATH", directory.join("commands"))
                 .env("HOME", &directory)
-                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if case == "declined" {
+                command.stdin(Stdio::piped());
+            } else {
+                command.stdin(Stdio::null());
+            }
             if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
                 command.env("LLVM_PROFILE_FILE", profile);
             }
             let mut child = command.spawn().unwrap();
-            child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+            if case == "declined" {
+                child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+            }
             let output = child.wait_with_output().unwrap();
             assert!(
                 output.status.success(),
