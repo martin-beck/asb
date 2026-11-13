@@ -740,14 +740,17 @@ mod tests {
     fn native_guest_service_records_goose_dispatch_without_replacing_tools() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::{fs::PermissionsExt, net::UnixStream};
-        // Unix sockets limit the supplied pathname, so use a short path
-        // relative to Cargo's test working directory even in deep checkouts.
-        let base = Path::new("target");
-        std::fs::create_dir_all(base).unwrap();
-        let root = base.join(format!("goose-guest-{}", std::process::id()));
+        // Unix sockets limit the supplied pathname. Do not use TMPDIR: CI
+        // deliberately points it at a longer project-local fixture path.
+        let root =
+            Path::new("/tmp").join(format!("asb-goose-{}", crate::tools::runtime::unique_id()));
         std::fs::create_dir(&root).unwrap();
         let executable = root.join("goose-executable");
-        std::fs::write(&executable, "#!/bin/sh\nexit 73\n").unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 73; fi\nsleep 60\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut command = Command::new(&executable);
         let plan = super::configured_native_service(

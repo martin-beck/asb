@@ -411,6 +411,7 @@ fn pin_namespace_helper(
             pinned.display()
         ));
     }
+    drop(destination);
     if let Err(error) = fs::set_permissions(&pinned, fs::Permissions::from_mode(0o700)) {
         let _ = fs::remove_file(&pinned);
         return Err(format!(
@@ -867,6 +868,25 @@ else:
 
     #[test]
     fn pinned_probe_helper_survives_removal_of_the_build_executable() {
+        const ISOLATED: &str = "ASB_TEST_ISOLATED_PINNED_PROBE_HELPER";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = format!(
+                "{}::pinned_probe_helper_survives_removal_of_the_build_executable",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let root = std::env::temp_dir()
             .join(crate::workloads::TaskIdentity::local("perfetto-pinned-helper", None).attempt_id);
         fs::create_dir(&root).unwrap();

@@ -56,12 +56,31 @@ fn forget_verified_archive(path: &Path) {
 
 fn verify_cached_archive(path: &Path, checksum: &str) -> Result<(), Error> {
     #[cfg(test)]
-    VERIFY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut calls = verification_calls()
+            .lock()
+            .expect("runtime verification call cache lock");
+        *calls.entry(path.to_path_buf()).or_default() += 1;
+    }
     verify_sha256(path, checksum, "runtime archive")
 }
 
 #[cfg(test)]
-static VERIFY_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn verification_calls() -> &'static Mutex<BTreeMap<PathBuf, usize>> {
+    static CALLS: OnceLock<Mutex<BTreeMap<PathBuf, usize>>> = OnceLock::new();
+    CALLS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn verification_call_count(path: &Path) -> usize {
+    verification_calls()
+        .lock()
+        .expect("runtime verification call cache lock")
+        .get(path)
+        .copied()
+        .unwrap_or_default()
+}
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -423,7 +442,7 @@ mod tests {
         fs::copy(&source, &destination).unwrap();
         let context =
             OperationContext::new(&fixture.0, &crate::project::ProjectConfig::default()).unwrap();
-        let before = VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let before = verification_call_count(&destination);
         cached_archive_in(
             &context,
             &destination,
@@ -432,7 +451,7 @@ mod tests {
             &mut |_, _| {},
         )
         .unwrap();
-        let after_first = VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let after_first = verification_call_count(&destination);
         assert_eq!(after_first, before + 1);
         fs::remove_file(&source).unwrap();
         cached_archive_in(
@@ -443,9 +462,6 @@ mod tests {
             &mut |_, _| {},
         )
         .unwrap();
-        assert_eq!(
-            VERIFY_CALLS.load(std::sync::atomic::Ordering::Relaxed),
-            after_first
-        );
+        assert_eq!(verification_call_count(&destination), after_first);
     }
 }

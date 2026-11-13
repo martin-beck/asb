@@ -83,8 +83,27 @@ mod destination_lock_tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn isolated_retained_lock_fixture(test: &str) -> bool {
+        const ENV: &str = "ASB_RETAINED_INSTALL_LOCK_FIXTURE_TEST";
+        if std::env::var_os(ENV).is_some() {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test])
+            .env(ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        false
+    }
+
     #[test]
     fn inherited_descriptor_retains_lock_when_parent_owner_drops() {
+        if !isolated_retained_lock_fixture(
+            "install::destination_lock_tests::inherited_descriptor_retains_lock_when_parent_owner_drops",
+        ) {
+            return;
+        }
         let root = std::env::temp_dir().join(tools::runtime::unique_id());
         fs::create_dir_all(&root).unwrap();
         let owner = destination_lock(&root.join("tool")).unwrap();
@@ -99,6 +118,11 @@ mod destination_lock_tests {
     #[cfg(unix)]
     #[test]
     fn leaf_replaced_by_symlink_cannot_change_ownership_key() {
+        if !isolated_retained_lock_fixture(
+            "install::destination_lock_tests::leaf_replaced_by_symlink_cannot_change_ownership_key",
+        ) {
+            return;
+        }
         let root = std::env::temp_dir().join(tools::runtime::unique_id());
         fs::create_dir_all(root.join("target")).unwrap();
         let owner = destination_lock(&root.join("tool")).unwrap();
@@ -113,6 +137,11 @@ mod destination_lock_tests {
 
     #[test]
     fn worker_context_retains_destination_after_caller_drops() {
+        if !isolated_retained_lock_fixture(
+            "install::destination_lock_tests::worker_context_retains_destination_after_caller_drops",
+        ) {
+            return;
+        }
         let root = std::env::temp_dir().join(tools::runtime::unique_id());
         fs::create_dir_all(&root).unwrap();
         let base = OperationContext::new(&root, &project::ProjectConfig::default()).unwrap();

@@ -6,8 +6,19 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(all(test, unix))]
+use std::cell::Cell;
+
 #[cfg(unix)]
 static REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+// Unit tests need to exercise an interruption without delivering a process
+// signal. Keep that synthetic request local to its test thread so unrelated
+// concurrently executing tests cannot be cancelled by the fixture.
+#[cfg(all(test, unix))]
+thread_local! {
+    static TEST_REQUESTED: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Internal ASB helpers have their own protocol and lifecycle signals.  Only
 /// the user-facing command may install the foreground interruption observer.
@@ -50,6 +61,10 @@ impl Guard {
 }
 
 pub(crate) fn requested() -> bool {
+    #[cfg(all(test, unix))]
+    if TEST_REQUESTED.with(Cell::get) {
+        return true;
+    }
     #[cfg(unix)]
     return REQUESTED
         .get()
@@ -73,9 +88,7 @@ pub(crate) fn check() -> Result<(), crate::Error> {
 
 #[cfg(all(test, unix))]
 pub(crate) fn request_for_test() {
-    REQUESTED
-        .get_or_init(|| Arc::new(AtomicBool::new(false)))
-        .store(true, Ordering::Release);
+    TEST_REQUESTED.with(|requested| requested.set(true));
 }
 
 impl Drop for Guard {
@@ -88,6 +101,8 @@ impl Drop for Guard {
             if let Some(requested) = REQUESTED.get() {
                 requested.store(false, Ordering::Release);
             }
+            #[cfg(test)]
+            TEST_REQUESTED.with(|requested| requested.set(false));
         }
     }
 }
@@ -120,6 +135,20 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("graceful setup shutdown")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn synthetic_request_is_confined_to_its_test_thread() {
+        let child = std::thread::spawn(|| {
+            request_for_test();
+            assert!(requested());
+        });
+        child.join().unwrap();
+        assert!(
+            !requested(),
+            "a synthetic interruption must not affect a concurrent test"
         );
     }
 

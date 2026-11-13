@@ -1215,6 +1215,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn validation_service_streams_large_decode_and_reports_child_failure() {
+        const ISOLATED: &str = "ASB_TEST_ISOLATED_PERF_VALIDATION_SERVICE";
+        if std::env::var_os(ISOLATED).is_none() {
+            let name = format!(
+                "{}::validation_service_streams_large_decode_and_reports_child_failure",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
         std::fs::create_dir(&root).unwrap();
