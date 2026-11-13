@@ -52,6 +52,49 @@ class SubmissionRecoveryTests(unittest.TestCase):
             'catalog.json', 'asb-swebench-baseline:' + 'a' * 64, None)
         self.assertEqual(entered, [True])
 
+    def test_replay_serializes_shared_image_lookup_but_live_setup_does_not(self):
+        class StopLookup(RuntimeError):
+            pass
+
+        class Lock:
+            def __init__(self, entered):
+                self.entered = entered
+
+            def __enter__(self):
+                self.entered.append(True)
+
+            def __exit__(self, *unused):
+                return False
+
+        for mode, expected in (("replay", [True]), ("none", [])):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                entered = []
+                journal = MagicMock()
+                task = task_module.SweBenchTask(MagicMock(), root / "catalog.json", "fixture", root / "artifacts", tool_mode=mode)
+                swebench = types.ModuleType("swebench")
+                harness = types.ModuleType("swebench.harness")
+                utils = types.ModuleType("swebench.harness.utils")
+                utils.make_test_spec = lambda _row: types.SimpleNamespace(image="fixture-image")
+                image_builder = types.ModuleType("swebench.image_builder")
+                constants = types.ModuleType("swebench.image_builder.constants")
+                constants.CONTAINER_WORKDIR = "/testbed"
+                def resolve(*_args, **_kwargs):
+                    self.assertEqual(entered, expected)
+                    raise StopLookup()
+                modules = {"swebench": swebench, "swebench.harness": harness,
+                           "swebench.harness.utils": utils, "swebench.image_builder": image_builder,
+                           "swebench.image_builder.constants": constants}
+                with patch.dict(sys.modules, modules), patch.object(task_module, "read_task", return_value=(
+                        {"workload": "swe-bench", "dataset": {}}, {"base_commit": "a" * 40})), \
+                     patch.object(task_module, "sdk_identity", return_value={}), \
+                     patch.object(task_module, "ResourceJournal", return_value=journal), \
+                     patch("asb_docker._session_bootstrap_section", side_effect=lambda: Lock(entered)), \
+                     patch.object(task_module, "resolve_image", side_effect=resolve):
+                    with self.assertRaises(StopLookup):
+                        task.__enter__()
+                self.assertEqual(entered, expected)
+
     def test_large_submission_patch_is_captured_and_limit_is_explained(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); worktree = root / 'worktree'; worktree.mkdir()

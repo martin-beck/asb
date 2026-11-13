@@ -276,28 +276,34 @@ class SweBenchTask:
         try:
             self.journal = ResourceJournal(self.client, self.artifacts, self.attempt)
             expected_material = os.environ.get("ASB_EXPECTED_MATERIAL_SHA256")
-            image, source = resolve_image(self.client, spec.image, lambda: build_image(
-                self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,
-                cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay",
-                material_sha256=expected_material)
+            # A dense replay cohort resolves the same retained image and
+            # baseline at once. Serialize only these daemon control requests;
+            # workspace preparation and all benchmark execution stay parallel.
+            from asb_docker import _session_bootstrap_section
+            control = _session_bootstrap_section() if self.tool_mode == "replay" else nullcontext()
+            with control:
+                image, source = resolve_image(self.client, spec.image, lambda: build_image(
+                    self.client, self.row, self.catalog["dataset"], self.artifacts, self.attempt,
+                    cancelled=self.cancelled,journal=self.journal), offline=self.tool_mode == "replay",
+                    material_sha256=expected_material)
+                base = self.row["base_commit"]
+                material_identity = (verified_replay_material(source, expected_material)
+                                     if self.tool_mode == "replay" else None)
+                cache_tag, _cache_labels = prepared_baseline_labels(
+                    image, self.task_id, base, material_identity)
+                baseline = (
+                    load_prepared_baseline(self.client, image, self.task_id, base, material_identity)
+                    if self.tool_mode == "replay" else None
+                )
             self.source_image_tag = source.get("tag")
             if self.source_image_tag is not None:
                 atomic_write(self.artifacts / "source-image.json", encoded(source))
             snapshot_storage = None
             if self.snapshot:
                 snapshot_storage = snapshot_storage_path(self.artifacts,self.attempt,self.tool_mode)
-            base = self.row["base_commit"]
-            material_identity = (verified_replay_material(source, expected_material)
-                                 if self.tool_mode == "replay" else None)
             self.verified_replay_material = material_identity
-            cache_tag, _cache_labels = prepared_baseline_labels(
-                image, self.task_id, base, material_identity)
             # A verified replay cache hit is immutable and can be opened by all
             # cohort peers concurrently. Serialize only the first creator.
-            baseline = (
-                load_prepared_baseline(self.client, image, self.task_id, base, material_identity)
-                if self.tool_mode == "replay" else None
-            )
             cache_lock = (
                 prepared_baseline_lock_if_missing(
                     self.catalog_path, cache_tag, baseline, self.cancelled)
