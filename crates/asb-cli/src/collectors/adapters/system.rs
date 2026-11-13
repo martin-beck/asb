@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::super::CollectorAdapter;
 use crate::measurements::{self, Session};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(super) struct SystemCollector;
 pub(super) static ADAPTER: SystemCollector = SystemCollector;
@@ -323,9 +323,8 @@ fn command_version_with_deadline(
 }
 
 fn collector_versions(tool_dir: Option<&Path>) -> BTreeMap<String, String> {
-    [
+    let mut versions = [
         ("perf", "--version"),
-        ("bpftrace", "--version"),
         ("perfetto", "--version"),
         ("mpstat", "--version"),
         ("iostat", "--version"),
@@ -342,7 +341,35 @@ fn collector_versions(tool_dir: Option<&Path>) -> BTreeMap<String, String> {
         )
         .map(|version| (name.to_owned(), version))
     })
-    .collect()
+    .collect::<BTreeMap<_, _>>();
+    if let Some(version) = installed_bpftrace_version(tool_dir) {
+        versions.insert("bpftrace".to_owned(), version);
+    }
+    versions
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BpftraceCompatibility {
+    schema_version: u32,
+    tool: String,
+    version: String,
+    kernel_release: String,
+    kernel_architecture: String,
+}
+
+fn installed_bpftrace_version(tool_dir: Option<&Path>) -> Option<String> {
+    let receipt = tool_dir?
+        .join("bpftrace")
+        .join("bpftrace-compatibility.json");
+    let receipt = std::fs::read_to_string(receipt).ok()?;
+    let receipt = serde_json::from_str::<BpftraceCompatibility>(&receipt).ok()?;
+    (receipt.schema_version == 1
+        && receipt.tool == "bpftrace"
+        && !receipt.kernel_release.is_empty()
+        && !receipt.kernel_architecture.is_empty())
+    .then(|| sanitize(&receipt.version))
+    .flatten()
 }
 
 fn kernel_settings() -> BTreeMap<String, String> {
@@ -429,26 +456,40 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn collector_versions_allow_slow_startup() {
+    fn collector_versions_read_bpftrace_receipt_without_running_the_binary() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!(
             "asb-slow-collector-version-{}",
             crate::tools::runtime::unique_id()
         ));
+        let bpftrace_started = root.join("bpftrace-started");
         for name in ["perf", "bpftrace", "perfetto", "mpstat", "iostat"] {
             let bin = root.join(name).join("bin");
             std::fs::create_dir_all(&bin).unwrap();
             let path = bin.join(crate::measurements::tool_binary_name(name));
-            let delay = if name == "bpftrace" { "sleep 3\n" } else { "" };
-            std::fs::write(&path, format!("#!/bin/sh\n{delay}echo fixture-1.2\n")).unwrap();
+            let body = if name == "bpftrace" {
+                format!(
+                    "#!/bin/sh\nprintf called > {}\nsleep 30\n",
+                    bpftrace_started.display()
+                )
+            } else {
+                "#!/bin/sh\necho fixture-1.2\n".to_owned()
+            };
+            std::fs::write(&path, body).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        std::fs::write(
+            root.join("bpftrace/bpftrace-compatibility.json"),
+            "{\"schema_version\":1,\"tool\":\"bpftrace\",\"version\":\"bpftrace v0.27.0\",\"kernel_release\":\"fixture\",\"kernel_architecture\":\"aarch64\"}",
+        )
+        .unwrap();
         let versions = super::collector_versions(Some(&root));
         assert_eq!(
             versions.get("bpftrace").map(String::as_str),
-            Some("fixture-1.2")
+            Some("bpftrace v0.27.0")
         );
         assert_eq!(versions.len(), 5);
+        assert!(!bpftrace_started.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
