@@ -507,11 +507,40 @@ pub(super) struct FinalizedAttempt {
 }
 
 impl EvaluatedAttempt {
-    pub fn finish(mut self) -> FinalizedAttempt {
+    #[cfg(test)]
+    pub fn finish(self) -> FinalizedAttempt {
+        self.finish_with_ignored_evaluation_cleanup(false)
+    }
+
+    pub fn finish_with_ignored_evaluation_cleanup(
+        mut self,
+        ignored_evaluation_cleanup: bool,
+    ) -> FinalizedAttempt {
+        // Only an otherwise clean replay may replace the adapter's usual
+        // evaluator-error preservation with an explicit normal close. Any
+        // observed execution, capture, proxy, or collector failure retains
+        // the workload evidence through the ordinary finish path.
+        let normal_close_after_ignored_evaluation = ignored_evaluation_cleanup
+            && matches!(
+                self.outcome.evaluation,
+                workloads::outcome::EvaluationOutcome::Error { .. }
+            )
+            && self.settled.issues.run_error.is_none()
+            && self.settled.issues.capture_error.is_none()
+            && self.settled.issues.collector_errors.is_empty()
+            && self.settled.cassette_usage_verified
+            && self.settled.proxy_evidence.cleanup_confirmed
+            && self.settled.proxy_evidence.replay_divergences.is_empty();
         let cleanup = self.settled.issues.operation(
             self.settled.prepared.measurements.as_mut(),
             LifecyclePhase::WorkloadCleanup,
-            || self.settled.prepared.workload.finish(),
+            || {
+                if normal_close_after_ignored_evaluation {
+                    self.settled.prepared.workload.finish_ignored_evaluation()
+                } else {
+                    self.settled.prepared.workload.finish()
+                }
+            },
         );
         let cleanup_confirmed = cleanup.is_ok();
         let resource_disposition = cleanup.as_ref().ok().map(|settled| settled.disposition);
