@@ -28,6 +28,10 @@ const COHORT_IDLE_ALLOWANCE: Duration = Duration::from_secs(120);
 const WORKLOAD_READY_TIMEOUT: Duration =
     Duration::from_secs(crate::planning::DEFAULT_ENVIRONMENT_PREPARATION_SECONDS);
 const RESUME_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+/// The guest serializes Docker gate release while a cohort starts, preventing
+/// a daemon control-plane burst. Allow every additional selected peer a small,
+/// bounded turn in that queue before classifying its acknowledgement as lost.
+const RESUME_ACK_QUEUE_ALLOWANCE_PER_MEMBER: Duration = Duration::from_secs(2);
 const TARGET_VERIFICATION_RETRY: Duration = Duration::from_secs(30);
 const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
@@ -61,6 +65,12 @@ fn attach_target_before_launch<T>(
         collector_ready.arm()?;
     }
     Ok(attached)
+}
+
+fn resume_ack_timeout(cohort_size: usize) -> Duration {
+    let queued_members = cohort_size.saturating_sub(1).min(u32::MAX as usize) as u32;
+    RESUME_ACK_TIMEOUT
+        .saturating_add(RESUME_ACK_QUEUE_ALLOWANCE_PER_MEMBER.saturating_mul(queued_members))
 }
 
 /// A Docker exec target can be announced just before all of its host `/proc`
@@ -1646,7 +1656,8 @@ impl Session {
         ) {
             write_cohort_release_receipt(session, target_sha256, "resume_sent")?;
         }
-        self.resume_ack_deadline = Some((Instant::now() + RESUME_ACK_TIMEOUT).min(deadline));
+        self.resume_ack_deadline =
+            Some((Instant::now() + resume_ack_timeout(context.config.concurrency)).min(deadline));
         self.resume_exec_id = Some(event["target"]["exec_id"].clone());
         self.resume_target_sha256 = verified_target;
         Ok(())

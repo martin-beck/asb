@@ -22,6 +22,19 @@ use std::io::{self, Write};
 use std::path::Path;
 
 struct Fixture(PathBuf);
+
+#[test]
+fn effective_resume_ack_timeout_includes_a_bounded_dense_cohort_queue_allowance() {
+    assert_eq!(resume_ack_timeout(0), Duration::from_secs(60));
+    assert_eq!(resume_ack_timeout(1), Duration::from_secs(60));
+    assert_eq!(resume_ack_timeout(64), Duration::from_secs(186));
+    assert_eq!(resume_ack_timeout(128), Duration::from_secs(314));
+    assert_eq!(
+        resume_ack_timeout(crate::benchmark::MAX_CONCURRENCY),
+        Duration::from_secs(1082)
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
