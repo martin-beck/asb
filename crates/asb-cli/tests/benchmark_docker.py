@@ -99,6 +99,7 @@ class ConnectionTests(unittest.TestCase):
                 self.assertEqual(adapter.timeout, 600.0)
                 pool = adapter.get_connection("http+docker://localhost/version")
                 self.assertEqual(pool.pool.maxsize, RUNTIME._TRANSPORT_POOL_MAXSIZE)
+                self.assertEqual(pool.pool.maxsize, 4)
                 self.assertTrue(pool.block)
                 self.assertIs(pool, adapter.get_connection(
                     "http+docker://localhost/v1.52/containers/fixture/json"))
