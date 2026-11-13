@@ -356,11 +356,16 @@ class DockerSession:
         class Adapter(UnixHTTPAdapter):
             def get_connection(self, url, proxies=None):
                 with self.pools.lock:
-                    pool = self.pools.get(url)
+                    # All requests through this adapter target the one scoped
+                    # Unix socket.  Request paths differ for every Docker API
+                    # operation, so using `url` here would create a separate
+                    # bounded pool for each path and still admit unbounded CLI
+                    # tunnel children over a long-lived controller session.
+                    pool = self.pools.get("asb-scoped-unix-endpoint")
                     if pool is None:
                         pool = Pool(url, "unused", self.timeout,
                                     maxsize=_TRANSPORT_POOL_MAXSIZE)
-                        self.pools[url] = pool
+                        self.pools["asb-scoped-unix-endpoint"] = pool
                     return pool
 
         try:
