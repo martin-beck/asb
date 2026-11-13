@@ -48,21 +48,24 @@ _TERM_GRACE = 2.0
 _TRANSPORT_POOL_MAXSIZE = 4
 
 
-def _session_bootstrap_lock_path():
-    """Return the user-private lock for short Docker SDK session handshakes."""
+def _docker_control_lock_path():
+    """Return the user-private lock for bounded Docker control-plane calls."""
     uid = os.getuid() if hasattr(os, "getuid") else 0
-    return os.path.join(tempfile.gettempdir(), f"asb-docker-session-bootstrap-{uid}.lock")
+    return os.path.join(tempfile.gettempdir(), f"asb-docker-control-{uid}.lock")
 
 
 @contextmanager
-def _session_bootstrap_section():
-    """Serialize Docker SDK version negotiation across a dense local cohort.
+def _docker_control_section(wait_seconds=_ACCESS_PROBE_TIMEOUT_SECONDS):
+    """Serialize one bounded local Docker control-plane operation.
 
-    Every controller opens a long-lived dial-stdio transport during API version
-    negotiation. Starting an entire cohort at once can wedge a native daemon
-    before the workload-specific gate can apply. This covers only version and
-    ping, never the benchmark's Docker operations or execution streams.
+    Starting an entire cohort's session negotiation or workspace lifecycle at
+    once can wedge a native daemon before the workload-specific execution gate
+    applies. Callers hold this only for their short control request, never for
+    benchmark execution streams.
     """
+    if (isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
+            or wait_seconds <= 0):
+        raise DockerAccessError("Docker control-plane coordination requires a positive wait allowance")
     if fcntl is None:
         yield
         return
@@ -73,7 +76,7 @@ def _session_bootstrap_section():
         raise DockerAccessError("cannot safely coordinate Docker session bootstrap")
     flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(_session_bootstrap_lock_path(), flags, 0o600)
+        fd = os.open(_docker_control_lock_path(), flags, 0o600)
     except OSError as error:
         raise DockerAccessError("cannot open Docker session-bootstrap coordination lock") from error
     try:
@@ -82,17 +85,17 @@ def _session_bootstrap_section():
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
             raise DockerAccessError("Docker session-bootstrap coordination lock is not a private regular file")
         os.fchmod(fd, 0o600)
-        deadline = time.monotonic() + _ACCESS_PROBE_TIMEOUT_SECONDS
+        deadline = time.monotonic() + wait_seconds
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise DockerAccessError("Docker session bootstrap did not obtain its bounded coordination lock")
+                    raise DockerAccessError("Docker control-plane operation did not obtain its bounded coordination lock")
                 time.sleep(0.02)
             except OSError as error:
-                raise DockerAccessError("cannot acquire Docker session-bootstrap coordination lock") from error
+                raise DockerAccessError("cannot acquire Docker control-plane coordination lock") from error
         try:
             yield
         finally:
@@ -440,7 +443,7 @@ class DockerSession:
             # the actual daemon version, including newer minimum API versions.
             self.client = BoundedDockerClient(base_url="unix:///unused", version="1.41", timeout=_API_TIMEOUT_SECONDS)
             self.client.api.mount("http+docker://", Adapter("http+unix:///unused", timeout=_API_TIMEOUT_SECONDS))
-            with _session_bootstrap_section():
+            with _docker_control_section():
                 version = self.client.api.version(api_version=False)["ApiVersion"]
                 self.client.api._version = version
                 self.client.ping()

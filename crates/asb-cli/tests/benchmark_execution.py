@@ -527,6 +527,28 @@ class ExecutionTests(unittest.TestCase):
         workspace = RUNTIME.ManagedDockerWorkspace(client, image, "asb-" + "a" * 32, "/task")
         return workspace, container, api, creation
 
+    def test_workspace_create_and_start_share_bounded_control_section(self):
+        workspace, container, _, _ = self.workspace()
+        events = []
+
+        class Control:
+            def __enter__(self):
+                events.append("enter")
+
+            def __exit__(self, *_error):
+                events.append("exit")
+
+        start = container.start
+        def checked_start():
+            self.assertEqual(events, ["enter"])
+            start()
+        container.start = checked_start
+        with patch.object(RUNTIME, "_workspace_control_section", return_value=Control()):
+            with workspace:
+                pass
+        self.assertEqual(events, ["enter", "exit"])
+        self.assertIn("start", container.events)
+
     def test_compose_services_are_pinned_to_native_architecture(self):
         with patch.object(RUNTIME.platform, "machine", return_value="aarch64"):
             service = {}
