@@ -39,16 +39,6 @@ fn receive_until_returns_none_for_a_presentation_poll_then_delivers_event() {
     );
 }
 
-#[cfg(unix)]
-fn grade() -> CompletedGrade {
-    CompletedGrade::decode(
-        &json!({"event":"evaluated","result":{"workload":"fixture","task_id":"task",
-        "dataset":null,"outcome":"unresolved","resolved":false}}),
-        &crate::workloads::TaskIdentity::local("fixture", Some("task")),
-    )
-    .unwrap()
-}
-
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum PollFault {
@@ -260,9 +250,7 @@ fn close_and_cancellation_share_ack_exit_and_retry_cleanup_deadline() {
         let mut controller = ready_child(script);
         let started = Instant::now();
         let result = if normal {
-            controller
-                .finish(grade(), Duration::from_millis(150))
-                .map(|_| ())
+            controller.finish(Duration::from_millis(150)).map(|_| ())
         } else {
             controller.cancel(Duration::from_millis(150)).map(|_| ())
         };

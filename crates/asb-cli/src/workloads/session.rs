@@ -535,6 +535,9 @@ pub(crate) trait WorkloadSession {
             diagnostic: None,
         })
     }
+    fn finish_ignored_evaluation(&mut self) -> Result<ResourceSettlement, String> {
+        self.finish()
+    }
     fn execute(
         &mut self,
         _context: &mut ExecutionContext<'_>,

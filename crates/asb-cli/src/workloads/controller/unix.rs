@@ -2,9 +2,7 @@
 //! thread join or unconditional child wait belongs to the caller's path.
 use super::MAX_MESSAGE;
 use crate::workloads::session::{ResourceDisposition, ResourceSettlement};
-use crate::workloads::task_protocol::{
-    CancellationAck, CompletedGrade, EventKind, NormalCloseAck, Request,
-};
+use crate::workloads::task_protocol::{CancellationAck, EventKind, NormalCloseAck, Request};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -336,7 +334,6 @@ impl Controller {
 
     pub(in crate::workloads) fn finish(
         &mut self,
-        _grade: CompletedGrade,
         timeout: Duration,
     ) -> Result<ResourceSettlement, String> {
         let deadline = self.cleanup_budget(Instant::now() + timeout);
@@ -367,7 +364,6 @@ impl Controller {
         })();
         result.map_err(|error| self.cleanup_failure(error, deadline))
     }
-
     pub(crate) fn complete_response(&mut self, deadline: Instant) -> Result<(), String> {
         let deadline = self.cleanup_budget(deadline);
         self.input.take();

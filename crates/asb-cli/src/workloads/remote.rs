@@ -2001,7 +2001,7 @@ impl WorkloadSession for Session {
         if let Some(settlement) = &self.settlement {
             return Ok(settlement.clone());
         }
-        let Some(grade) = self.completed_grade.take() else {
+        let Some(_grade) = self.completed_grade.take() else {
             self.cancel()?;
             return self
                 .settlement
@@ -2009,7 +2009,7 @@ impl WorkloadSession for Session {
                 .ok_or("workload settlement was not confirmed".into());
         };
         self.cleanup_attempted = true;
-        match self.controller.finish(grade, CANCELLATION_TIMEOUT) {
+        match self.controller.finish(CANCELLATION_TIMEOUT) {
             Ok(settlement) => {
                 self.settlement = Some(settlement.clone());
                 Ok(settlement)
@@ -2028,6 +2028,15 @@ impl WorkloadSession for Session {
                 )),
             },
         }
+    }
+    fn finish_ignored_evaluation(&mut self) -> Result<ResourceSettlement, String> {
+        if let Some(settlement) = &self.settlement {
+            return Ok(settlement.clone());
+        }
+        self.cleanup_attempted = true;
+        let settlement = self.controller.finish(CANCELLATION_TIMEOUT)?;
+        self.settlement = Some(settlement.clone());
+        Ok(settlement)
     }
     fn invocation(&self) -> &TaskInvocation {
         &self.invocation
@@ -2964,6 +2973,16 @@ sys.stdout.write(result['project_configuration'])
                 "settled finish must not repeat cancellation"
             );
         }
+    }
+
+    #[test]
+    fn ignored_evaluation_finish_uses_the_explicit_normal_close_path() {
+        let mut task = session(&[], true);
+        assert!(task.completed_grade.is_none());
+
+        let settlement = task.finish_ignored_evaluation().unwrap();
+        assert_eq!(settlement.disposition, ResourceDisposition::Removed);
+        assert!(settlement.diagnostic.is_none());
     }
 
     #[test]

@@ -1556,12 +1556,15 @@ impl<'a> CompletedAttempt<'a> {
             &settled.issues,
             &settled.proxy_evidence,
         );
+        let ignored_evaluation_cleanup = context.options.ignore_evaluation
+            && context.options.mode == Some(tape::Mode::Replay)
+            && process_success;
         let mut finalized = settled
             .evaluate_with_policy(
                 final_response.as_deref().unwrap_or_default(),
                 &metadata.metric_policy,
             )
-            .finish();
+            .finish_with_ignored_evaluation_cleanup(ignored_evaluation_cleanup);
         if finalized.resource_disposition == Some(workloads::ResourceDisposition::StoppedPreserved)
             && !context.options.json
             && finalized.issues.output_error.is_none()

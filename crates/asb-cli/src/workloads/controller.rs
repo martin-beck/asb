@@ -2,7 +2,7 @@
 #[cfg(test)]
 use super::session::ResourceDisposition;
 #[cfg(test)]
-use super::task_protocol::{CompletedGrade, EventKind};
+use super::task_protocol::EventKind;
 use serde_json::Value;
 use std::io::Write;
 #[cfg(test)]
@@ -321,17 +321,6 @@ mod transport_tests;
 
 #[cfg(test)]
 mod tests {
-    fn completed_grade() -> super::CompletedGrade {
-        let identity = crate::workloads::TaskIdentity::local("fixture", Some("task"));
-        super::CompletedGrade::decode(
-            &serde_json::json!({"event":"evaluated", "result":{
-                "workload":"fixture", "task_id":"task", "dataset":null,
-                "outcome":"unresolved", "resolved":false
-            }}),
-            &identity,
-        )
-        .unwrap()
-    }
     #[test]
     fn published_harbor_assets_import_without_the_terminal_bench_1_adapter() {
         let root = std::env::temp_dir()
@@ -408,9 +397,7 @@ mod tests {
         controller
             .receive(Instant::now() + Duration::from_secs(3))
             .unwrap();
-        controller
-            .finish(completed_grade(), Duration::from_secs(8))
-            .unwrap();
+        controller.finish(Duration::from_secs(8)).unwrap();
         assert!(controller.child().try_wait().unwrap().unwrap().success());
     }
 
@@ -431,7 +418,7 @@ mod tests {
             controller
                 .receive(Instant::now() + Duration::from_secs(3))
                 .unwrap();
-            let result = controller.finish(completed_grade(), Duration::from_secs(3));
+            let result = controller.finish(Duration::from_secs(3));
             if matches!(cleanup, "not_created" | "removed") && event == "closed" {
                 let settled = result.unwrap();
                 assert!(settled.diagnostic.is_some());
@@ -519,9 +506,7 @@ mod tests {
                 .receive(Instant::now() + Duration::from_secs(3))
                 .unwrap();
             if normal {
-                let settled = controller
-                    .finish(completed_grade(), Duration::from_secs(3))
-                    .unwrap();
+                let settled = controller.finish(Duration::from_secs(3)).unwrap();
                 assert_eq!(settled.disposition, ResourceDisposition::StoppedPreserved);
                 assert!(settled.diagnostic.is_some());
             } else {
@@ -558,9 +543,7 @@ mod tests {
                 .receive(Instant::now() + Duration::from_secs(3))
                 .unwrap();
             let failed = if normal {
-                controller
-                    .finish(completed_grade(), Duration::from_millis(100))
-                    .unwrap_err()
+                controller.finish(Duration::from_millis(100)).unwrap_err()
             } else {
                 controller.cancel(Duration::from_millis(100)).unwrap_err()
             };

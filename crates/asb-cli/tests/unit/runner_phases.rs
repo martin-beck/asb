@@ -239,6 +239,16 @@ impl workloads::WorkloadSession for Workload {
             })
         }
     }
+    fn finish_ignored_evaluation(
+        &mut self,
+    ) -> Result<workloads::session::ResourceSettlement, String> {
+        self.operations.borrow_mut().push("finish-ignored");
+        self.finished = true;
+        Ok(workloads::session::ResourceSettlement {
+            disposition: workloads::ResourceDisposition::Removed,
+            diagnostic: None,
+        })
+    }
 }
 impl Drop for Workload {
     fn drop(&mut self) {
@@ -873,6 +883,42 @@ fn native_reward_pending_and_error_survive_marker_and_cleanup_failures() {
             assert!(result.issues.run_error.is_some());
         }
     }
+}
+
+#[test]
+fn ignored_replay_evaluation_error_only_uses_normal_close_for_clean_attempts() {
+    {
+        let fixture = Fixture::new();
+        let (prepared, operations) = prepared(&fixture, 2, false, None);
+        let finalized = prepared
+            .executed(evidence(0, false), AttemptIssues::default())
+            .settle(None)
+            .evaluate("submission")
+            .finish_with_ignored_evaluation_cleanup(true);
+        assert_eq!(
+            finalized.resource_disposition,
+            Some(workloads::ResourceDisposition::Removed)
+        );
+        assert_eq!(
+            operations.borrow().as_slice(),
+            ["evaluate", "finish-ignored"]
+        );
+    }
+
+    let fixture = Fixture::new();
+    let (prepared, operations) = prepared(&fixture, 2, false, None);
+    let mut issues = AttemptIssues::default();
+    issues.collector_errors.push("collector failed".into());
+    let finalized = prepared
+        .executed(evidence(0, false), issues)
+        .settle(None)
+        .evaluate("submission")
+        .finish_with_ignored_evaluation_cleanup(true);
+    assert_eq!(
+        finalized.resource_disposition,
+        Some(workloads::ResourceDisposition::StoppedPreserved)
+    );
+    assert_eq!(operations.borrow().as_slice(), ["evaluate", "preserve"]);
 }
 
 #[test]
