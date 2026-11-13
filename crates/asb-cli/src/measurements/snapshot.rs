@@ -26,6 +26,7 @@ type WorkerHandle = std::thread::JoinHandle<Result<(), String>>;
 const SETTLEMENT_BUDGET: Duration = Duration::from_secs(8);
 const SNAPSHOT_WAVE_SETTLEMENT_BUDGET: Duration = Duration::from_secs(15);
 const MAX_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+const MAX_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
 const MIN_CONCURRENT_SNAPSHOT_COMMANDS: usize = 4;
 const MAX_CONCURRENT_SNAPSHOT_COMMANDS: usize = 64;
 static ACTIVE_SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
@@ -60,8 +61,16 @@ fn snapshot_command_limit() -> usize {
         .unwrap_or(MIN_CONCURRENT_SNAPSHOT_COMMANDS)
 }
 
+fn snapshot_waves(active_snapshots: usize, command_limit: usize) -> usize {
+    active_snapshots.div_ceil(command_limit.max(1)).max(1)
+}
+
 fn settlement_budget_for(active_snapshots: usize, command_limit: usize) -> Duration {
-    let waves = active_snapshots.div_ceil(command_limit.max(1)) as u64;
+    let waves = if active_snapshots == 0 {
+        0
+    } else {
+        snapshot_waves(active_snapshots, command_limit)
+    } as u64;
     SETTLEMENT_BUDGET
         .saturating_add(SNAPSHOT_WAVE_SETTLEMENT_BUDGET.saturating_mul(waves as u32))
         .min(MAX_SETTLEMENT_BUDGET)
@@ -76,11 +85,44 @@ fn observation_runtime_for(
     active_snapshots: usize,
     command_limit: usize,
 ) -> Duration {
-    requested.saturating_mul(active_snapshots.div_ceil(command_limit.max(1)).max(1) as u32)
+    requested.saturating_mul(snapshot_waves(active_snapshots, command_limit) as u32)
 }
 
 fn observation_runtime(requested: Duration, active_snapshots: usize) -> Duration {
     observation_runtime_for(requested, active_snapshots, snapshot_command_limit())
+}
+
+// The native pidstat command consumes a full configured sampling interval.
+// Starting every tree sampler on the same one-second cadence would enqueue
+// more work than the bounded gate can admit in a dense cohort. Spread each
+// sampler over the required number of admission waves and retain that cadence
+// until it stops, so the queue has time to drain rather than growing forever.
+fn sampling_interval_for(
+    configured: Duration,
+    active_snapshots: usize,
+    command_limit: usize,
+) -> Duration {
+    configured
+        .saturating_mul(snapshot_waves(active_snapshots, command_limit) as u32)
+        .min(MAX_SNAPSHOT_INTERVAL)
+}
+
+fn sampling_phase_for(
+    root_pid: u32,
+    configured: Duration,
+    active_snapshots: usize,
+    command_limit: usize,
+) -> Duration {
+    let waves = snapshot_waves(active_snapshots, command_limit);
+    configured.saturating_mul((root_pid as usize % waves) as u32)
+}
+
+fn wait_for_sampling_phase(root: ProcessIdentity, cancelled: &AtomicBool, phase: Duration) -> bool {
+    let deadline = Instant::now() + phase;
+    while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline && root.matches() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    !cancelled.load(Ordering::Acquire) && root.matches()
 }
 
 struct SnapshotCommandSlots {
@@ -225,6 +267,20 @@ impl ProcessTreeSnapshot {
                 return Ok(());
             }
             let started = Instant::now();
+            let configured_interval = Duration::from_millis(measurement_interval_ms());
+            let active_snapshots = ACTIVE_SNAPSHOTS.load(Ordering::Acquire);
+            if !wait_for_sampling_phase(
+                root,
+                &cancelled,
+                sampling_phase_for(
+                    root.pid,
+                    configured_interval,
+                    active_snapshots,
+                    snapshot_command_limit(),
+                ),
+            ) {
+                return Ok(());
+            }
             while !cancelled.load(Ordering::Acquire) && root.matches() {
                 let members = process_tree_pids(root.pid)
                     .into_iter()
@@ -250,7 +306,12 @@ impl ProcessTreeSnapshot {
                     continue;
                 }
                 write_observation(&mut stdout, &mut stderr, &observation, started.elapsed())?;
-                let deadline = Instant::now() + Duration::from_millis(measurement_interval_ms());
+                let deadline = Instant::now()
+                    + sampling_interval_for(
+                        configured_interval,
+                        ACTIVE_SNAPSHOTS.load(Ordering::Acquire),
+                        snapshot_command_limit(),
+                    );
                 while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -742,6 +803,26 @@ mod io_tests {
         assert_eq!(
             observation_runtime_for(Duration::from_secs(6), 256, 16),
             Duration::from_secs(96)
+        );
+    }
+
+    #[test]
+    fn dense_snapshot_sampling_is_phased_and_matches_gate_capacity() {
+        let configured = Duration::from_secs(1);
+        assert_eq!(sampling_interval_for(configured, 1, 64), configured);
+        assert_eq!(
+            sampling_interval_for(configured, 256, 64),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            sampling_interval_for(Duration::from_secs(1), 10_000, 4),
+            MAX_SNAPSHOT_INTERVAL
+        );
+        assert_eq!(sampling_phase_for(8, configured, 256, 64), Duration::ZERO);
+        assert_eq!(sampling_phase_for(9, configured, 256, 64), configured);
+        assert_eq!(
+            sampling_phase_for(11, configured, 256, 64),
+            Duration::from_secs(3)
         );
     }
 
