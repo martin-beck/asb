@@ -16,35 +16,18 @@ impl CollectorAdapter for MpstatCollector {
     fn environment_flag(&self) -> Option<&'static str> {
         Some("ASB_MEASURE_MPSTAT")
     }
-    fn tool_id(&self) -> Option<&'static str> {
-        Some("mpstat")
-    }
     fn requires_pid(&self) -> bool {
         true
-    }
-    fn preflight_unavailable(
-        &self,
-        selected: &[String],
-        tools: Option<&std::path::Path>,
-    ) -> Option<super::super::PreflightUnavailable> {
-        super::super::selected_or_environment("mpstat", selected)
-            .then(|| super::pidstat::preflight_unavailable(tools))
-            .flatten()
-    }
-    fn preflight(&self, context: &mut super::super::PreflightContext<'_>) -> Result<(), String> {
-        if super::super::selected_or_environment("mpstat", context.selected) {
-            super::pidstat::preflight(context.tool_dir, "-u")
-        } else {
-            Ok(())
-        }
     }
     fn configure(
         &self,
         session: &mut measurements::Session,
         selected: &[String],
     ) -> Result<(), String> {
-        session.state::<CpuState>().borrow_mut().enabled =
-            super::super::selected_or_environment("mpstat", selected);
+        session
+            .state::<super::pidstat::State>()
+            .borrow_mut()
+            .cpu_enabled = super::super::selected_or_environment("mpstat", selected);
         Ok(())
     }
     fn process(
@@ -55,8 +38,27 @@ impl CollectorAdapter for MpstatCollector {
         process(session, context)
     }
     fn attach_pid(&self, session: &mut measurements::Session, pid: u32) -> Result<(), String> {
-        let enabled = session.state::<CpuState>().borrow().enabled;
-        super::pidstat::start_snapshot(session, "mpstat", enabled, pid, "-u")
+        super::pidstat::activate(session, pid);
+        Ok(())
+    }
+    fn activate_isolated_pid(
+        &self,
+        session: &mut measurements::Session,
+        pid: u32,
+    ) -> Result<(), String> {
+        super::pidstat::activate(session, pid);
+        Ok(())
+    }
+    fn lifecycle_event(
+        &self,
+        session: &mut measurements::Session,
+        event: super::super::LifecycleEvent,
+    ) -> Result<(), String> {
+        super::pidstat::lifecycle(session, event);
+        Ok(())
+    }
+    fn finish(&self, session: &mut measurements::Session) -> Result<(), String> {
+        super::pidstat::write_cpu(session)
     }
 }
 
@@ -103,11 +105,6 @@ fn samples(output: &str) -> super::pidstat::Samples {
             )
         },
     )
-}
-
-#[derive(Default)]
-struct CpuState {
-    enabled: bool,
 }
 
 pub(crate) fn parse_mpstat_metrics(output: &str) -> BTreeMap<String, f64> {

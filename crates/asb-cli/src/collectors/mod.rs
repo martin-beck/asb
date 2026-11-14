@@ -978,8 +978,8 @@ mod tests {
             ("arm-pmu", None, None, false),
             ("arm-spe", None, None, true),
             ("system", None, None, false),
-            ("mpstat", Some("ASB_MEASURE_MPSTAT"), Some("mpstat"), true),
-            ("iostat", Some("ASB_MEASURE_IOSTAT"), Some("iostat"), true),
+            ("mpstat", Some("ASB_MEASURE_MPSTAT"), None, true),
+            ("iostat", Some("ASB_MEASURE_IOSTAT"), None, true),
             ("perf", Some("ASB_MEASURE_PERF"), Some("perf"), true),
             (
                 "perfetto",
@@ -1051,7 +1051,7 @@ mod tests {
         assert!(adapter.graph_section("metric").is_none());
     }
     #[test]
-    fn registry_has_unique_names_and_declares_tool_backed_collectors() {
+    fn registry_has_unique_names_and_declares_external_tool_collectors() {
         let ids = names().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids.len(), all().len());
         for collector in all() {
@@ -1059,14 +1059,7 @@ mod tests {
             assert!(!collector.description().contains('\n'));
         }
         assert!(crate::measurements::collector_description("unknown").is_none());
-        for id in [
-            "mpstat",
-            "iostat",
-            "perf",
-            "perfetto",
-            "flamegraph",
-            "bpftrace",
-        ] {
+        for id in ["perf", "perfetto", "flamegraph", "bpftrace"] {
             assert!(
                 find(id).and_then(|collector| collector.tool_id()).is_some(),
                 "{id}"

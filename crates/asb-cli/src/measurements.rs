@@ -15,6 +15,7 @@ mod producer;
 mod snapshot;
 pub(crate) use producer::command as producer_command;
 pub(crate) use producer::{Completion as ProducerCompletion, Policy as ProducerPolicy, Producer};
+#[cfg(test)]
 use snapshot::ProcessTreeSnapshot;
 pub(crate) use snapshot::{SnapshotCommand, bounded_command, bounded_version};
 #[cfg(test)]
@@ -30,10 +31,9 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, atomic::AtomicBool};
 #[cfg(test)]
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -152,6 +152,7 @@ impl ProcessIdentity {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) type TreeSnapshotArguments = Box<dyn Fn(&[u32]) -> SnapshotCommand + Send>;
 
 #[derive(Debug, Serialize)]
@@ -470,6 +471,7 @@ pub struct Session {
     component_timings: BTreeMap<String, ComponentTiming>,
     process_identity: Option<ProcessIdentity>,
     measurement_guardian: Option<ProcessIdentity>,
+    #[cfg(test)]
     snapshot_execution_started: Arc<AtomicBool>,
     execution_window: Rc<RefCell<execution_window::Window>>,
     incomplete_collectors: BTreeMap<String, String>,
@@ -735,6 +737,7 @@ impl Session {
             component_timings: BTreeMap::new(),
             process_identity: None,
             measurement_guardian: None,
+            #[cfg(test)]
             snapshot_execution_started: Arc::new(AtomicBool::new(false)),
             execution_window: Rc::new(RefCell::new(execution_window::Window::default())),
             incomplete_collectors: BTreeMap::new(),
@@ -778,6 +781,7 @@ impl Session {
         self.record_component_event(event);
         match event {
             collectors::LifecycleEvent::AgentExecuteBegin => {
+                #[cfg(test)]
                 self.snapshot_execution_started
                     .store(true, Ordering::Release);
                 self.execution_window.borrow_mut().begin_execution_phase()
@@ -964,6 +968,10 @@ impl Session {
     pub(crate) fn sampled_cpu_accounting(&self) -> Option<(f64, f64)> {
         let timing = self.component_timings.get("agent.execute")?;
         Some((timing.cpu_user_ms?, timing.cpu_system_ms?))
+    }
+
+    pub(crate) fn clock_ticks_per_second(&self) -> Option<u64> {
+        self.clock_ticks_per_second
     }
 
     /// No observed CPU at sampling resolution is not proof that a short
@@ -1520,6 +1528,7 @@ impl Session {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn start_tree_snapshot(
         &mut self,
         name: &str,
@@ -1531,34 +1540,29 @@ impl Session {
         if !enabled {
             return Ok(());
         }
-        let stdout_path = self.dir.join(format!("{name}.stdout"));
-        let stderr_path = self.dir.join(format!("{name}.stderr"));
         let captures = [
-            crate::evidence::Capture::create(&stdout_path)?,
-            crate::evidence::Capture::create(&stderr_path)?,
+            crate::evidence::Capture::create(&self.dir.join(format!("{name}.stdout")))?,
+            crate::evidence::Capture::create(&self.dir.join(format!("{name}.stderr")))?,
         ];
-        {
-            let executable = executable.to_path_buf();
-            let sampler = ProcessTreeSnapshot::start(
-                self.process_identity
-                    .or_else(|| ProcessIdentity::read(pid))
-                    .ok_or("process-tree sampler target has exited")?,
-                executable,
-                arguments,
-                Arc::clone(&self.snapshot_execution_started),
-                captures[0].writer()?,
-                captures[1].writer()?,
-            )
-            .ok_or_else(|| format!("cannot start {name} process-tree sampler"))?;
-            self.collectors.push(Collector {
-                name: name.into(),
-                adapter: collectors::find(name).expect("registered collector"),
-                producer: Producer::snapshot(sampler),
-                started: Instant::now(),
-                captures,
-            });
-            Ok(())
-        }
+        let sampler = ProcessTreeSnapshot::start(
+            self.process_identity
+                .or_else(|| ProcessIdentity::read(pid))
+                .ok_or("process-tree sampler target has exited")?,
+            executable.to_path_buf(),
+            arguments,
+            Arc::clone(&self.snapshot_execution_started),
+            captures[0].writer()?,
+            captures[1].writer()?,
+        )
+        .ok_or_else(|| format!("cannot start {name} process-tree sampler"))?;
+        self.collectors.push(Collector {
+            name: name.into(),
+            adapter: collectors::find(name).expect("registered collector"),
+            producer: Producer::snapshot(sampler),
+            started: Instant::now(),
+            captures,
+        });
+        Ok(())
     }
 
     #[cfg(test)]

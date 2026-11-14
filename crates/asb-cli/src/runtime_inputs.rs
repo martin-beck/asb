@@ -392,17 +392,17 @@ mod tests {
     }
 
     #[test]
-    fn disabled_collector_availability_is_rechecked_during_sealing() {
+    fn disabled_external_collector_availability_is_rechecked_during_sealing() {
         use std::os::unix::fs::PermissionsExt;
         let root = Directory::new();
         let tools = root.0.join("tools");
-        let executable = tools.join("mpstat/bin/pidstat");
+        let executable = tools.join("perf/bin/perf");
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, "fixture").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
         let inputs = PlannedInputs {
             dependencies: Vec::new(),
-            disabled: vec![(tools, vec!["mpstat".into()], "mpstat")],
+            disabled: vec![(tools, vec!["perf".into()], "perf")],
         };
         inputs.verify_disabled().unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();

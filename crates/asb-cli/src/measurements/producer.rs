@@ -1,4 +1,5 @@
 //! Collector-independent ownership and capture facts, never metric/tool policy.
+#[cfg(test)]
 use super::snapshot::ProcessTreeSnapshot;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -85,9 +86,11 @@ pub(crate) struct Producer {
 enum Active {
     #[cfg(target_os = "linux")]
     Process(Process),
+    #[cfg(test)]
     Snapshot(ProcessTreeSnapshot),
 }
 impl Producer {
+    #[cfg(test)]
     pub(super) fn snapshot(snapshot: ProcessTreeSnapshot) -> Self {
         Self {
             active: Some(Active::Snapshot(snapshot)),
@@ -184,6 +187,7 @@ impl Producer {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]
             Some(Active::Process(process)) => process.stop.store(true, Ordering::Release),
+            #[cfg(test)]
             Some(Active::Snapshot(snapshot)) => snapshot.request_stop(),
             None => {}
         }
@@ -194,6 +198,7 @@ impl Producer {
             Some(Active::Process(process)) => {
                 process.policy.graceful.unwrap_or_default() + Duration::from_secs(8)
             }
+            #[cfg(test)]
             Some(Active::Snapshot(_)) => ProcessTreeSnapshot::stop_budget(),
             None => Duration::from_secs(6),
         }
@@ -212,6 +217,7 @@ impl Producer {
         let completion = match self.active.take() {
             #[cfg(target_os = "linux")]
             Some(Active::Process(mut process)) => process.settle_before(deadline, owner),
+            #[cfg(test)]
             Some(Active::Snapshot(snapshot)) => {
                 match snapshot.stop_before_with_owner(deadline, owner) {
                     Ok(()) => Completion {
