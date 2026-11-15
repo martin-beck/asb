@@ -268,6 +268,7 @@ def principal_observation(metadata):
 # container teardown evidence, but descendants receive no stale capability.
 GATE = 'printf "__ASB_GATE__:%s\\n" "$$"; while [ ! -f "$ASB_GATE_RELEASE" ]; do sleep 0.05; done; unset ASB_GATE_RELEASE; exec "$@"'
 MAX_ARGUMENT_BYTES = 1024 * 1024
+_GATE_TRANSPORT_START_ATTEMPTS = 5
 
 
 def release_gate(api, container, release_path):
@@ -691,7 +692,37 @@ class ManagedDockerWorkspace:
                             or (cancelled is not None and cancelled.is_set()))
 
             with _gate_resume_section(gate_setup_aborted):
-                stream = (transport_factory or DockerExecTransport)(api,container,command,gate_environment,self.workdir)
+                factory = transport_factory or DockerExecTransport
+                # Docker may reject or drop a newly-created exec stream while
+                # a dense cohort is bringing up its private controllers.  A
+                # failed construction has no trustworthy target identity, so
+                # reset only this owned PID namespace before retrying.  That
+                # makes a possible partially-created exec unable to survive
+                # into the retry, without touching another attempt.  Custom
+                # launchers own their own lifecycle and are deliberately not
+                # retried by this generic Docker path.
+                transport_error = None
+                for transport_attempt in range(_GATE_TRANSPORT_START_ATTEMPTS):
+                    try:
+                        stream = factory(api,container,command,gate_environment,self.workdir)
+                        transport_error = None
+                        break
+                    except Exception as error:
+                        transport_error = error
+                    if transport_factory is not None:
+                        raise transport_error
+                    if gate_setup_aborted():
+                        raise ExecutionError("container execution preparation was cancelled or exceeded its deadline") from None
+                    try:
+                        container.kill()
+                        container.wait(timeout=125)
+                        container.start()
+                    except Exception as error:
+                        raise ExecutionError("container execution gate transport recovery could not reset its owned container") from error
+                    if transport_attempt + 1 < _GATE_TRANSPORT_START_ATTEMPTS:
+                        time.sleep(min(2.0, 0.05 * (2 ** transport_attempt)))
+                if transport_error is not None:
+                    raise ExecutionError("container execution gate transport could not start after bounded retry") from transport_error
                 preparation_phase = "gate-readiness"
                 ready = bytearray()
                 # Docker's multiplexed stream may deliver stderr before the gate's

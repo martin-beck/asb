@@ -115,6 +115,8 @@ class GuestBootstrapTests(unittest.TestCase):
             "workspace is not running": "workspace-not-running",
             "one command is already running in this task workspace": "workspace-busy",
             "container execution gate stderr exceeded its output limit before readiness": "gate-stderr-limit",
+            "container execution gate transport could not start after bounded retry": "gate-transport-start",
+            "container execution gate transport recovery could not reset its owned container": "gate-transport-recovery",
             "execution transport returned no valid child exit status": "gate-transport-status",
             "Docker did not identify the running execution target": "target-unavailable",
             "execution transport returned a contradictory target identity": "target-identity",

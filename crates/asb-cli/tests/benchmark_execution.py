@@ -637,6 +637,51 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(len(sections), 2)
 
+    def test_default_gate_transport_recovers_from_transient_startup_refusals(self):
+        workspace, container, api, _ = self.workspace()
+        original = api.exec_create
+        starts = 0
+
+        def exec_create(*args, **kwargs):
+            nonlocal starts
+            if kwargs["cmd"][:2] != ["/opt/asb-runtime/asb", "__asb-resume"]:
+                starts += 1
+                if starts < 3:
+                    raise RuntimeError("transient daemon refusal")
+            return original(*args, **kwargs)
+
+        api.exec_create = exec_create
+        with patch.object(RUNTIME.time, "sleep"):
+            with workspace:
+                result = workspace.execute(["agent"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(starts, 3)
+        self.assertEqual(container.events.count("kill"), 2)
+        self.assertEqual(container.events.count("wait"), 2)
+        self.assertEqual(container.events.count("start"), 3)
+
+    def test_default_gate_transport_reports_bounded_startup_recovery(self):
+        workspace, container, api, _ = self.workspace()
+        attempts = 0
+
+        def exec_create(*_args, **kwargs):
+            nonlocal attempts
+            if kwargs["cmd"][:2] != ["/opt/asb-runtime/asb", "__asb-resume"]:
+                attempts += 1
+                raise RuntimeError("daemon unavailable")
+            raise AssertionError("resume must not run")
+
+        api.exec_create = exec_create
+        with patch.object(RUNTIME.time, "sleep"):
+            with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "could not start after bounded retry"):
+                workspace.execute(["agent"])
+        self.assertEqual(attempts, RUNTIME._GATE_TRANSPORT_START_ATTEMPTS)
+        self.assertEqual(container.events.count("kill"), RUNTIME._GATE_TRANSPORT_START_ATTEMPTS + 1)
+        # The final failed attempt is also quiesced by the execution-wide
+        # teardown, which observes one additional owned-container wait.
+        self.assertEqual(container.events.count("wait"), RUNTIME._GATE_TRANSPORT_START_ATTEMPTS + 1)
+        self.assertEqual(container.events.count("start"), RUNTIME._GATE_TRANSPORT_START_ATTEMPTS + 2)
+
     def test_gate_resume_retries_one_transient_daemon_refusal(self):
         workspace, container, api, _ = self.workspace()
         original = api.put_archive

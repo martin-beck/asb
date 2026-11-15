@@ -62,6 +62,8 @@ def preparation_failure_code(error):
         ("workspace is not running", "workspace-not-running"),
         ("one command is already running in this task workspace", "workspace-busy"),
         ("container execution gate stderr exceeded", "gate-stderr-limit"),
+        ("container execution gate transport could not start", "gate-transport-start"),
+        ("container execution gate transport recovery could not reset", "gate-transport-recovery"),
         ("execution transport returned no valid child exit status", "gate-transport-status"),
         ("Docker did not identify the running execution target", "target-unavailable"),
         ("execution transport returned a contradictory target identity", "target-identity"),
