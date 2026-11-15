@@ -8,6 +8,7 @@ import struct
 import sys
 import tarfile
 import tempfile
+import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
 import unittest
@@ -809,6 +810,9 @@ class GuestBootstrapTests(unittest.TestCase):
                         self.process_start = process_start
                         self.process = process_start(["relay-fixture"])
                         self.ready_outside_serialized_start = not active[0]
+                        self.stop = threading.Event()
+                        if not resources:
+                            self.stop.set()
                         resources.append(self)
                     def close(self):
                         self.closed = True
@@ -816,7 +820,7 @@ class GuestBootstrapTests(unittest.TestCase):
                         if self.closed:
                             raise ExecutionError("relay closed")
                 def execute(argv, **options):
-                    self.assertFalse(resources[0].closed)
+                    self.assertFalse(resources[-1].closed)
                     self.assertEqual(options["environment"]["HTTP_PROXY"], "http://localhost:10002")
                     calls.append((argv, options))
                     return {"stdout":b"", "stderr":b"", "exit_code":1 if failure else 0,
@@ -851,12 +855,13 @@ class GuestBootstrapTests(unittest.TestCase):
                             execute_agent(task,request,None,None,None)
                     else:
                         execute_agent(task,request,None,None,None)
-                self.assertTrue(resources[0].closed)
-                self.assertEqual(len(sections), 1)
-                self.assertTrue(resources[0].ready_outside_serialized_start)
-                self.assertEqual(resources[0].targets, [("localhost",8000),("localhost",3128)])
-                self.assertIsNone(resources[0].cancellation)
-                self.assertEqual(resources[0].diagnostic_path, root / "endpoint-relay-0.json")
+                self.assertTrue(all(relay.closed for relay in resources))
+                self.assertEqual(len(resources), 1 if failure else 2)
+                self.assertEqual(len(sections), 1 if failure else 2)
+                self.assertTrue(resources[-1].ready_outside_serialized_start)
+                self.assertEqual(resources[-1].targets, [("localhost",8000),("localhost",3128)])
+                self.assertIsNone(resources[-1].cancellation)
+                self.assertEqual(resources[-1].diagnostic_path, root / "endpoint-relay-0.json")
                 project = next(data for destination,name,data in container.files
                                if destination == "/opt/asb-project/.asb" and name == "project.toml")
                 self.assertIn(b"http://localhost:10002",project)

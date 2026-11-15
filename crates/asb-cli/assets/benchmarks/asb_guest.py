@@ -615,7 +615,8 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
         resources.callback(relay.close)
         relays.append(relay)
         return relay
-    request = forward_request(dict(request, project_configuration=configuration), start_relay)
+    relay_request = dict(request, project_configuration=configuration)
+    request = forward_request(relay_request, start_relay)
     configuration = request["project_configuration"]
     guest = request["request"]
     guest = dict(guest,task_identity=task_identity,owned_instrumentation=ownership)
@@ -664,6 +665,26 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
                 path.write_bytes(detail.output)
                 path.chmod(0o600)
             raise ExecutionError("selected agent runtime installation failed; inspect private install artifacts")
+    # A replay endpoint relay is idle while guest bootstrap runs. Under a
+    # dense Docker cohort, its long-lived exec stream can disappear after
+    # successful setup but before the paused client gate is created. Refresh
+    # only those stale private relays now, before their endpoint is handed to
+    # the agent; a fresh request rewrites every affected local URL together.
+    if any(getattr(relay, "stop", None) is not None and relay.stop.is_set() for relay in relays):
+        if cancelled is not None and cancelled.is_set():
+            raise ExecutionError("private endpoint relay stopped before agent launch")
+        for relay in tuple(relays):
+            relay.close()
+        relays.clear()
+        request = forward_request(relay_request, start_relay)
+        configuration = request["project_configuration"]
+        guest = dict(request["request"],task_identity=task_identity,owned_instrumentation=ownership)
+        environment = dict(request.get("environment", {}))
+        if auxiliary:
+            environment['ASB_AUXILIARY_TOOLS'] = json.dumps(auxiliary,sort_keys=True,separators=(',',':'))
+        upload(container, "/opt/asb-project/.asb", [("project.toml", configuration.encode(), 0o600)],temporary_dir=task.artifacts,owner=owner)
+    for relay in relays:
+        relay.check()
     snapshot_requested = os.environ.get('ASB_EXPERIMENTAL_SNAPSHOT') == '1'
     if snapshot_requested and not getattr(task, 'snapshot', False):
         raise ExecutionError('snapshot workspace was requested but the workload did not provision snapshot storage and a guest mount')
