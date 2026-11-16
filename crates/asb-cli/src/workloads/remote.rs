@@ -37,20 +37,39 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
-/// Keep checks for one short-lived Docker target ordered without making a
-/// dense cohort verify every independently owned container serially.
-const STOPPED_TARGET_VERIFICATION_SHARDS: usize = 16;
-static STOPPED_TARGET_VERIFICATION: std::sync::OnceLock<Vec<std::sync::Mutex<()>>> =
-    std::sync::OnceLock::new();
+/// Keep checks for one short-lived Docker target ordered without forcing
+/// independently owned targets through a bounded shard queue. Weak entries
+/// are discarded as soon as no verification still owns their lock.
+static STOPPED_TARGET_VERIFICATION: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Weak<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
 
-fn stopped_target_verification_shard(event: &Value) -> usize {
-    let container_id = event["target"]["container_id"].as_str().unwrap_or_default();
-    let hash = container_id
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    (hash as usize) % STOPPED_TARGET_VERIFICATION_SHARDS
+fn stopped_target_verification_lock(
+    event: &Value,
+) -> Result<std::sync::Arc<std::sync::Mutex<()>>, String> {
+    let container_id = event["target"]["container_id"]
+        .as_str()
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        // Production validates target identity before this helper. Keep older
+        // unit-level protocol probes serialized without granting them a
+        // per-container concurrency identity.
+        .unwrap_or("<unidentified-target>");
+    let mut locks = STOPPED_TARGET_VERIFICATION
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+        .lock()
+        .map_err(|_| "stopped target verification synchronization failed".to_string())?;
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    Ok(match locks.entry(container_id.to_owned()) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry
+            .get()
+            .upgrade()
+            .expect("active verification lock must be upgradeable"),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+            entry.insert(std::sync::Arc::downgrade(&lock));
+            lock
+        }
+    })
 }
 
 /// Keep a paused target's verified identity adjacent to collector attachment.
@@ -101,12 +120,8 @@ fn verify_stopped_target_until(
     mut verify: impl FnMut(&Value) -> Result<super::target::LocalTarget, String>,
 ) -> Result<super::target::LocalTarget, String> {
     let retry_deadline = deadline.min(Instant::now() + TARGET_VERIFICATION_RETRY);
-    let verification = STOPPED_TARGET_VERIFICATION.get_or_init(|| {
-        (0..STOPPED_TARGET_VERIFICATION_SHARDS)
-            .map(|_| std::sync::Mutex::new(()))
-            .collect()
-    });
-    let _verification = verification[stopped_target_verification_shard(event)]
+    let verification = stopped_target_verification_lock(event)?;
+    let _verification = verification
         .lock()
         .map_err(|_| "stopped target verification synchronization failed")?;
     loop {
@@ -2194,7 +2209,7 @@ mod tests {
 
     #[test]
     fn stopped_target_verification_retries_only_transient_local_observations() {
-        let target = serde_json::json!({"fixture": true});
+        let target = serde_json::json!({"target": {"container_id": "f".repeat(64)}});
         let attempts = std::cell::Cell::new(0);
         let result = super::verify_stopped_target_until(
             &target,
@@ -2237,15 +2252,11 @@ mod tests {
     #[test]
     fn stopped_target_verification_allows_distinct_owned_containers_to_progress_together() {
         let first = serde_json::json!({"target": {"container_id": "a".repeat(64)}});
-        let first_shard = super::stopped_target_verification_shard(&first);
-        let second = (0_u16..=u16::MAX)
-            .map(|suffix| {
-                serde_json::json!({
-                    "target": {"container_id": format!("{}{:04x}", "b".repeat(60), suffix)}
-                })
-            })
-            .find(|candidate| super::stopped_target_verification_shard(candidate) != first_shard)
-            .expect("at least one distinct container identity uses another shard");
+        let second = serde_json::json!({"target": {"container_id": "b".repeat(64)}});
+        let first_lock = super::stopped_target_verification_lock(&first).unwrap();
+        let second_lock = super::stopped_target_verification_lock(&second).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first_lock, &second_lock));
+        drop((first_lock, second_lock));
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let verify = |event: serde_json::Value, barrier: std::sync::Arc<std::sync::Barrier>| {
