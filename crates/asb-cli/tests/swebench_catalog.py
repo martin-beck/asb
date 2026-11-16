@@ -282,7 +282,7 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(result["outcome"], "evaluation_error")
                 self.assertEqual(result["reason"], reason)
 
-    def test_incomplete_official_test_application_never_becomes_a_binary_failure(self):
+    def test_official_test_application_receipt_is_validated_or_derived(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = self.evaluate(temporary, self.executor(False, test_patch_applied=False))
             self.assertFalse(result["resolved"])
@@ -302,8 +302,15 @@ class EvaluationTests(unittest.TestCase):
             return result
         with tempfile.TemporaryDirectory() as temporary:
             result = self.evaluate(temporary, missing_receipt)
-            self.assertEqual(result["outcome"], "evaluation_error")
-            self.assertEqual(result["reason"], "official_test_application_missing")
+            self.assertEqual(result["outcome"], "unresolved")
+            self.assertEqual(result["reason"], "official_tests_not_resolved")
+            receipt = json.loads((Path(temporary) / "evaluation" / CATALOG.TEST_APPLICATION_RECEIPT).read_text())
+            self.assertEqual(receipt, {
+                "schema_version": 1,
+                "harness_revision": CATALOG.HARNESS_REVISION,
+                "task_id": "owner__repo-1",
+                "official_test_patch_applied": True,
+            })
 
     def test_empty_submission_does_not_launch_the_harness_and_timeouts_are_explicit(self):
         def unexpected(*args):
