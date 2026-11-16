@@ -621,7 +621,7 @@ pub(super) fn reserve_recording_artifact(path: &std::path::Path) -> Result<(), S
     Ok(())
 }
 
-use crate::measurements::{Collector, env_true, measurement_interval_ms, write_unavailable};
+use crate::measurements::{Collector, measurement_interval_ms};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read};
 
@@ -712,18 +712,10 @@ impl measurements::Session {
             .arg(&data);
         #[cfg(target_os = "linux")]
         command.args(["-D", "-1", "--control", &record_ready.argument()]);
-        let mut collector = match Collector::spawn("perf", &ADAPTER, command, route, captures) {
-            Ok(collector) => collector,
-            Err(error) if !env_true("ASB_MEASURE_PERF") => {
-                write_unavailable(&self.dir.join("perf.json"), "perf", error.to_string())?;
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(format!(
-                    "cannot start perf (disable with ASB_MEASURE_PERF=0): {error}"
-                ));
-            }
-        };
+        let mut collector =
+            Collector::spawn("perf", &ADAPTER, command, route, captures).map_err(|error| {
+                measurements::configured_collector_start_error("perf", "perf", &error.to_string())
+            })?;
         #[cfg(target_os = "linux")]
         let record_failure = record_ready
             .enable(record_activation_timeout, || collector.startup_exit())
@@ -731,12 +723,11 @@ impl measurements::Session {
         #[cfg(not(target_os = "linux"))]
         let record_failure = startup_failure(&mut collector)?;
         if let Some(reason) = record_failure {
-            write_unavailable(
-                &self.dir.join("perf.json"),
+            return Err(measurements::configured_collector_start_error(
                 "perf",
-                collector.startup_failure(reason, self._directory_owner.clone()),
-            )?;
-            return Ok(());
+                "perf",
+                &collector.startup_failure(reason, self._directory_owner.clone()),
+            ));
         }
         self.set_artifact(SharedArtifact::StackSamples, data);
         self.collectors.push(collector);
@@ -793,28 +784,28 @@ impl measurements::Session {
                 #[cfg(not(target_os = "linux"))]
                 let stat_failure = startup_failure(&mut collector)?;
                 if let Some(reason) = stat_failure {
-                    write_unavailable(
-                        &self.dir.join("perf-stat.json"),
-                        "perf-stat",
-                        collector.startup_failure(reason, self._directory_owner.clone()),
-                    )?;
+                    return Err(measurements::configured_collector_start_error(
+                        "perf",
+                        "perf",
+                        &collector.startup_failure(reason, self._directory_owner.clone()),
+                    ));
                 } else {
                     self.collectors.push(collector);
                 }
             }
-            Err(error) => write_unavailable(
-                &self.dir.join("perf-stat.json"),
-                "perf-stat",
-                error.to_string(),
-            )?,
+            Err(error) => {
+                return Err(measurements::configured_collector_start_error(
+                    "perf",
+                    "perf",
+                    &error.to_string(),
+                ));
+            }
         }
         #[cfg(target_os = "linux")]
         if let Err(error) = self.start_perf_symbols(pid) {
-            write_unavailable(
-                &self.dir.join("perf-symbol-custody.json"),
-                "perf-symbol-custody",
-                error,
-            )?;
+            return Err(measurements::configured_collector_start_error(
+                "perf", "perf", &error,
+            ));
         }
         Ok(())
     }

@@ -1690,6 +1690,16 @@ pub(crate) fn write_unavailable(path: &Path, collector: &str, error: String) -> 
     )
 }
 
+/// Explain a startup failure for a collector that the benchmark explicitly
+/// requested.  Such a failure must stop the attempt before agent execution;
+/// silently publishing an unavailable result would make the requested
+/// measurement set ambiguous.
+pub(crate) fn configured_collector_start_error(collector: &str, tool: &str, error: &str) -> String {
+    format!(
+        "configured collector `{collector}` could not start: {error}\nWhat to do: inspect `{collector}.stderr` in the benchmark measurements directory; run `asb tool install {tool}` if the executable is missing; then run `asb init` to review the required host settings. Remove `{collector}` from `[measurements].collectors` only when you intentionally do not want that measurement."
+    )
+}
+
 pub(crate) fn escape_svg(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -2796,5 +2806,14 @@ mod tests {
         fs::write(&executable, "fixture").unwrap();
         assert_eq!(resolve_executable(Some(&root), "agentsysperf"), executable);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configured_collector_start_errors_are_actionable() {
+        let error = configured_collector_start_error("perf", "perf", "permission denied");
+        assert!(error.contains("configured collector `perf` could not start"));
+        assert!(error.contains("perf.stderr"));
+        assert!(error.contains("asb tool install perf"));
+        assert!(error.contains("asb init"));
     }
 }

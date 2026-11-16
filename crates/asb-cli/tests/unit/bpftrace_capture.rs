@@ -271,17 +271,14 @@ fn isolated_bpftrace_preflight_and_attachment_failures() {
             );
         }
         "builtin-hard-missing" => {
-            assert!(
-                result
-                    .unwrap_err()
-                    .contains("cannot start bpftrace profile")
-            );
+            let error = result.unwrap_err();
+            assert!(error.contains("configured collector `bpftrace` could not start"));
+            assert!(error.contains("asb tool install bpftrace"));
         }
         "builtin-unavailable" => {
-            result.unwrap();
-            let output =
-                fs::read_to_string(session.dir.join("bpftrace-syscall-rate.json")).unwrap();
-            assert!(output.contains("unavailable"));
+            let error = result.unwrap_err();
+            assert!(error.contains("configured collector `bpftrace` could not start"));
+            assert!(error.contains("asb tool install bpftrace"));
         }
         "builtin" => {
             result.unwrap();

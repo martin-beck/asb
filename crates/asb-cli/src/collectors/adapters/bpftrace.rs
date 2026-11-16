@@ -264,7 +264,7 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
     Ok(())
 }
 
-use crate::measurements::{Collector, env_true, escape_svg, parse_float, write_unavailable};
+use crate::measurements::{Collector, escape_svg, parse_float};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -420,15 +420,11 @@ impl measurements::Session {
                     }
                     self.collectors.push(collector);
                 }
-                Err(error) if !env_true("ASB_MEASURE_BPFTRACE") => write_unavailable(
-                    &self.dir.join(format!("bpftrace-{}.json", profile.name)),
-                    &format!("bpftrace-{}", profile.name),
-                    format!("{}; profile: {}", error, profile.description),
-                )?,
                 Err(error) => {
-                    return Err(format!(
-                        "cannot start bpftrace profile {}: {error}",
-                        profile.name
+                    return Err(measurements::configured_collector_start_error(
+                        "bpftrace",
+                        "bpftrace",
+                        &format!("profile {}: {error}", profile.name),
                     ));
                 }
             }
