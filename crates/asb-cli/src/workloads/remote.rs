@@ -138,6 +138,28 @@ fn verify_stopped_target_until(
     }
 }
 
+/// `/proc` can briefly omit a just-published stopped Docker exec under dense
+/// host pressure. Retry only before `Session::attach_isolated_pid` has bound
+/// any collector state; later attachment failures are not safe to repeat.
+fn attach_stopped_target_until(
+    deadline: Instant,
+    mut attach: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let retry_deadline = deadline.min(Instant::now() + TARGET_VERIFICATION_RETRY);
+    loop {
+        match attach() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error == "isolated process identity changed before collector attachment"
+                    && Instant::now() < retry_deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn preparation_seconds(workload: &str, configured: Option<u64>) -> u64 {
     configured
         .or_else(|| super::preparation_default_seconds(workload))
@@ -1628,9 +1650,9 @@ impl Session {
                         &session.dir.join("execution-target.json"),
                         &target_evidence,
                     )?;
-                    if let Err(error) =
+                    if let Err(error) = attach_stopped_target_until(deadline, || {
                         session.attach_isolated_pid(target.pid, target.start_time_ticks)
-                    {
+                    }) {
                         session.event(Event::AgentAttachFailed)?;
                         return Err(error);
                     }
@@ -2247,6 +2269,31 @@ mod tests {
             "isolated measurement target has invalid identity fields"
         );
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn stopped_target_attachment_retries_only_before_collector_state_can_change() {
+        let attempts = std::cell::Cell::new(0);
+        super::attach_stopped_target_until(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            || {
+                attempts.set(attempts.get() + 1);
+                (attempts.get() == 1)
+                    .then_some(
+                        "isolated process identity changed before collector attachment".into(),
+                    )
+                    .map_or(Ok(()), Err)
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+
+        let error = super::attach_stopped_target_until(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            || Err("isolated process exited during collector attachment".into()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "isolated process exited during collector attachment");
     }
 
     #[test]
