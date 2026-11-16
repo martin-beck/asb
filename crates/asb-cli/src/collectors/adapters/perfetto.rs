@@ -1,6 +1,6 @@
 use super::super::{
     ArtifactDisplay, CollectorAdapter, LifecycleEvent, PreflightContext, ProcessContext,
-    ProcessData, ReportArtifactLink, ReportGraph, ReportPrimaryLink, ReportRow,
+    ProcessData, ReportArtifactLink, ReportCommand, ReportGraph, ReportPrimaryLink, ReportRow,
 };
 use crate::measurements;
 mod bootstrap;
@@ -14,6 +14,12 @@ pub(super) struct PerfettoCollector;
 pub(super) static ADAPTER: PerfettoCollector = PerfettoCollector;
 
 impl CollectorAdapter for PerfettoCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "perfetto --txt -c <ASB-generated process-tree config> -o <trace.perfetto-trace>",
+            scope: "ASB delegated trace instance and verified execution lifecycle",
+        }
+    }
     fn private_service_aliases(&self) -> &'static [&'static str] {
         &["__asb-perfetto-probes"]
     }

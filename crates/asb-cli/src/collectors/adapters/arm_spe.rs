@@ -5,7 +5,9 @@ mod samples;
 #[cfg(test)]
 mod tests;
 
-use crate::collectors::{CollectorAdapter, ProcessContext, ProcessData, TargetScope};
+use crate::collectors::{
+    CollectorAdapter, ProcessContext, ProcessData, ReportCommand, TargetScope,
+};
 use crate::measurements::{self, Session};
 use serde::Serialize;
 use std::time::Duration;
@@ -96,6 +98,12 @@ fn args(pmu: &str, pid: u32, options: &Options) -> Vec<String> {
 }
 
 impl CollectorAdapter for ArmSpe {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "perf record -e <spe-pmu>/ts_enable=1,load_filter=1,store_filter=1/ -c <period> --inherit -p <agent-root-pid>",
+            scope: "verified agent process tree",
+        }
+    }
     fn series_timestamp_unit(&self) -> crate::collectors::TimeUnit {
         crate::collectors::TimeUnit::Seconds
     }

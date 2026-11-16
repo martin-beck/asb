@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::super::CollectorAdapter;
+use super::super::{CollectorAdapter, ReportCommand};
 use crate::measurements::{self, Session};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,12 @@ pub(super) struct SystemCollector;
 pub(super) static ADAPTER: SystemCollector = SystemCollector;
 
 impl CollectorAdapter for SystemCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read bounded host metadata from /proc and /sys",
+            scope: "host context captured at measurement start",
+        }
+    }
     fn estimated_disk_mib(&self) -> u64 {
         64
     }

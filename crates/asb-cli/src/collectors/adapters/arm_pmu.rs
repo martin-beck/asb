@@ -1,5 +1,5 @@
 //! Arm counters use the existing process-tree perf producer and its custody.
-use crate::collectors::{CollectorAdapter, TargetScope};
+use crate::collectors::{CollectorAdapter, ReportCommand, TargetScope};
 use crate::measurements::{self, Session};
 use serde::Serialize;
 use std::io::Read;
@@ -15,6 +15,12 @@ struct Plan {
 }
 
 impl CollectorAdapter for ArmPmu {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "perf stat --no-scale -I <interval-ms> -e <validated Arm PMU groups> --inherit -p <agent-root-pid>",
+            scope: "verified agent process tree",
+        }
+    }
     fn id(&self) -> &'static str {
         "arm-pmu"
     }

@@ -109,6 +109,10 @@ fn scoped_pressure_produces_offline_analysis_and_timestamped_report_graphs() {
     );
     let html = fs::read_to_string(root.join("report.html")).unwrap();
     assert!(html.contains("pressure.cpu_some_pct"));
+    assert!(html.contains("data-chart-title=\"analysis.pressure.cpu_some_pct\""));
+    assert!(html.contains("data-collector=\"Kernel pressure\""));
+    assert!(html.contains("Measurement collection commands"));
+    assert!(html.contains("read &lt;verified-cgroup&gt;/{cpu,memory,io}.pressure"));
     assert!(html.contains("not DRAM latency"));
     let svg =
         fs::read_to_string(root.join("series-kernel-pressure.memory.current_bytes.svg")).unwrap();
@@ -1569,6 +1573,56 @@ fn generated_svg_and_embedded_html_script_execute_observed_hover_zoom_pan_and_mo
 }
 
 #[test]
+fn report_layout_script_folds_tables_and_groups_collectors() {
+    let node = crate::tools::host_executable(Path::new("node"))
+        .expect("Node is required by offline report tests");
+    let output = std::process::Command::new(node)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/report_layout_fixture.js"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compare/report_interactions.js"))
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("report folding and collector grouping checks passed")
+    );
+}
+
+#[test]
+fn report_command_table_includes_cpu_accounting_from_its_collector_document() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    fixture.write(
+        "sweep-results/000-0/measurements/cpu-accounting.json",
+        json!({"metrics":{"cpu.user_usec": 12}}).to_string(),
+    );
+    let report = generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let html = fs::read_to_string(report).unwrap();
+    assert!(html.contains("<td>cpu-accounting</td>"));
+    assert!(html.contains("read &lt;exclusive-cgroup&gt;/{cpu.stat,memory.current,memory.peak}"));
+}
+
+#[test]
+fn report_command_table_includes_arm_platform_inventory_operation() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 1);
+    fixture.write(
+        "sweep-results/000-0/measurements/arm-platform.json",
+        json!({"schema_version": 1, "pmus": []}).to_string(),
+    );
+    let report = generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let html = fs::read_to_string(report).unwrap();
+    assert!(html.contains("<td>arm-platform</td>"));
+    assert!(html.contains("/sys/bus/event_source/devices and /sys/devices/system/cpu"));
+}
+
+#[test]
 fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
     let fixture = Fixture::new();
     let manifest = fixture.seed("", 2);
@@ -1681,6 +1735,9 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(concurrency_report.contains("bug-fix"));
     assert!(concurrency_report.contains("Hover values · wheel zoom · drag pan"));
     assert!(concurrency_report.contains("chart-expand"));
+    assert!(concurrency_report.contains("Measurement collection commands"));
+    assert!(concurrency_report.contains("foldReportTables"));
+    assert!(concurrency_report.contains("groupReportCharts"));
     let graphs = fs::read_dir(directory)
         .unwrap()
         .flatten()
@@ -1726,6 +1783,20 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(agent_report.contains("alpha"));
     assert!(agent_report.contains("beta"));
     assert!(agent_report.contains("Hover values · wheel zoom · drag pan"));
+    assert!(agent_report.contains("Measurement collection commands"));
+    assert!(agent_report.contains("foldReportTables"));
+    assert!(agent_report.contains("groupReportCharts"));
+    for file in [
+        "report.html",
+        "agent-summary-report.html",
+        "agent-distribution-report.html",
+        "agent-histogram-report.html",
+    ] {
+        let html = fs::read_to_string(directory.join(file)).unwrap();
+        assert!(html.contains("Measurement collection commands"), "{file}");
+        assert!(html.contains("collector-graph-group"), "{file}");
+        assert!(html.contains("foldReportTables"), "{file}");
+    }
     let agent_graphs = fs::read_dir(directory)
         .unwrap()
         .flatten()

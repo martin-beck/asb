@@ -35,7 +35,7 @@ const PLOT_RIGHT: f64 = 880.0;
 const Y_TICKS: usize = 5;
 
 #[derive(Debug)]
-struct BenchmarkData {
+pub(super) struct BenchmarkData {
     approximate_replay: bool,
     replay_selection: Option<crate::runner::ReplaySelection>,
     observation: crate::process_termination::Observation,
@@ -568,6 +568,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str(&coverage::html_table(&prepared.populations));
     html.push_str(&coverage::metric_html(&prepared.metric_groups));
     html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Each row is one selected task attempt for an agent/provider/model/workload combination. Runtime, success rate, token usage, host metadata, component timings, and structured collector measurements are summarized in the table and charts. Network wait remains null unless directly observed. The complete machine-readable evidence inventory is available in comparison.json.</p></section>");
+    html.push_str(&collector_commands_html(benchmarks));
     html.push_str("<section class=\"filters\"><div class=\"section-title\"><h2>Filter results</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\">");
     for (group, values) in dimensions {
         html.push_str(&format!("<fieldset><legend>{}</legend>", title_case(group)));
@@ -581,8 +582,8 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     if !aggregate {
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar to keep it visually marked while comparing results.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
         for graph in &graphs {
-            let label = graph.strip_suffix(".svg").unwrap_or(graph);
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(label), escape(graph)));
+            let label = graph_presentation(stage, graph)?.title;
+            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&label), escape(graph)));
         }
         html.push_str("</tbody></table></div></section>");
     }
@@ -971,7 +972,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         ));
     }
     format!(
-        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}</figure>",
+        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\" data-collector=\"Flamegraph\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}</figure>",
         escape(&benchmark.label),
         escape(&benchmark.agent),
         escape(&benchmark.workload),
@@ -983,10 +984,13 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
 fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String, Error> {
     let svg = fs::read_to_string(comparison_dir.join(graph))
         .map_err(|error| Error::Run(format!("cannot read generated chart {}: {error}", graph)))?;
+    let presentation = chart_presentation(&svg, graph);
     Ok(format!(
-        "<figure class=\"interactive-chart\" data-graph=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption></figure>",
+        "<figure class=\"interactive-chart\" data-graph=\"{}\" data-chart-title=\"{}\" data-collector=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption></figure>",
         escape(graph),
-        escape(graph.strip_suffix(".svg").unwrap_or(graph)),
+        escape(&presentation.title),
+        escape(presentation.collector),
+        escape(&presentation.title),
         escape(graph),
         escape(graph),
     ))
@@ -1015,11 +1019,160 @@ fn title_case(value: &str) -> String {
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChartPresentation {
+    title: String,
+    collector: &'static str,
+}
+
+fn chart_presentation(svg: &str, fallback: &str) -> ChartPresentation {
+    let title = svg
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| {
+            title
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+        })
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| fallback.strip_suffix(".svg").unwrap_or(fallback).to_owned());
+    let collector = if title.starts_with("analysis.pressure.")
+        || title.starts_with("kernel-pressure.")
+        || fallback.starts_with("metric-kernel-pressure-")
+        || fallback.starts_with("series-kernel-pressure-")
+    {
+        "Kernel pressure"
+    } else if title.starts_with("arm-spe.")
+        || title.starts_with("analysis.arm_spe.")
+        || fallback.starts_with("metric-arm-spe-")
+        || fallback.starts_with("series-arm-spe-")
+    {
+        "Arm SPE"
+    } else if title.starts_with("arm-pmu.") || fallback.starts_with("metric-arm-pmu-") {
+        "Arm PMU"
+    } else if title.starts_with("bpftrace.")
+        || fallback.starts_with("metric-bpftrace-")
+        || fallback.starts_with("series-bpftrace-")
+    {
+        "bpftrace"
+    } else if title.starts_with("perfetto.") || fallback.starts_with("perfetto-") {
+        "Perfetto"
+    } else if title.starts_with("perf.")
+        || fallback.starts_with("metric-perf-")
+        || fallback.starts_with("series-perf-")
+    {
+        "perf"
+    } else if title.starts_with("process.cpu.")
+        || fallback.starts_with("metric-mpstat-")
+        || fallback.starts_with("series-mpstat-")
+    {
+        "mpstat"
+    } else if title.starts_with("process.io.")
+        || fallback.starts_with("metric-iostat-")
+        || fallback.starts_with("series-iostat-")
+    {
+        "iostat"
+    } else if title.starts_with("agent.")
+        || fallback.starts_with("metric-agent-")
+        || fallback.starts_with("series-agent-")
+    {
+        "Agent process observation"
+    } else if title.starts_with("tool_calls.")
+        || title.starts_with("LLM tool-call")
+        || fallback.starts_with("tool-call-")
+    {
+        "Tool calls"
+    } else if title.starts_with("AgentSysPerf") || fallback.starts_with("agentsysperf-") {
+        "AgentSysPerf"
+    } else if title.starts_with("component.") {
+        "Component timings"
+    } else {
+        "ASB derived metrics"
+    };
+    ChartPresentation { title, collector }
+}
+
+fn graph_presentation(comparison_dir: &Path, graph: &str) -> Result<ChartPresentation, Error> {
+    let svg = fs::read_to_string(comparison_dir.join(graph))
+        .map_err(|error| Error::Run(format!("cannot read generated chart {graph}: {error}")))?;
+    Ok(chart_presentation(&svg, graph))
+}
+
+fn observed_collectors(rows: &[BenchmarkData]) -> BTreeSet<&'static str> {
+    let mut observed = BTreeSet::new();
+    for row in rows {
+        if row.host_metadata.is_some() {
+            observed.insert("system");
+        }
+        if row.components.is_some() {
+            observed.insert("cpu-accounting");
+        }
+        for name in row.collector_documents.keys() {
+            let id = match name.as_str() {
+                "agent-memory" => Some("agent-memory"),
+                "agent-workers" => Some("agent-workers"),
+                "cpu-accounting" => Some("cpu-accounting"),
+                "agentsysperf-analysis" => Some("agentsysperf:l1-resource"),
+                "arm-platform" => Some("arm-platform"),
+                "arm-pmu" | "arm-pmu-plan" => Some("arm-pmu"),
+                "arm-spe" | "arm-spe-plan" | "arm-spe-quality" => Some("arm-spe"),
+                name if name.starts_with("bpftrace") => Some("bpftrace"),
+                "kernel-pressure" | "kernel-pressure-summary" => Some("kernel-pressure"),
+                "mpstat" => Some("mpstat"),
+                "iostat" => Some("iostat"),
+                "perf-stat" | "perf-stat-quality" | "perf-record-scope" => Some("perf"),
+                name if name.starts_with("perfetto") => Some("perfetto"),
+                "tool-calls" => Some("tool-calls"),
+                _ => None,
+            };
+            if let Some(id) = id {
+                observed.insert(id);
+            }
+        }
+        if row
+            .artifacts
+            .iter()
+            .any(|artifact| is_flamegraph_artifact(artifact))
+        {
+            observed.insert("flamegraph");
+        }
+    }
+    observed
+}
+
+pub(super) fn collector_commands_html(rows: &[BenchmarkData]) -> String {
+    let observed = observed_collectors(rows);
+    let mut body = String::from(
+        "<section class=\"collection-commands\"><div class=\"section-title\"><h2>Measurement collection commands</h2><p class=\"muted\">Collector-owned templates for measurements included in this report.</p></div><p>Placeholders are substituted at execution time with the verified target, selected profile, interval, and project-local output. Raw values are not retained in report evidence so paths and runtime identifiers stay private.</p><div class=\"table-wrap\"><table><thead><tr><th>Collector</th><th>Command or operation</th><th>Scope</th></tr></thead><tbody>",
+    );
+    if observed.is_empty() {
+        body.push_str("<tr><td colspan=\"3\">No collector measurement documents were available in these records.</td></tr>");
+    } else {
+        for id in observed {
+            let Some(collector) = crate::collectors::find(id) else {
+                continue;
+            };
+            let command = collector.report_command();
+            body.push_str(&format!(
+                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                escape(collector.id()),
+                escape(command.invocation),
+                escape(command.scope),
+            ));
+        }
+    }
+    body.push_str("</tbody></table></div></section>");
+    body
+}
+
 const HTML_HEAD: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ASB sweep report</title><style>
 :root{color-scheme:light;--ink:#18212b;--muted:#61707f;--line:#dce4ec;--panel:#fff;--accent:#1769aa;--accent-soft:#e8f2fa;--bg:#f4f7fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1500px;margin:auto;padding:36px 28px 56px}.hero{background:linear-gradient(135deg,#12344d,#1769aa);color:#fff;border-radius:18px;padding:42px 46px;box-shadow:0 14px 32px #12344d33}.hero h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.05;margin:4px 0 14px;letter-spacing:-.04em}.hero p{max-width:760px;margin:0;color:#e5f2fb;font-size:16px}.eyebrow{font-size:11px!important;letter-spacing:.16em;font-weight:700}.explain,.filters,section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:20px;padding:24px;box-shadow:0 4px 14px #17324d0b}.explain{border-left:4px solid var(--accent)}h2{font-size:19px;margin:0}.section-title{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}legend{font-weight:700;color:var(--accent);padding:0 5px}label{display:flex;gap:8px;align-items:flex-start;margin:6px 0;color:var(--muted);overflow-wrap:anywhere}input{accent-color:var(--accent);margin-top:4px}.filter-count,.muted{color:var(--muted);margin:14px 0 0}.text-link,a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button{background:#fff;border:1px solid #b9c9d8;border-radius:7px;color:var(--accent);cursor:pointer;padding:7px 11px;margin-left:6px}button:hover{background:var(--accent-soft)}.table-wrap{overflow:auto}table{border-collapse:collapse;min-width:100%;white-space:nowrap}th{text-align:left;background:#eef4f8;color:#405466;font-size:12px;letter-spacing:.04em;text-transform:uppercase}th,td{border-bottom:1px solid var(--line);padding:12px 10px;vertical-align:top}.links{white-space:normal;min-width:170px}.links a{display:inline-block;margin:0 8px 5px 0;font-size:12px}.artifact-list{padding-left:18px;margin:8px 0;white-space:normal}.perfetto-metric{display:block;width:min(760px,100%);height:180px;border:0;margin:8px 0}.status{display:block;color:#9a4b00;background:#fff4e5;border-radius:5px;font-size:11px;padding:3px 6px;margin-top:4px;max-width:260px;white-space:normal}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.charts figure{margin:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfdff}.charts img{width:100%;height:auto;display:block}.charts figcaption{padding:8px 2px 2px;font-size:12px;overflow-wrap:anywhere}footer{color:var(--muted);text-align:center;padding:28px 0 0}code{background:#e9eef3;border-radius:4px;padding:2px 5px}@media(max-width:700px){.shell{padding:18px 12px}.hero{padding:30px 24px}.section-title{align-items:flex-start;flex-direction:column}.section-title button{margin:0 6px 0 0}}
 </style></head><body>"#;
 
-const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan';color:var(--muted);font-size:11px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
+const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan';color:var(--muted);font-size:11px}.collector-graph-group{grid-column:1/-1;border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group>summary,.folded-table>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.folded-table[open]>summary{margin-bottom:12px}.collector-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
 
 const HIGHLIGHT_STYLE: &str = r#".interactive-chart.highlighted{outline:5px solid #d81b60;outline-offset:3px;box-shadow:0 0 0 9px #d81b6033}.highlight-toggle{display:inline-flex;align-items:center;gap:5px;margin:0 6px 0 0;color:#8d1748;font-weight:700}.highlight-toggle input{accent-color:#d81b60;margin:0}.chart-picker tr.highlighted{background:#fff0f5;box-shadow:inset 5px 0 #d81b60}"#;
 
@@ -1599,6 +1752,7 @@ mod pipeline_tests;
 #[cfg(test)]
 mod tests {
     use super::GraphNames;
+    use super::chart_presentation;
     use super::run;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
@@ -2686,5 +2840,19 @@ mod tests {
         assert!(html.contains("fixture:default"));
         assert!(html.contains("fixture:high"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chart_presentation_uses_svg_title_and_stable_collector_group() {
+        let presentation = chart_presentation(
+            "<svg><title>analysis.pressure.cpu_some_pct</title></svg>",
+            "agent-concurrency-opaque.svg",
+        );
+        assert_eq!(presentation.title, "analysis.pressure.cpu_some_pct");
+        assert_eq!(presentation.collector, "Kernel pressure");
+
+        let fallback = chart_presentation("<svg></svg>", "opaque-name.svg");
+        assert_eq!(fallback.title, "opaque-name");
+        assert_eq!(fallback.collector, "ASB derived metrics");
     }
 }

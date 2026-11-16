@@ -4,7 +4,7 @@ mod capture;
 #[cfg(test)]
 mod tests;
 
-use crate::collectors::{CollectorAdapter, LifecycleEvent, TargetScope};
+use crate::collectors::{CollectorAdapter, LifecycleEvent, ReportCommand, TargetScope};
 use crate::measurements::{self, Session};
 use capture::{Capture, Sampler};
 
@@ -91,6 +91,12 @@ fn start_capture(session: &mut Session) {
 }
 
 impl CollectorAdapter for KernelPressure {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read <verified-cgroup>/{cpu,memory,io}.pressure every <interval-ms>",
+            scope: "exclusive agent cgroup or verified execution container",
+        }
+    }
     fn series_timestamp_unit(&self) -> crate::collectors::TimeUnit {
         crate::collectors::TimeUnit::Seconds
     }

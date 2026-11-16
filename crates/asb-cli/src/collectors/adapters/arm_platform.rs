@@ -1,6 +1,6 @@
 //! Bounded Arm PMU discovery. This records capability, never measured activity.
 
-use crate::collectors::{CollectorAdapter, TargetScope};
+use crate::collectors::{CollectorAdapter, ReportCommand, TargetScope};
 use crate::measurements::{self, Session};
 use serde::Serialize;
 use std::{collections::BTreeMap, fs, io::Read, path::Path};
@@ -13,6 +13,12 @@ const MAX_TOTAL_FIELDS: usize = 4096;
 const MAX_VALUE: u64 = 512;
 
 impl CollectorAdapter for ArmPlatform {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read bounded Arm PMU inventory from /sys/bus/event_source/devices and /sys/devices/system/cpu",
+            scope: "host Arm platform context captured before measurement",
+        }
+    }
     fn id(&self) -> &'static str {
         "arm-platform"
     }

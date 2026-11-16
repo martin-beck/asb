@@ -1,6 +1,6 @@
 use super::super::{
     ArtifactDisplay, CollectorAdapter, GraphSection, PreflightContext, ProcessContext, ProcessData,
-    SelectionExtension, SelectionOption,
+    ReportCommand, SelectionExtension, SelectionOption,
 };
 use crate::measurements;
 use std::fmt::Write as _;
@@ -15,6 +15,12 @@ pub(super) struct BpftraceCollector;
 pub(super) static ADAPTER: BpftraceCollector = BpftraceCollector;
 
 impl CollectorAdapter for BpftraceCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "bpftrace -e <validated ASB process-tree profile>",
+            scope: "verified agent process tree",
+        }
+    }
     fn default_enabled(&self) -> bool {
         false
     }

@@ -1,4 +1,4 @@
-use super::super::{CollectorAdapter, ProcessContext, ProcessData};
+use super::super::{CollectorAdapter, ProcessContext, ProcessData, ReportCommand};
 use super::pidstat::parse_columns;
 use crate::measurements;
 use crate::measurements::parse_float;
@@ -7,6 +7,12 @@ pub(super) struct IostatCollector;
 pub(super) static ADAPTER: IostatCollector = IostatCollector;
 
 impl CollectorAdapter for IostatCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read /proc/<agent-tree-pid>/io every <interval-ms>",
+            scope: "verified agent process tree",
+        }
+    }
     fn description(&self) -> &'static str {
         "block-device throughput and latency time series"
     }

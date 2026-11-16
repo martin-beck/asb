@@ -1,7 +1,8 @@
 //! Structured agent tool-call observations are published by measurement finalization.
 
 use super::super::{
-    CollectorAdapter, ReportGraph, ReportRow, configuration_label, report_filename_component,
+    CollectorAdapter, ReportCommand, ReportGraph, ReportRow, configuration_label,
+    report_filename_component,
 };
 use std::collections::BTreeSet;
 
@@ -9,6 +10,12 @@ pub(super) struct ToolCallsCollector;
 pub(super) static ADAPTER: ToolCallsCollector = ToolCallsCollector;
 
 impl CollectorAdapter for ToolCallsCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "ASB adapter event stream: record observed tool-call request and completion events",
+            scope: "selected agent adapter and its admitted descendants",
+        }
+    }
     fn description(&self) -> &'static str {
         "structured agent tool-call observations"
     }
@@ -56,7 +63,7 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
     let row_height = 30.0;
     let height = 90.0 + row_height * classes.len() as f64;
     let mut svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><style>text{{font:12px sans-serif;fill:#18212b}}.axis{{stroke:#9aa5b1}}.cell{{fill:#2563eb}}.duration{{stroke:#f59e0b;stroke-width:3}}</style><text x="20" y="25" font-size="16">LLM tool-call classes over provider-response time — {}</text><text x="{}" y="48">response-observed time (ms from first tool call); orange extension = observed tool execution duration</text>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><title>LLM tool-call classes over provider-response time</title><style>text{{font:12px sans-serif;fill:#18212b}}.axis{{stroke:#9aa5b1}}.cell{{fill:#2563eb}}.duration{{stroke:#f59e0b;stroke-width:3}}</style><text x="20" y="25" font-size="16">LLM tool-call classes over provider-response time — {}</text><text x="{}" y="48">response-observed time (ms from first tool call); orange extension = observed tool execution duration</text>"#,
         escape(&configuration_label(row)),
         left
     );
@@ -159,6 +166,11 @@ mod tests {
         )
         .expect("tool call graph");
         assert!(graph.filename.starts_with("tool-call-heatmap-0000-"));
+        assert!(
+            graph
+                .svg
+                .contains("<title>LLM tool-call classes over provider-response time</title>")
+        );
         assert!(graph.svg.contains("fixture-model:high"));
         assert!(graph.svg.contains("filesystem.read"));
         assert!(graph.svg.contains("execution 25 ms"));

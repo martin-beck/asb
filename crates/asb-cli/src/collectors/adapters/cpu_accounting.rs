@@ -1,7 +1,7 @@
 //! Optional accounting in an exclusive, delegated cgroup-v2 leaf. The process
 //! gate is moved before it starts the agent; all descendants inherit the leaf.
 use crate::collectors::adapters::process_accounting::Sampler;
-use crate::collectors::{CollectorAdapter, LifecycleEvent, PreflightContext};
+use crate::collectors::{CollectorAdapter, LifecycleEvent, PreflightContext, ReportCommand};
 use crate::measurements::{self, Session};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -85,6 +85,12 @@ impl Drop for Leaf {
 }
 
 impl CollectorAdapter for CpuAccounting {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read <exclusive-cgroup>/{cpu.stat,memory.current,memory.peak}",
+            scope: "ASB-owned agent cgroup or verified execution container",
+        }
+    }
     fn description(&self) -> &'static str {
         "process-tree CPU time and scheduler accounting"
     }

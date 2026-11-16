@@ -6,7 +6,8 @@
 //! already verified ASB process-tree observations for later offline analysis.
 
 use super::super::{
-    ArtifactDisplay, CollectorAdapter, ReportGraph, ReportRow, SelectionExtension, SelectionOption,
+    ArtifactDisplay, CollectorAdapter, ReportCommand, ReportGraph, ReportRow, SelectionExtension,
+    SelectionOption,
 };
 use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
@@ -52,6 +53,12 @@ struct MeasurementRecord {
 }
 
 impl CollectorAdapter for AgentSysPerfCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "agentsysperf analyze <asb-agent-scoped-records.json> --format json",
+            scope: "offline analysis of ASB agent-tree observations",
+        }
+    }
     fn default_enabled(&self) -> bool {
         false
     }
@@ -374,7 +381,7 @@ fn bottleneck_graph(rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
         let left = 330.0;
         let right = 940.0;
         let mut svg = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 980 {height:.0}\" role=\"img\" aria-label=\"AgentSysPerf bottleneck finding confidence\"><rect width=\"980\" height=\"{height:.0}\" fill=\"#fff\"/><text x=\"24\" y=\"32\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"700\">AgentSysPerf bottleneck findings</text><text x=\"24\" y=\"54\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#61707f\">Diagnostic confidence only; findings do not affect ASB grades or rankings.</text>"
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 980 {height:.0}\" role=\"img\" aria-label=\"AgentSysPerf bottleneck finding confidence\"><title>AgentSysPerf bottleneck findings</title><rect width=\"980\" height=\"{height:.0}\" fill=\"#fff\"/><text x=\"24\" y=\"32\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"700\">AgentSysPerf bottleneck findings</text><text x=\"24\" y=\"54\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#61707f\">Diagnostic confidence only; findings do not affect ASB grades or rankings.</text>"
         );
         for tick in 0..=4 {
             let value = tick as f64 / 4.0;
@@ -1112,6 +1119,11 @@ mod tests {
         ])
         .expect("one validated finding");
         assert_eq!(graph.filename, "agentsysperf-bottleneck-findings.svg");
+        assert!(
+            graph
+                .svg
+                .contains("<title>AgentSysPerf bottleneck findings</title>")
+        );
         assert!(graph.svg.contains("orchestration_heavy"));
         assert!(!graph.svg.contains("ignored"));
     }
