@@ -21,8 +21,11 @@ const REPLAY_WORKSPACE_MIB: u64 = 1024;
 // Project-local installed agents are shared across a replay cohort. Per-replica
 // replay evidence is bounded, including for collectors whose live acquisition
 // may reserve a larger host-side cache or symbol/image staging area.
-const REPLAY_AGENT_MIB: u64 = 512;
-const REPLAY_COLLECTOR_MIB: u64 = 128;
+const REPLAY_BASE_PER_ATTEMPT_MIB: u64 = 16;
+const REPLAY_PROVIDER_SESSION_MIB: u64 = 16;
+const REPLAY_AGENT_MIB: u64 = 32;
+const REPLAY_COLLECTOR_MIB: u64 = 16;
+const REPLAY_MODE_MIB: u64 = 16;
 
 // Unit fixtures exercise later admission boundaries with deliberately tiny
 // temporary filesystems. Keep their capacity premise explicit and scoped to
@@ -54,15 +57,8 @@ impl Drop for TestAvailableMib {
 pub(crate) struct Estimate {
     required_mib: u64,
     attempts: u64,
-}
-
-impl Estimate {
-    fn combine(self, other: Self) -> Self {
-        Self {
-            required_mib: self.required_mib.saturating_add(other.required_mib),
-            attempts: self.attempts.saturating_add(other.attempts),
-        }
-    }
+    retained_mib: u64,
+    transient_mib: u64,
 }
 
 /// Estimate retained output for all replicas and repeated batches of one
@@ -110,11 +106,20 @@ pub(crate) fn benchmark(
     } else {
         agent_mib(&config.agent)
     };
-    let non_workspace_per_attempt = BASE_PER_ATTEMPT_MIB
-        .saturating_add(PROVIDER_SESSION_MIB)
+    let (base_mib, provider_mib, mode_mib) = if mode == Some(tape::Mode::Replay) {
+        (
+            REPLAY_BASE_PER_ATTEMPT_MIB,
+            REPLAY_PROVIDER_SESSION_MIB,
+            REPLAY_MODE_MIB,
+        )
+    } else {
+        (BASE_PER_ATTEMPT_MIB, PROVIDER_SESSION_MIB, mode_mib(mode))
+    };
+    let non_workspace_per_attempt = base_mib
+        .saturating_add(provider_mib)
         .saturating_add(agent_mib)
         .saturating_add(collector_mib)
-        .saturating_add(mode_mib(mode));
+        .saturating_add(mode_mib);
     // A compact configuration retains the official grade, submission and
     // measurement evidence, but releases each successfully settled private
     // task workspace before the next repetition.  Its workspace reservation
@@ -126,15 +131,21 @@ pub(crate) fn benchmark(
     } else {
         attempts
     };
+    let retained_mib = non_workspace_per_attempt
+        .saturating_mul(attempts)
+        .saturating_mul(SAFETY_NUMERATOR);
+    let transient_mib = workspace_mib
+        .saturating_mul(workspace_attempts)
+        .saturating_mul(SAFETY_NUMERATOR);
     Estimate {
         // A factor of two covers retained partial evidence, tool logs, output
         // growth and task sources that exceed their declared disk envelope.
-        required_mib: non_workspace_per_attempt
-            .saturating_mul(attempts)
-            .saturating_add(workspace_mib.saturating_mul(workspace_attempts))
-            .saturating_mul(SAFETY_NUMERATOR)
+        required_mib: retained_mib
+            .saturating_add(transient_mib)
             .saturating_add(REPORT_OVERHEAD_MIB),
         attempts,
+        retained_mib,
+        transient_mib,
     }
 }
 
@@ -142,14 +153,34 @@ pub(crate) fn sweep<'a>(
     entries: impl IntoIterator<Item = (&'a BenchmarkConfig, Option<&'a ResolvedPlan>)>,
     repeats: u64,
     mode: Option<tape::Mode>,
+    parallel_configurations: usize,
 ) -> Estimate {
-    entries.into_iter().fold(
-        Estimate {
-            required_mib: REPORT_OVERHEAD_MIB,
-            attempts: 0,
-        },
-        |total, (config, policy)| total.combine(benchmark(config, policy, repeats, mode)),
-    )
+    let mut estimates = entries
+        .into_iter()
+        .map(|(config, policy)| benchmark(config, policy, repeats, mode))
+        .collect::<Vec<_>>();
+    estimates.sort_by_key(|estimate| std::cmp::Reverse(estimate.transient_mib));
+    let parallel = parallel_configurations.max(1);
+    let retained_mib = estimates.iter().fold(0u64, |total, estimate| {
+        total.saturating_add(estimate.retained_mib)
+    });
+    let transient_mib = estimates
+        .iter()
+        .take(parallel)
+        .fold(0u64, |total, estimate| {
+            total.saturating_add(estimate.transient_mib)
+        });
+    let attempts = estimates.iter().fold(0u64, |total, estimate| {
+        total.saturating_add(estimate.attempts)
+    });
+    Estimate {
+        required_mib: retained_mib
+            .saturating_add(transient_mib)
+            .saturating_add(REPORT_OVERHEAD_MIB),
+        attempts,
+        retained_mib,
+        transient_mib,
+    }
 }
 
 /// Ask for an explicit confirmation only when the filesystem that will hold
@@ -349,9 +380,36 @@ mod tests {
     fn sweep_accumulates_retained_outputs_for_every_configuration() {
         let config = config();
         let one = benchmark(&config, None, 1, None);
-        let sweep = super::sweep([(&config, None), (&config, None)], 1, None);
+        let sweep = super::sweep([(&config, None), (&config, None)], 1, None, 1);
         assert_eq!(sweep.attempts, one.attempts * 2);
-        assert!(sweep.required_mib > one.required_mib * 2);
+        assert!(sweep.required_mib > one.required_mib);
+        assert!(sweep.required_mib < one.required_mib * 2);
+    }
+
+    #[test]
+    fn replay_sweep_reserves_only_simultaneous_workspaces() {
+        let mut small = config();
+        small.concurrency = 1;
+        let mut large = small.clone();
+        large.concurrency = 32;
+        let sequential = super::sweep(
+            [(&small, None), (&large, None)],
+            1,
+            Some(tape::Mode::Replay),
+            1,
+        );
+        let parallel = super::sweep(
+            [(&small, None), (&large, None)],
+            1,
+            Some(tape::Mode::Replay),
+            2,
+        );
+        assert_eq!(sequential.attempts, 33);
+        assert!(parallel.required_mib > sequential.required_mib);
+        assert_eq!(
+            sequential.transient_mib,
+            REPLAY_WORKSPACE_MIB * 32 * SAFETY_NUMERATOR
+        );
     }
 
     #[test]
@@ -365,6 +423,8 @@ mod tests {
         let estimate = Estimate {
             required_mib: 2048,
             attempts: 1,
+            retained_mib: 0,
+            transient_mib: 0,
         };
         assert!(needs_confirmation(2047, estimate));
         assert!(!needs_confirmation(2048, estimate));
@@ -378,6 +438,8 @@ mod tests {
             Estimate {
                 required_mib: 2048,
                 attempts: 1,
+                retained_mib: 0,
+                transient_mib: 0,
             },
             false,
             false,

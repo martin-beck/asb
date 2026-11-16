@@ -200,6 +200,7 @@ impl<'a> PreparedSweep<'a> {
                     .map(|entry| (&entry.configuration, entry.policy.as_ref())),
                 options.repeat.unwrap_or(1),
                 mode,
+                options.jobs,
             ),
             options.interactive && !options.json,
             options.json,
