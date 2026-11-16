@@ -1,5 +1,5 @@
 //! Memory observes the verified agent tree; worker census matches its entry point.
-use crate::collectors::{CollectorAdapter, GraphSection, LifecycleEvent};
+use crate::collectors::{CollectorAdapter, GraphSection, LifecycleEvent, ReportCommand};
 use crate::measurements::{self, Session};
 use std::collections::BTreeSet;
 use std::fs;
@@ -284,6 +284,16 @@ fn memory_root(
 }
 
 impl<const MEMORY: bool> CollectorAdapter for AgentProcesses<MEMORY> {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: if MEMORY {
+                "read /proc/<agent-tree-pid>/{status,statm} every <interval-ms>"
+            } else {
+                "enumerate /proc descendants of <agent-root-pid> every <interval-ms>"
+            },
+            scope: "verified agent process tree",
+        }
+    }
     fn description(&self) -> &'static str {
         if MEMORY {
             "selected agent process-tree memory usage"

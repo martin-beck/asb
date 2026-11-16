@@ -352,7 +352,13 @@ fn render_agent_reports(stage: &Path, prepared: &PreparedReport) -> Result<(), E
                 )?,
             }
         }
-        write_agent_html_report(stage, &plan, &values, &prepared.collector_graphs)?;
+        write_agent_html_report(
+            stage,
+            &plan,
+            &values,
+            &prepared.collector_graphs,
+            &prepared.data.rows,
+        )?;
     }
     Ok(())
 }
@@ -403,6 +409,7 @@ fn write_agent_html_report(
     plan: &AgentReportPlan,
     values: &BTreeMap<String, BTreeMap<String, Vec<f64>>>,
     collector_graphs: &[crate::collectors::ReportGraph],
+    rows: &[BenchmarkData],
 ) -> Result<(), Error> {
     let agents = values
         .values()
@@ -430,6 +437,7 @@ fn write_agent_html_report(
     html.push_str("<main class=\"shell\">");
     html.push_str(&format!("<header class=\"hero\"><p class=\"eyebrow\">ASB AGENT REPORT</p><h1>{}</h1><p>{}</p></header>", escape(plan.kind.title()), escape(plan.kind.description())));
     html.push_str("<section class=\"explain\"><strong>Agent-only aggregation</strong><p>These derived views use the same validated sweep records and SVG/HTML interaction pipeline as the benchmark report. They group every finite observation by agent; provider, model, workload, and task detail stay in the original report and comparison.json.</p></section>");
+    html.push_str(&collector_commands_html(rows));
     if !collector_graphs.is_empty() {
         html.push_str("<section class=\"explain\"><strong>Collector diagnostics</strong><p>Specialized collector graphs are included below with their original cross-run scope. They are diagnostic evidence, not per-agent scalar aggregates or benchmark scores.</p></section>");
     }
@@ -440,7 +448,8 @@ fn write_agent_html_report(
     html.push_str("</fieldset></div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
     html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
     for graph in &graphs {
-        html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(graph.strip_suffix(".svg").unwrap_or(graph)), escape(graph)));
+        let title = graph_presentation(stage, graph)?.title;
+        html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&title), escape(graph)));
     }
     html.push_str("</tbody></table></div></section>");
     html.push_str("<section><div class=\"section-title\"><h2>Agent observations</h2><p class=\"muted\">Per-agent count, mean, median, and p95 for every collected scalar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Agent</th><th>Metric</th><th>Samples</th><th>Mean</th><th>Median</th><th>P95</th></tr></thead><tbody id=\"results\">");
@@ -577,7 +586,7 @@ mod tests {
                 report_file: kind.report_file().into(),
                 graphs: Vec::new(),
             };
-            write_agent_html_report(&root, &plan, &values, &graphs).unwrap();
+            write_agent_html_report(&root, &plan, &values, &graphs, &[]).unwrap();
             let html = fs::read_to_string(root.join(kind.report_file())).unwrap();
             assert!(html.contains("Collector diagnostics"));
             assert!(html.contains("agentsysperf-bottleneck-findings.svg"));

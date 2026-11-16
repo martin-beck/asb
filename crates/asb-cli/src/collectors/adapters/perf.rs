@@ -1,6 +1,6 @@
 use super::super::CollectorAdapter;
 use super::super::PreflightContext;
-use super::super::{ArtifactDisplay, ProcessContext, ProcessData, SharedArtifact};
+use super::super::{ArtifactDisplay, ProcessContext, ProcessData, ReportCommand, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -69,6 +69,12 @@ pub(super) fn symfs_options(cache: &std::path::Path) -> Option<(std::path::PathB
 }
 
 impl CollectorAdapter for PerfCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "perf stat --no-scale -I <interval-ms> -x, -e <events> --inherit -p <agent-root-pid>; perf record --inherit -p <agent-root-pid>",
+            scope: "verified agent process tree",
+        }
+    }
     fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
         Some(match streaming_validation_service(args) {
             Ok(()) => std::process::ExitCode::SUCCESS,

@@ -1,4 +1,4 @@
-use super::super::{CollectorAdapter, ProcessContext, ProcessData};
+use super::super::{CollectorAdapter, ProcessContext, ProcessData, ReportCommand};
 use super::pidstat::parse_columns;
 use crate::measurements;
 use crate::measurements::parse_float;
@@ -7,6 +7,12 @@ pub(super) struct MpstatCollector;
 pub(super) static ADAPTER: MpstatCollector = MpstatCollector;
 
 impl CollectorAdapter for MpstatCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "read /proc/<agent-tree-pid>/{stat,task/*/stat} every <interval-ms>",
+            scope: "verified agent process tree",
+        }
+    }
     fn description(&self) -> &'static str {
         "per-CPU utilization time series"
     }

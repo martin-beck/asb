@@ -1,3 +1,62 @@
+// Reports are deliberately dense. Keep raw evidence available without making
+// every table and graph occupy the first viewport, including derived reports
+// that reuse this script without the primary report's filtering script.
+function foldReportTables(){
+  for(const table of [...(document.querySelectorAll('table')||[])]){
+    if(table.closest&&table.closest('details'))continue;
+    const wrap=table.closest&&table.closest('.table-wrap')||table;
+    const parent=wrap.parentElement;
+    if(!parent||parent.tagName==='DETAILS')continue;
+    const details=document.createElement('details');
+    details.className='folded-table';
+    const summary=document.createElement('summary');
+    summary.textContent='Table';
+    parent.insertBefore(details,wrap);
+    details.append(summary,wrap);
+  }
+}
+function groupReportCharts(){
+  for(const grid of [...(document.querySelectorAll('.charts')||[])]){
+    if(grid.dataset&&grid.dataset.collectorGrouped==='true')continue;
+    const figures=[...(grid.children||[])].filter(node=>node.classList&&(
+      node.classList.contains('interactive-chart')||node.classList.contains('flamegraph-chart')));
+    if(!figures.length)continue;
+    const groups=new Map();
+    for(const figure of figures){
+      const collector=figure.dataset.collector||'Other measurements';
+      if(!groups.has(collector))groups.set(collector,[]);
+      groups.get(collector).push(figure);
+    }
+    grid.classList.add('collector-groups');
+    for(const [collector,entries] of groups){
+      const details=document.createElement('details');
+      details.className='collector-graph-group';
+      const summary=document.createElement('summary');
+      summary.textContent=`${collector} (${entries.length} graph${entries.length===1?'':'s'})`;
+      const charts=document.createElement('div');
+      charts.className='charts collector-charts';
+      details.append(summary,charts);
+      for(const entry of entries)charts.append(entry);
+      grid.append(details);
+    }
+    if(grid.dataset)grid.dataset.collectorGrouped='true';
+  }
+}
+function renameChartPickerRows(){
+  const titles=new Map();
+  for(const chart of [...(document.querySelectorAll('.interactive-chart')||[])]){
+    if(chart.dataset.graph&&chart.dataset.chartTitle)titles.set(chart.dataset.graph,chart.dataset.chartTitle);
+  }
+  for(const row of [...(document.querySelectorAll('[data-highlight-row]')||[])]){
+    const title=titles.get(row.dataset.highlightRow);
+    const cell=title&&row.querySelector&&row.querySelector('td');
+    if(cell)cell.textContent=title;
+  }
+}
+foldReportTables();
+groupReportCharts();
+renameChartPickerRows();
+
 document.querySelectorAll('.interactive-chart').forEach(chart=>{
   const stage=chart.querySelector('.chart-stage');
   const svg=stage.querySelector('svg');

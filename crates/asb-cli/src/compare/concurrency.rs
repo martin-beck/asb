@@ -182,12 +182,14 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str("<main class=\"shell\">");
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB CONCURRENCY REPORT</p><h1>Concurrency scaling comparison</h1><p>Compare the same agent, trial, provider, model, workload module, and dataset across configured replica counts without rerunning a benchmark.</p></header>");
     html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Every graph has configured concurrency on the x-axis and the original metric unit on the y-axis. Each faint point is an individual replica; the connected marker is that concurrency's median. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean, the same summary used by the existing replica-distribution view. Missing values are not zero-filled.</p></section>");
+    html.push_str(&collector_commands_html(&prepared.data.rows));
     if plans.is_empty() {
         html.push_str("<section><h2>No comparable concurrency observations</h2><p>ASB found no equivalent agent/trial group with measurements at two or more configured concurrency values. Run the same configuration at another concurrency, then rerun <code>asb compare</code>.</p></section>");
     } else {
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
         for plan in &plans {
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{} · {}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&plan.group.display()), escape(&metric_display(plan)), escape(&plan.filename)));
+            let title = graph_presentation(stage, &plan.filename)?.title;
+            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
         }
         html.push_str("</tbody></table></div></section>");
         for (index, (group, group_plans)) in by_group.into_iter().enumerate() {
@@ -371,12 +373,14 @@ fn render_agent_report(stage: &Path, rows: &[BenchmarkData]) -> Result<(), Error
     html.push_str("<main class=\"shell\">");
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB AGENT CONCURRENCY REPORT</p><h1>Agent concurrency comparison</h1><p>Compare agents on the identical trial, provider, model, workload module, and dataset across configured replica counts without rerunning a benchmark.</p></header>");
     html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Each color is one agent. The x-axis is configured concurrency and the y-axis retains the original metric unit. Faint points are individual replicas; connected markers are per-agent medians at each configured concurrency. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean. Missing values are not zero-filled.</p></section>");
+    html.push_str(&collector_commands_html(rows));
     if plans.is_empty() {
         html.push_str("<section><h2>No cross-agent concurrency observations</h2><p>ASB found no equivalent trial/provider/model group with at least two agents and two configured concurrency values. Run matching configurations, then rerun <code>asb compare</code>.</p></section>");
     } else {
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
         for plan in &plans {
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{} · {}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&plan.group.display()), escape(&agent_metric_display(plan)), escape(&plan.filename)));
+            let title = graph_presentation(stage, &plan.filename)?.title;
+            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
         }
         html.push_str("</tbody></table></div></section>");
         for (index, (group, group_plans)) in by_group.into_iter().enumerate() {

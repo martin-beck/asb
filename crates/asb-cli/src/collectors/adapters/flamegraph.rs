@@ -1,4 +1,4 @@
-use super::super::{ArtifactDisplay, CollectorAdapter};
+use super::super::{ArtifactDisplay, CollectorAdapter, ReportCommand};
 pub(super) struct FlamegraphCollector;
 pub(super) static ADAPTER: FlamegraphCollector = FlamegraphCollector;
 
@@ -11,6 +11,12 @@ mod coverage_tests;
 mod cleanup_tests;
 
 impl CollectorAdapter for FlamegraphCollector {
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "perf script -i <agent-tree-perf.data> | stackcollapse-perf.pl | flamegraph.pl",
+            scope: "post-processes the verified agent-tree perf capture",
+        }
+    }
     fn estimated_disk_mib(&self) -> u64 {
         1024
     }

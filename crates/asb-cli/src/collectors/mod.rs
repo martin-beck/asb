@@ -385,7 +385,26 @@ pub(crate) struct SelectionExtension {
     pub options: Vec<SelectionOption>,
 }
 
+/// Stable, report-safe provenance for a collector's measurement operation.
+///
+/// Values deliberately use placeholders for per-run paths, process IDs and
+/// selected profiles. Those values may include private project paths and are
+/// not retained in comparison evidence; the template still identifies the
+/// exact collector operation ASB performs.
+#[derive(Clone, Copy)]
+pub(crate) struct ReportCommand {
+    pub invocation: &'static str,
+    pub scope: &'static str,
+}
+
 pub(crate) trait CollectorAdapter: Sync {
+    /// Command or collector operation represented in offline reports.
+    fn report_command(&self) -> ReportCommand {
+        ReportCommand {
+            invocation: "ASB in-process collector operation",
+            scope: "collector-defined scope",
+        }
+    }
     /// Timestamp unit emitted by this adapter, also used for its legacy records.
     fn series_timestamp_unit(&self) -> TimeUnit {
         TimeUnit::Milliseconds
