@@ -933,7 +933,12 @@ def main():
                       'guest_ambiguous_paths': len(guest_ambiguous),
                       'guest_capture_failures': guest_failures,
                       'limitation': 'deleted or otherwise inaccessible images cannot be recovered'}, sort_keys=True), flush=True)
-    return 2 if recorder and recorded is None else 0
+    # A recorder can have already released its artifact or its containing
+    # namespace by the time custody reaches post-exit settlement.  The live
+    # mappings above remain valid, bounded evidence; record the unavailable
+    # recovery as an explicit limitation instead of retroactively invalidating
+    # the whole collector capture.
+    return 0
 
 
 if __name__ == '__main__':

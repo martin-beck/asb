@@ -62,6 +62,19 @@ pub(crate) struct Policy {
     pub graceful: Option<Duration>,
 }
 
+/// Wait briefly for inherited writer descriptors after a verified guardian exit.
+///
+/// A collector can finish its principal while a descendant still owns one of
+/// the capture pipes.  The owner supplied a graceful duration because it has
+/// an ordered shutdown contract, so reuse that bounded budget without letting
+/// a long perf flush make post-exit draining unbounded.
+fn post_exit_drain(policy: Policy) -> Duration {
+    policy
+        .graceful
+        .map(|graceful| graceful.min(Duration::from_secs(30)))
+        .unwrap_or(Duration::from_secs(5))
+}
+
 pub(crate) fn command(
     launch: &mut crate::launch::ProcessLaunch,
 ) -> Result<(Command, crate::launch::CommandRoute), String> {
@@ -196,7 +209,9 @@ impl Producer {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]
             Some(Active::Process(process)) => {
-                process.policy.graceful.unwrap_or_default() + Duration::from_secs(8)
+                process.policy.graceful.unwrap_or_default()
+                    + post_exit_drain(process.policy)
+                    + Duration::from_secs(8)
             }
             #[cfg(test)]
             Some(Active::Snapshot(_)) => ProcessTreeSnapshot::stop_budget(),
@@ -345,7 +360,7 @@ fn capture(
                 exit = gate.principal_exit().map(|principal| principal.status());
                 if observed.map_err(|error| error.to_string())?.is_some() {
                     cleanup_confirmed = true;
-                    drain = Some(Instant::now() + Duration::from_secs(5));
+                    drain = Some(Instant::now() + post_exit_drain(policy));
                 }
             }
             if drain.is_some() && exit.is_none() {
@@ -610,6 +625,37 @@ mod tests {
                 .windows(7)
                 .any(|window| window == b"FLUSHED")
         );
+    }
+
+    #[test]
+    fn post_exit_drain_is_bounded_and_included_in_settlement_budget() {
+        let long = Policy {
+            stream_bytes: 1024,
+            graceful: Some(Duration::from_secs(300)),
+        };
+        let short = Policy {
+            stream_bytes: 1024,
+            graceful: Some(Duration::from_secs(2)),
+        };
+        let none = Policy {
+            stream_bytes: 1024,
+            graceful: None,
+        };
+        assert_eq!(post_exit_drain(long), Duration::from_secs(30));
+        assert_eq!(post_exit_drain(short), Duration::from_secs(2));
+        assert_eq!(post_exit_drain(none), Duration::from_secs(5));
+
+        let process = Process {
+            id: 1,
+            stop: Arc::new(AtomicBool::new(false)),
+            handle: None,
+            policy: long,
+        };
+        let producer = Producer {
+            active: Some(Active::Process(process)),
+            completion: None,
+        };
+        assert_eq!(producer.stop_budget(), Duration::from_secs(338));
     }
 
     #[test]
