@@ -75,7 +75,7 @@ def verified_replay_material(source, expected_material):
     if expected_material is None:
         return None
     if (not isinstance(source, dict)
-            or source.get("source") != "verified-local-material-cache"
+            or source.get("source") not in ("verified-local-material-cache", "verified-local-material-baseline")
             or source.get("cache_material_sha256") != expected_material
             or not isinstance(expected_material, str)
             or not re.fullmatch(r"[0-9a-f]{64}", expected_material)):
