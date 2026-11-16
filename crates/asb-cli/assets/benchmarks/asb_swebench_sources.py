@@ -323,6 +323,34 @@ def resolve_image(client, name, build, host_arch=None, offline=False, material_s
                 raise CatalogError("cached SWE-bench source image has invalid identity, ownership or architecture")
             return image, {"status":"built", "image_id":image.id, "cache_material_sha256":material_sha256,
                            "source_owner_labels":owner, "source":"verified-local-material-cache"}
+        # A Docker image prune can remove the source-material tag while a
+        # verified prepared baseline remains. That baseline is already bound
+        # to the same cassette material, task, and clean base revision, so it
+        # is a sufficient offline replay source. Never build or pull here.
+        listing = getattr(client.images, "list", None)
+        if callable(listing):
+            try:
+                candidates = listing(filters={"label": "asb.material-sha256=" + material_sha256})
+            except docker.errors.DockerException as error:
+                raise CatalogError("cannot inspect local SWE-bench replay material cache") from error
+            verified = []
+            for candidate in candidates:
+                labels = candidate.attrs.get("Config", {}).get("Labels", {}) or {}
+                owner = {key: labels.get(key) for key in ("asb.owner", "asb.attempt", "asb.recovery")}
+                if (labels.get("asb.cache") == "swebench-prepared-baseline-v2"
+                        and owner["asb.owner"] == "asb"
+                        and re.fullmatch(r"asb-[0-9a-f]{32}", owner["asb.attempt"] or "")
+                        and re.fullmatch(r"[0-9a-f]{32}", owner["asb.recovery"] or "")
+                        and re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(candidate, "id", ""))
+                        and candidate.attrs.get("Os") == "linux"
+                        and candidate.attrs.get("Architecture") == ("arm64" if arch in ("arm64", "aarch64") else "amd64")):
+                    verified.append((candidate, owner))
+            if len(verified) == 1:
+                image, owner = verified[0]
+                return image, {"status":"built", "image_id":image.id, "cache_material_sha256":material_sha256,
+                               "source_owner_labels":owner, "source":"verified-local-material-baseline"}
+            if len(verified) > 1:
+                raise CatalogError("multiple local SWE-bench baselines claim the replay material; preserve them and repair the cache")
         try:
             image = client.images.get(name)
         except docker.errors.ImageNotFound as error:

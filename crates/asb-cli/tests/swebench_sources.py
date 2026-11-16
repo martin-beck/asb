@@ -172,6 +172,9 @@ class SourceContracts(unittest.TestCase):
         source_receipt = {'source':'verified-local-material-cache',
                           'cache_material_sha256':material}
         self.assertEqual(verified_replay_material(source_receipt, material), material)
+        baseline_receipt = {'source':'verified-local-material-baseline',
+                            'cache_material_sha256':material}
+        self.assertEqual(verified_replay_material(baseline_receipt, material), material)
         self.assertIsNone(verified_replay_material(source_receipt, None))
         with self.assertRaisesRegex(sources.CatalogError, 'expected verified material identity'):
             verified_replay_material(source_receipt, 'C' * 64)
@@ -227,6 +230,45 @@ class SourceContracts(unittest.TestCase):
             image.attrs['Architecture'] = 'amd64'
             with self.assertRaisesRegex(sources.CatalogError, 'identity, ownership or architecture'):
                 sources.resolve_image(client, 'swebench/sweb.eval.x86_64.fixture', forbidden, host_arch='aarch64', offline=True, material_sha256=digest)
+    def test_replay_recovers_verified_material_from_a_retained_baseline(self):
+        class ImageNotFound(Exception): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        requests, exceptions = ModuleType('requests'), ModuleType('requests.exceptions')
+        docker.errors, requests.exceptions = errors, exceptions
+        errors.DockerException, errors.ImageNotFound = Exception, ImageNotFound
+        exceptions.RequestException = Exception
+        digest = 'a' * 64
+        labels = {
+            'asb.owner': 'asb', 'asb.attempt': 'asb-' + 'b' * 32,
+            'asb.recovery': 'c' * 32, 'asb.cache': 'swebench-prepared-baseline-v2',
+            'asb.material-sha256': digest,
+        }
+        baseline = SimpleNamespace(
+            id='sha256:' + 'd' * 64,
+            attrs={'Architecture': 'arm64', 'Os': 'linux', 'Config': {'Labels': labels}},
+        )
+        def missing(_name):
+            raise ImageNotFound()
+        client = SimpleNamespace(images=SimpleNamespace(get=missing, list=lambda **_kwargs: [baseline]))
+        def forbidden(*_args):
+            raise AssertionError('offline replay must not access network or build')
+        with patch.dict(sys.modules, {'docker': docker, 'docker.errors': errors,
+                                      'requests': requests, 'requests.exceptions': exceptions}):
+            found, receipt = sources.resolve_image(
+                client, 'swebench/sweb.eval.x86_64.fixture', forbidden,
+                host_arch='aarch64', offline=True, material_sha256=digest,
+            )
+        self.assertIs(found, baseline)
+        self.assertEqual(receipt['source'], 'verified-local-material-baseline')
+        labels['asb.cache'] = 'untrusted'
+        with patch.dict(sys.modules, {'docker': docker, 'docker.errors': errors,
+                                      'requests': requests, 'requests.exceptions': exceptions}), \
+                self.assertRaisesRegex(sources.CatalogError, 'prepare it before replay'):
+            sources.resolve_image(
+                client, 'swebench/sweb.eval.x86_64.fixture', forbidden,
+                host_arch='aarch64', offline=True, material_sha256=digest,
+            )
+
     def test_source_cache_tag_requires_a_canonical_material_digest(self):
         self.assertEqual(sources.material_cache_tag("a" * 64), "asb-swebench-material:" + "a" * 64)
         for value in (None, "", "a" * 63, "A" * 64, "g" * 64, "a" * 64 + "/other"):
