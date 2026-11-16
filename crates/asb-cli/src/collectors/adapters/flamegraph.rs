@@ -289,17 +289,16 @@ impl measurements::Session {
             self.tool_dir.as_deref(),
             "perf",
         ));
-        script.arg("script");
+        script.arg("script").env("DEBUGINFOD_URLS", "");
         let mut partial_symbols = false;
-        if let Some(cache) = self.artifact(super::super::SharedArtifact::PerfSymbolCache) {
-            script.env("HOME", cache).env("DEBUGINFOD_URLS", "");
-            if let Some((symfs, partial)) = super::perf::symfs_options(cache) {
-                script.arg("--symfs").arg(symfs);
-                if partial {
-                    script.arg("--no-inline");
-                }
-                partial_symbols = partial;
+        if let Some((symfs, partial)) =
+            super::perf::usable_symfs(self.artifact(super::super::SharedArtifact::PerfSymbolCache))
+        {
+            script.arg("--symfs").arg(symfs);
+            if partial {
+                script.arg("--no-inline");
             }
+            partial_symbols = partial;
         }
         let script = script
             .arg("-i")
