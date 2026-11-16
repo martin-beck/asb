@@ -277,6 +277,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         "report": "report.html",
         "agent_reports": agent_report_files(prepared).into_iter().filter(|name| name.ends_with(".html")).collect::<Vec<_>>(),
         "concurrency_report": concurrency::REPORT_FILE,
+        "agent_concurrency_report": concurrency::AGENT_REPORT_FILE,
         "benchmarks": benchmark_rows,
         "graphs": graphs,
     });
