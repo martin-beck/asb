@@ -381,6 +381,11 @@ impl ManagedGate {
             let id = self.id();
             if let Some(control) = self.control.as_mut() {
                 control.observe(id, true);
+                // The guardian's exit proves it flushed its control stream,
+                // but the final principal-exit frame can become readable just
+                // after the pre-wait poll above. Consume it before callers
+                // classify a settled capture as lacking a principal result.
+                control.poll(id).map_err(incompatible)?;
             }
             let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(format!(
                 "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} program={} gate_pid={} exit={status:?}",
@@ -457,6 +462,20 @@ impl ManagedGate {
 
     pub(crate) fn principal_exit(&self) -> Option<super::control::PrincipalExit> {
         self.control.as_ref().and_then(|control| control.exited)
+    }
+
+    /// Drain a final principal-control frame after the guardian has settled.
+    /// The child exit makes the stream finite, but a nonblocking poll may have
+    /// raced the final frame by one scheduler turn.
+    pub(crate) fn refresh_principal_exit(
+        &mut self,
+    ) -> io::Result<Option<super::control::PrincipalExit>> {
+        let id = self.id();
+        if let Some(control) = self.control.as_mut() {
+            control.poll(id)?;
+            return Ok(control.exited);
+        }
+        Ok(None)
     }
 
     pub(crate) fn principal_observation(&self) -> crate::process_termination::Observation {
