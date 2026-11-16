@@ -68,6 +68,13 @@ pub(super) fn symfs_options(cache: &std::path::Path) -> Option<(std::path::PathB
     symfs.is_dir().then_some((symfs, no_id > 0 || missing > 0))
 }
 
+/// Return decoded-symbol inputs only after custody published its completion
+/// marker. An unfinished cache may contain partial or transient image copies;
+/// it is evidence, not a valid perf lookup home.
+pub(super) fn usable_symfs(cache: Option<&std::path::Path>) -> Option<(std::path::PathBuf, bool)> {
+    cache.and_then(symfs_options)
+}
+
 impl CollectorAdapter for PerfCollector {
     fn report_command(&self) -> ReportCommand {
         ReportCommand {
@@ -321,9 +328,7 @@ fn validate_record(
         .arg("validate-v1")
         .arg(executable)
         .arg(&artifact);
-    let symfs = session
-        .artifact(SharedArtifact::PerfSymbolCache)
-        .and_then(symfs_options);
+    let symfs = usable_symfs(session.artifact(SharedArtifact::PerfSymbolCache));
     if let Some((path, partial)) = &symfs {
         launch.arg(path);
         if *partial {
@@ -332,9 +337,6 @@ fn validate_record(
     }
     let (mut command, route) = measurements::producer_command(&mut launch)?;
     configure_offline_decoder_environment(&mut command, &session.dir);
-    if let Some(cache) = session.artifact(SharedArtifact::PerfSymbolCache) {
-        command.env("HOME", cache);
-    }
     let mut captures = [
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stdout"))?,
         crate::evidence::Capture::create(&session.dir.join("perf-validation.stderr"))?,
@@ -1119,31 +1121,32 @@ mod tests {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
         std::fs::create_dir_all(root.join("symfs")).unwrap();
         let marker = root.join("symfs-ready");
-        assert!(super::symfs_options(&root).is_none());
+        assert!(super::usable_symfs(Some(&root)).is_none());
         std::fs::write(
             &marker,
             r#"{"schema_version":1,"missing_no_build_id_images":0}"#,
         )
         .unwrap();
-        assert!(!super::symfs_options(&root).unwrap().1);
+        assert!(!super::usable_symfs(Some(&root)).unwrap().1);
         std::fs::write(
             &marker,
             r#"{"schema_version":1,"missing_no_build_id_images":0,"missing_build_id_images":2}"#,
         )
         .unwrap();
-        assert!(super::symfs_options(&root).unwrap().1);
+        assert!(super::usable_symfs(Some(&root)).unwrap().1);
         std::fs::write(
             &marker,
             r#"{"schema_version":1,"missing_no_build_id_images":1,"missing_build_id_images":0}"#,
         )
         .unwrap();
-        assert!(super::symfs_options(&root).unwrap().1);
+        assert!(super::usable_symfs(Some(&root)).unwrap().1);
         std::fs::write(
             &marker,
             r#"{"schema_version":1,"missing_no_build_id_images":0,"missing_build_id_images":-1}"#,
         )
         .unwrap();
-        assert!(super::symfs_options(&root).is_none());
+        assert!(super::usable_symfs(Some(&root)).is_none());
+        assert!(super::usable_symfs(None).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
