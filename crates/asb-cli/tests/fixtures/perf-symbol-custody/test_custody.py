@@ -9,6 +9,8 @@ import stat
 import struct
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +21,51 @@ spec.loader.exec_module(module)
 
 
 class CustodyTest(unittest.TestCase):
+    def test_target_exit_before_activation_ack_is_explicit_nonfatal_custody_evidence(self):
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-startup-race-') as directory:
+            root = Path(directory)
+            request = root / 'request'
+            ack = root / 'ack'
+            os.mkfifo(request, 0o600)
+            os.mkfifo(ack, 0o600)
+            argv = [
+                'helper', '123', '456', str(os.getuid()), str(os.getgid()), str(root), '/bin/false',
+                str(root), f'fifo:{request},{ack}',
+            ]
+            output = io.StringIO()
+            result = []
+
+            def execute():
+                with mock.patch.object(module.sys, 'argv', argv), \
+                     mock.patch.object(module, 'identity', side_effect=[(1, 456), None]), \
+                     mock.patch.object(module.signal, 'signal'), \
+                     contextlib.redirect_stdout(output):
+                    result.append(module.main())
+
+            control = os.open(request, os.O_RDWR | os.O_NONBLOCK)
+            acknowledgement = os.open(ack, os.O_RDWR | os.O_NONBLOCK)
+            thread = threading.Thread(target=execute)
+            thread.start()
+            os.write(control, b'enable\n')
+            for _ in range(100):
+                try:
+                    if os.read(acknowledgement, 4) == b'ack\n':
+                        break
+                except BlockingIOError:
+                    pass
+                time.sleep(0.01)
+            else:
+                self.fail('symbol helper did not acknowledge activation')
+            thread.join(timeout=2)
+            os.close(control)
+            os.close(acknowledgement)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [0])
+            evidence = json.loads(output.getvalue())
+            self.assertEqual(evidence['custody_status'], 'target-exited-before-custody')
+            self.assertIsNone(evidence['recorded_images'])
+            self.assertEqual(evidence['retained_images'], 0)
+
     def test_transient_guest_copy_retries_are_bounded_and_do_not_starve_other_paths(self):
         schedule = module.GuestCaptureSchedule(limit=2)
         first, second, third = ('first', 1), ('second', 2), ('third', 3)
