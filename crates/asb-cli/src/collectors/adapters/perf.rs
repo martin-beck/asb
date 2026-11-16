@@ -217,14 +217,21 @@ impl CollectorAdapter for PerfCollector {
     fn attach_isolated_pid(
         &self,
         session: &mut measurements::Session,
-        _pid: u32,
+        pid: u32,
     ) -> Result<(), String> {
         // The target is a verified daemon-host PID, but rootless Docker may
         // still reject unprivileged perf_event_open across its user namespace.
         // Prefer an existing non-interactive sudo route before the launch gate
         // resumes; never probe the deliberately stopped target.
         let _ = session.enable_passwordless_sudo_collector("perf");
-        Ok(())
+        session.stage_isolated_perf(pid)
+    }
+    fn activate_isolated_pid(
+        &self,
+        session: &mut measurements::Session,
+        pid: u32,
+    ) -> Result<(), String> {
+        session.activate_staged_perf(pid)
     }
 }
 
@@ -637,6 +644,21 @@ use std::io::{BufRead, Read};
 struct PerfState {
     enabled: bool,
     cpu_wide: Option<Vec<u32>>,
+    #[cfg(target_os = "linux")]
+    staged: Option<StagedPerf>,
+}
+
+/// Perf is started against a verified stopped isolated target, but its events
+/// remain disabled until the workload proves effective release. This avoids
+/// racing `perf -p --inherit` against the target's first short-lived children.
+#[cfg(target_os = "linux")]
+struct StagedPerf {
+    record: Collector,
+    record_ready: readiness::Readiness,
+    stat: Collector,
+    stat_ready: readiness::Readiness,
+    data: std::path::PathBuf,
+    cpu_wide: Option<Vec<u32>>,
 }
 
 fn selected_record_args(pid: u32, cpu_wide: Option<&[u32]>) -> Result<Vec<String>, String> {
@@ -682,6 +704,17 @@ impl measurements::Session {
         if !self.state::<PerfState>().borrow().enabled {
             return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        {
+            self.stage_isolated_perf(pid)?;
+            self.activate_staged_perf(pid)
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.start_perf_unstaged(pid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn start_perf_unstaged(&mut self, pid: u32) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         validate_agent_target(pid, self.measurement_target())?;
         #[cfg(target_os = "linux")]
@@ -816,6 +849,145 @@ impl measurements::Session {
             ));
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stage_isolated_perf(&mut self, pid: u32) -> Result<(), String> {
+        if !self.state::<PerfState>().borrow().enabled {
+            return Ok(());
+        }
+        validate_agent_target(pid, self.measurement_target())?;
+        if self.state::<PerfState>().borrow().staged.is_some() {
+            return Err("perf collector activation was already staged".into());
+        }
+        let directory = self
+            .dir
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve perf capture directory: {error}"))?;
+        let record_ready = readiness::Readiness::new(&directory, "record")
+            .map_err(|error| format!("cannot prepare perf activation: {error}"))?;
+        let data = self.dir.join("perf.data");
+        reserve_recording_artifact(&data)?;
+        let captures = [
+            crate::evidence::Capture::create(&self.dir.join("perf.stdout"))?,
+            crate::evidence::Capture::create(&self.dir.join("perf.stderr"))?,
+        ];
+        let cpu_wide = self.state::<PerfState>().borrow().cpu_wide.clone();
+        let record_args = selected_record_args(pid, cpu_wide.as_deref())?;
+        let (mut command, route) = self.collector_command("perf")?;
+        command.args(&record_args).args(["-o"]).arg(&data).args([
+            "-D",
+            "-1",
+            "--control",
+            &record_ready.argument(),
+        ]);
+        let record =
+            Collector::spawn("perf", &ADAPTER, command, route, captures).map_err(|error| {
+                measurements::configured_collector_start_error("perf", "perf", &error)
+            })?;
+
+        let stat_ready = readiness::Readiness::new(&directory, "stat")
+            .map_err(|error| format!("cannot prepare perf-stat activation: {error}"))?;
+        let hardware_events = super::arm_pmu::events(self)
+            .unwrap_or_else(|| super::agentsysperf::telemetry_events(self));
+        measurements::write_json(
+            &self.dir.join("perf-stat-plan.json"),
+            &serde_json::json!({
+                "schema_version":1, "scope":"agent-process-tree", "counter_mode":"unscaled-observed",
+                "root":self.measurement_target(), "groups":hardware_events,
+                "excluded_controller_pid":std::process::id(), "excluded_guardian":self.measurement_guardian(),
+                "inherit":true, "system_wide":false,
+            }),
+        )?;
+        let captures = [
+            crate::evidence::Capture::create(&self.dir.join("perf-stat.stdout"))?,
+            crate::evidence::Capture::create(&self.dir.join("perf-stat.stderr"))?,
+        ];
+        let (mut command, route) = self.collector_command("perf")?;
+        command
+            .args(stat_args(pid, measurement_interval_ms(), &hardware_events))
+            .args(["-D", "-1", "--control", &stat_ready.argument()]);
+        let stat = match Collector::spawn("perf-stat", &ADAPTER, command, route, captures) {
+            Ok(collector) => collector,
+            Err(error) => {
+                return Err(measurements::configured_collector_start_error(
+                    "perf",
+                    "perf",
+                    &record.startup_failure(error, self._directory_owner.clone()),
+                ));
+            }
+        };
+        self.state::<PerfState>().borrow_mut().staged = Some(StagedPerf {
+            record,
+            record_ready,
+            stat,
+            stat_ready,
+            data,
+            cpu_wide,
+        });
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn activate_staged_perf(&mut self, pid: u32) -> Result<(), String> {
+        if !self.state::<PerfState>().borrow().enabled {
+            return Ok(());
+        }
+        validate_agent_target(pid, self.measurement_target())?;
+        let mut staged = self
+            .state::<PerfState>()
+            .borrow_mut()
+            .staged
+            .take()
+            .ok_or("perf collector was not staged before isolated activation")?;
+        let record_timeout = record_activation_timeout(staged.cpu_wide.is_some());
+        if let Err(reason) = staged
+            .record_ready
+            .enable(record_timeout, || staged.record.startup_exit())
+        {
+            let detail = staged
+                .record
+                .startup_failure(reason, self._directory_owner.clone());
+            let _ = staged.stat.startup_failure(
+                "perf record activation failed before perf-stat activation".into(),
+                self._directory_owner.clone(),
+            );
+            return Err(measurements::configured_collector_start_error(
+                "perf", "perf", &detail,
+            ));
+        }
+        if let Err(reason) = staged
+            .stat_ready
+            .enable(Duration::from_secs(10), || staged.stat.startup_exit())
+        {
+            let detail = staged
+                .stat
+                .startup_failure(reason, self._directory_owner.clone());
+            let _ = staged.record.startup_failure(
+                "perf-stat activation failed after perf record activation".into(),
+                self._directory_owner.clone(),
+            );
+            return Err(measurements::configured_collector_start_error(
+                "perf", "perf", &detail,
+            ));
+        }
+        self.set_artifact(SharedArtifact::StackSamples, staged.data);
+        if let Some(cpus) = staged.cpu_wide {
+            measurements::write_json(
+                &self.dir.join("perf-record-scope.json"),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "scope": "cpu-wide",
+                    "logical_cpus": cpus,
+                    "perf_stat_scope": "agent-process-tree",
+                    "warning": "CPU-wide samples can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
+                }),
+            )?;
+        }
+        self.collectors.push(staged.record);
+        self.collectors.push(staged.stat);
+        self.start_perf_symbols(pid)
+            .map_err(|error| measurements::configured_collector_start_error("perf", "perf", &error))
     }
 }
 
