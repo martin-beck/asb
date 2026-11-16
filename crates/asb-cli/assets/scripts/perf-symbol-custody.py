@@ -739,6 +739,30 @@ def main():
     guest_noid = 0
     guest_failures = 0
     stopping = False
+    custody_status = 'active'
+
+    def report_and_exit(status):
+        """Publish bounded evidence when the target exits during activation.
+
+        Perf attaches before this helper starts. A short replay can finish in
+        the hand-off window, which leaves the valid perf capture intact but
+        makes live symbol custody impossible.
+        """
+        print(json.dumps({
+            'schema_version': 1,
+            'scope': 'sampled-live-mappings-and-recorded-build-ids',
+            'custody_status': status,
+            'retained_images': 0,
+            'retained_bytes': 0,
+            'skipped_observations': 0,
+            'interval_ms': 500,
+            'recorded_images': None,
+            'guest_no_build_id_images': 0,
+            'guest_ambiguous_paths': 0,
+            'guest_capture_failures': 0,
+            'limitation': 'the measured process exited before symbol custody could begin',
+        }, sort_keys=True), flush=True)
+        return 0
 
     def stop(_signum, _frame):
         nonlocal stopping
@@ -768,15 +792,21 @@ def main():
                 guest_pid = namespace_pid(root, start)
                 if guest_script and guest_pid:
                     guest_roots = [(guest_pid, start)]
-            after = identity(root)
-            if after is None or after[1] != start:
-                if root_fd is not None:
-                    os.close(root_fd)
-                return 2
         with open(request, 'rb', buffering=0) as reader, open(ack, 'wb', buffering=0) as writer:
             if reader.read(7) != b'enable\n':
                 return 2
             writer.write(b'ack\n')
+            current = identity(root)
+            if current is None or current[1] != start:
+                if root_fd is not None:
+                    os.close(root_fd)
+                return report_and_exit('target-exited-before-custody')
+            if recorder:
+                current_recorder = identity(recorder[0])
+                if current_recorder is None or current_recorder[1] != recorder[1]:
+                    if root_fd is not None:
+                        os.close(root_fd)
+                    return report_and_exit('recorder-exited-before-custody')
     while not stopping:
         members = tree(members)
         if members is None:
@@ -895,6 +925,7 @@ def main():
         if root_fd is not None:
             os.close(root_fd)
     print(json.dumps({'schema_version': 1, 'scope': 'sampled-live-mappings-and-recorded-build-ids',
+                      'custody_status': custody_status,
                       'retained_images': len(seen) + (recorded['recovered_recorded_images'] if recorded else 0), 'retained_bytes': size,
                       'skipped_observations': skipped, 'interval_ms': 500,
                       'recorded_images': recorded,
