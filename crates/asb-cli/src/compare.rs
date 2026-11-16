@@ -549,7 +549,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str("<section><a href=\"#replica-distributions\">Jump to concurrency distributions by agent and trial</a></section>");
     }
     html.push_str(&analysis::cohort_html(&prepared.cohort_analysis));
-    html.push_str("<section class=\"explain\"><strong>Derived reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>. For bottleneck analysis across configured replica counts, open the <a href=\"concurrency-report.html\">concurrency scaling report</a>.</p></section>");
+    html.push_str("<section class=\"explain\"><strong>Derived reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>. For bottleneck analysis across configured replica counts, open the <a href=\"concurrency-report.html\">per-agent concurrency scaling report</a> or the <a href=\"agent-concurrency-report.html\">cross-agent concurrency report</a>.</p></section>");
     if let Some(intent) = prepared
         .data
         .request

@@ -1633,12 +1633,22 @@ fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
 #[test]
 fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     let fixture = Fixture::new();
-    let manifest = fixture.seed("", 3);
-    for (index, concurrency) in [1, 2, 4].into_iter().enumerate() {
+    let manifest = fixture.seed("", 6);
+    for (index, (agent, concurrency)) in [
+        ("alpha", 1),
+        ("alpha", 2),
+        ("alpha", 4),
+        ("beta", 1),
+        ("beta", 2),
+        ("beta", 4),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         fixture.write(
             &format!("{index}.toml"),
             format!(
-                "agent='alpha'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency={concurrency}\n"
+                "agent='{agent}'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency={concurrency}\n"
             ),
         );
         for replica in 1..=concurrency {
@@ -1707,10 +1717,39 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     let comparison: Value =
         serde_json::from_slice(&fs::read(directory.join("comparison.json")).unwrap()).unwrap();
     assert_eq!(comparison["concurrency_report"], "concurrency-report.html");
+    assert_eq!(
+        comparison["agent_concurrency_report"],
+        "agent-concurrency-report.html"
+    );
+    let agent_report = fs::read_to_string(directory.join("agent-concurrency-report.html")).unwrap();
+    assert!(agent_report.contains("Agent concurrency comparison"));
+    assert!(agent_report.contains("alpha"));
+    assert!(agent_report.contains("beta"));
+    assert!(agent_report.contains("Hover values · wheel zoom · drag pan"));
+    let agent_graphs = fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("agent-concurrency-") && name.ends_with(".svg")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(agent_graphs.len() >= 2);
+    let agent_scalar = agent_graphs
+        .iter()
+        .find(|path| fs::read_to_string(path).unwrap().contains("latency_ms"))
+        .unwrap();
+    let agent_scalar = fs::read_to_string(agent_scalar).unwrap();
+    assert!(agent_scalar.contains("data-label=\"alpha\""));
+    assert!(agent_scalar.contains("data-label=\"beta\""));
     assert!(
         fs::read_to_string(&report)
             .unwrap()
-            .contains("concurrency-report.html")
+            .contains("agent-concurrency-report.html")
     );
 }
 
