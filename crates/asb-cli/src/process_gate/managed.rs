@@ -381,6 +381,11 @@ impl ManagedGate {
             let id = self.id();
             if let Some(control) = self.control.as_mut() {
                 control.observe(id, true);
+                // The guardian's exit proves it flushed its control stream,
+                // but the final principal-exit frame can become readable just
+                // after the pre-wait poll above. Consume it before callers
+                // classify a settled capture as lacking a principal result.
+                control.poll(id).map_err(incompatible)?;
             }
             let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(format!(
                 "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} program={} gate_pid={} exit={status:?}",
