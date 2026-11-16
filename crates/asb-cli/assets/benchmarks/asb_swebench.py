@@ -337,22 +337,30 @@ def evaluate_submission(catalog_path, task_id, patch_path, artifacts, timeout, e
                                   official_report=str(instance_path.relative_to(artifacts)),
                                   official_test_application=TEST_APPLICATION_RECEIPT)
                     if not receipt_path.is_file():
+                        # The pinned upstream SDK proves patch application in its
+                        # per-task report but does not write ASB's retained-artifact
+                        # receipt. Derive that receipt only after validating the
+                        # official report above, so a valid official result is never
+                        # downgraded solely by the missing adapter-owned file.
+                        atomic_write(receipt_path, encoded({
+                            "schema_version": 1,
+                            "harness_revision": HARNESS_REVISION,
+                            "task_id": task_id,
+                            "official_test_patch_applied": report[task_id].get("patch_successfully_applied") is True,
+                        }))
+                    receipt = json.loads(read_limited(receipt_path, MAX_METADATA_BYTES))
+                    if (receipt.get("schema_version") != 1
+                            or receipt.get("harness_revision") != HARNESS_REVISION
+                            or receipt.get("task_id") != task_id
+                            or type(receipt.get("official_test_patch_applied")) is not bool):
                         result.update(outcome="evaluation_error",
-                                      reason="official_test_application_missing")
+                                      reason="official_test_application_invalid")
+                    elif receipt["official_test_patch_applied"]:
+                        result.update(resolved=resolved, outcome="resolved" if resolved else "unresolved",
+                                      reason=None if resolved else "official_tests_not_resolved")
                     else:
-                        receipt = json.loads(read_limited(receipt_path, MAX_METADATA_BYTES))
-                        if (receipt.get("schema_version") != 1
-                                or receipt.get("harness_revision") != HARNESS_REVISION
-                                or receipt.get("task_id") != task_id
-                                or type(receipt.get("official_test_patch_applied")) is not bool):
-                            result.update(outcome="evaluation_error",
-                                          reason="official_test_application_invalid")
-                        elif receipt["official_test_patch_applied"]:
-                            result.update(resolved=resolved, outcome="resolved" if resolved else "unresolved",
-                                          reason=None if resolved else "official_tests_not_resolved")
-                        else:
-                            result.update(outcome="evaluation_error",
-                                          reason="official_test_patch_not_applied")
+                        result.update(outcome="evaluation_error",
+                                      reason="official_test_patch_not_applied")
             except subprocess.TimeoutExpired:
                 result.update(outcome="evaluation_timeout", reason="official_harness_deadline_exceeded")
             except InterruptedError:
