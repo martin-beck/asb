@@ -464,6 +464,20 @@ impl ManagedGate {
         self.control.as_ref().and_then(|control| control.exited)
     }
 
+    /// Drain a final principal-control frame after the guardian has settled.
+    /// The child exit makes the stream finite, but a nonblocking poll may have
+    /// raced the final frame by one scheduler turn.
+    pub(crate) fn refresh_principal_exit(
+        &mut self,
+    ) -> io::Result<Option<super::control::PrincipalExit>> {
+        let id = self.id();
+        if let Some(control) = self.control.as_mut() {
+            control.poll(id)?;
+            return Ok(control.exited);
+        }
+        Ok(None)
+    }
+
     pub(crate) fn principal_observation(&self) -> crate::process_termination::Observation {
         self.control.as_ref().map_or_else(
             crate::process_termination::Observation::default,

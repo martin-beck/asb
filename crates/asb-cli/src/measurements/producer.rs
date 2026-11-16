@@ -345,8 +345,14 @@ fn capture(
                 exit = gate.principal_exit().map(|principal| principal.status());
                 if observed.map_err(|error| error.to_string())?.is_some() {
                     cleanup_confirmed = true;
-                    drain = Some(Instant::now() + Duration::from_secs(1));
+                    drain = Some(Instant::now() + Duration::from_secs(5));
                 }
+            }
+            if drain.is_some() && exit.is_none() {
+                exit = gate
+                    .refresh_principal_exit()
+                    .map_err(|error| error.to_string())?
+                    .map(|principal| principal.status());
             }
             if stop.load(Ordering::Acquire) && !stopped && drain.is_none() {
                 stopped = true;
@@ -396,10 +402,9 @@ fn capture(
                     file.flush()
                         .map_err(|error| format!("cannot flush collector capture: {error}"))?;
                 }
-                if exit.is_none() {
-                    return Err("collector principal exit is unknown despite guardian settlement; raw diagnostics retained".into());
+                if exit.is_some() {
+                    return Ok(());
                 }
-                return Ok(());
             }
             if drain.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err("collector pipe remained open after confirmed guardian quiescence; raw capture retained".into());
