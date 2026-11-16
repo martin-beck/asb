@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+mod concurrency;
 mod coverage;
 mod distributions;
 mod metric_identity;
@@ -245,6 +246,7 @@ fn generate_owned_with_links(
     let prepared = PreparedReport::prepare(validated)?;
     let mut files = prepared.graph_names();
     files.extend(rendering::agent_report_files(&prepared));
+    files.extend(concurrency::report_files(&prepared));
     files.extend([
         "comparison.json".into(),
         "cohort-analysis.json".into(),
@@ -547,7 +549,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str("<section><a href=\"#replica-distributions\">Jump to concurrency distributions by agent and trial</a></section>");
     }
     html.push_str(&analysis::cohort_html(&prepared.cohort_analysis));
-    html.push_str("<section class=\"explain\"><strong>Agent aggregate reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>.</p></section>");
+    html.push_str("<section class=\"explain\"><strong>Derived reports</strong><p>Compare agents across every collected scalar without the individual benchmark rows: <a href=\"agent-summary-report.html\">mean, median, and p95</a> · <a href=\"agent-distribution-report.html\">sorted value distributions</a> · <a href=\"agent-histogram-report.html\">histograms</a>. For bottleneck analysis across configured replica counts, open the <a href=\"concurrency-report.html\">concurrency scaling report</a>.</p></section>");
     if let Some(intent) = prepared
         .data
         .request

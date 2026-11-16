@@ -63,6 +63,10 @@ assert.ok(matrixUsed,'browser screen matrix must account for letterboxing rather
 assert.equal(tooltip.textContent,'Nearest displayed observed sample: bug-fix:default: 1 @ 0 ms');
 points[0].fire('pointerenter',{clientX:100,clientY:100});
 assert.equal(tooltip.textContent,'bug-fix:default: 1 @ 0 ms');
+points[0].dataset.concurrency='4';
+points[0].fire('pointerenter',{clientX:100,clientY:100});
+assert.equal(tooltip.textContent,'bug-fix:default: 1 @ concurrency 4');
+delete points[0].dataset.concurrency;
 const original=svg.getAttribute('viewBox');
 svg.fire('wheel',{deltaY:-1,clientX:600,clientY:200,preventDefault(){}});
 assert.notEqual(svg.getAttribute('viewBox'),original);

@@ -202,7 +202,14 @@ pane, or add them to `measurements.collectors`. Linux needs no extra tool or
 privilege for these collectors. For an existing configuration, enable them with
 `ASB_MEASURE_AGENT_MEMORY=1 ASB_MEASURE_AGENT_WORKERS=1 asb run CONFIG --measurements DIR`.
 Then `asb compare SWEEP.toml` writes one all-agent bar-chart SVG per metric.
-For concurrent configurations the HTML instead shows replica distributions.
+For concurrent configurations the HTML instead shows replica distributions and
+links `concurrency-report.html`. The dedicated concurrency report groups only
+equivalent agent, trial, provider, model, workload module, and dataset inputs;
+it puts configured concurrency on each graph's x-axis and the original metric
+unit on its y-axis. Individual replica observations remain visible and the
+connected marker is their median at that concurrency. Collector time series use
+one observed mean per replica, while their complete series remain in
+`comparison.json`.
 
 Memory is the sampled peak aggregate resident memory (RSS, MiB) of processes
 running the selected agent executable or script entry point. It is **not**
@@ -478,6 +485,12 @@ quartiles, Tukey whiskers and one point per available replica. Counts disclose
 missing values. Series charts use one mean of the available samples per replica;
 the complete timestamped series remain in `comparison.json`. Filters show or
 hide agent distributions without recalculating their statistics.
+
+The generated `concurrency-report.html` is the complementary bottleneck view:
+it keeps one agent and trial identity fixed, then compares every scalar and
+collector-series mean across configured concurrency values. Its SVG charts use
+the same hover, zoom, pan, highlight, enlarge, and download controls as the
+main comparison report.
 Original per-run SVGs remain available as linked analysis artifacts.
 
 Add `--parquet` to export `observations.parquet` alongside the report. It contains
