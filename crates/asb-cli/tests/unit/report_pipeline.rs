@@ -1631,6 +1631,90 @@ fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
 }
 
 #[test]
+fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
+    let fixture = Fixture::new();
+    let manifest = fixture.seed("", 3);
+    for (index, concurrency) in [1, 2, 4].into_iter().enumerate() {
+        fixture.write(
+            &format!("{index}.toml"),
+            format!(
+                "agent='alpha'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency={concurrency}\n"
+            ),
+        );
+        for replica in 1..=concurrency {
+            let measurements = if concurrency == 1 {
+                "measurements".into()
+            } else {
+                format!("measurements-concurrency-{replica}")
+            };
+            fixture.write(
+                &format!("sweep-results/{index:03}-{index}/{measurements}/run.json"),
+                json!({"status":"completed","elapsed_ms":10 * concurrency + replica}).to_string(),
+            );
+            fixture.write(
+                &format!("sweep-results/{index:03}-{index}/{measurements}/profile.json"),
+                json!({
+                    "metrics":{"latency_ms": 10.0 * concurrency as f64 + replica as f64},
+                    "series":{"profile.queue_depth":[concurrency as f64, concurrency as f64 + 2.0]},
+                    "series_timestamps":{"profile.queue_depth":[0, 100]}
+                })
+                .to_string(),
+            );
+        }
+    }
+
+    let report = generate(manifest.to_str().unwrap(), &mut Vec::new()).unwrap();
+    let directory = report.parent().unwrap();
+    let concurrency_report = fs::read_to_string(directory.join("concurrency-report.html")).unwrap();
+    assert!(concurrency_report.contains("Concurrency scaling comparison"));
+    assert!(concurrency_report.contains("alpha"));
+    assert!(concurrency_report.contains("bug-fix"));
+    assert!(concurrency_report.contains("Hover values · wheel zoom · drag pan"));
+    assert!(concurrency_report.contains("chart-expand"));
+    let graphs = fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("concurrency-") && name.ends_with(".svg"))
+        })
+        .collect::<Vec<_>>();
+    assert!(graphs.len() >= 2);
+    let scalar = graphs
+        .iter()
+        .find(|path| fs::read_to_string(path).unwrap().contains("latency_ms"))
+        .unwrap();
+    let scalar = fs::read_to_string(scalar).unwrap();
+    assert!(scalar.contains("configured concurrency (replicas)"));
+    assert!(scalar.contains("data-concurrency=\"1\""));
+    assert!(scalar.contains("data-concurrency=\"4\""));
+    assert!(scalar.contains("concurrency-median"));
+    let series = graphs
+        .iter()
+        .find(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("profile.queue_depth")
+        })
+        .unwrap();
+    assert!(
+        fs::read_to_string(series)
+            .unwrap()
+            .contains("per-replica series mean")
+    );
+    let comparison: Value =
+        serde_json::from_slice(&fs::read(directory.join("comparison.json")).unwrap()).unwrap();
+    assert_eq!(comparison["concurrency_report"], "concurrency-report.html");
+    assert!(
+        fs::read_to_string(&report)
+            .unwrap()
+            .contains("concurrency-report.html")
+    );
+}
+
+#[test]
 fn signed_scalar_graphs_retain_observations_and_finite_zero_based_geometry() {
     let fixture = Fixture::new();
     let cases = [

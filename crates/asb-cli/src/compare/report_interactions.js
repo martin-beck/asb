@@ -43,9 +43,10 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
     if(observed.classList.contains('series-point')){
       for(const line of svg.querySelectorAll('.series'))if(line.dataset.seriesIndex===observed.dataset.seriesIndex)line.classList.add('hovered');
     }
+    const concurrency=observed.dataset.concurrency;
     const time=observed.dataset.timestamp;
     const index=observed.dataset.sampleIndex;
-    const location=time!==undefined?' @ '+time+' ms':index!==undefined?' @ sample '+index:'';
+    const location=concurrency!==undefined?' @ concurrency '+concurrency:time!==undefined?' @ '+time+' ms':index!==undefined?' @ sample '+index:'';
     tooltip.textContent=prefix+observed.dataset.label+': '+observed.dataset.value+location;
     tooltip.classList.add('visible');
     positionTooltip(event);

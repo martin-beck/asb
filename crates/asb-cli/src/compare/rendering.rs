@@ -276,6 +276,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         "comparison_directory": prepared.data.request.comparison_dir,
         "report": "report.html",
         "agent_reports": agent_report_files(prepared).into_iter().filter(|name| name.ends_with(".html")).collect::<Vec<_>>(),
+        "concurrency_report": concurrency::REPORT_FILE,
         "benchmarks": benchmark_rows,
         "graphs": graphs,
     });
@@ -293,7 +294,8 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         .map_err(|error| Error::Run(format!("cannot write {}: {error}", summary_path.display())))?;
     writeln!(file).map_err(|error| Error::Run(error.to_string()))?;
     write_html_report(stage, prepared)?;
-    render_agent_reports(stage, prepared)
+    render_agent_reports(stage, prepared)?;
+    concurrency::render(stage, prepared)
 }
 
 fn render_agent_reports(stage: &Path, prepared: &PreparedReport) -> Result<(), Error> {
