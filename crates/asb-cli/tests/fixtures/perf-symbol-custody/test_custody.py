@@ -66,6 +66,34 @@ class CustodyTest(unittest.TestCase):
             self.assertIsNone(evidence['recorded_images'])
             self.assertEqual(evidence['retained_images'], 0)
 
+    def test_unavailable_post_exit_recording_recovery_is_explicit_nonfatal_evidence(self):
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-settlement-unavailable-') as directory:
+            root = Path(directory)
+            argv = [
+                'helper', '123', '456', str(os.getuid()), str(os.getgid()), str(root), '/bin/false',
+                str(root), None, '789', '101112', str(root / 'perf.data'),
+            ]
+            output = io.StringIO()
+            handlers = {}
+
+            def register(signum, handler):
+                handlers[signum] = handler
+
+            def stop_after_recorder_wait(_seconds):
+                handlers[module.signal.SIGINT](module.signal.SIGINT, None)
+
+            with mock.patch.object(module.sys, 'argv', argv), \
+                 mock.patch.object(module, 'tree', return_value=None), \
+                 mock.patch.object(module, 'identity', return_value=None), \
+                 mock.patch.object(module.signal, 'signal', side_effect=register), \
+                 mock.patch.object(module.time, 'sleep', side_effect=stop_after_recorder_wait), \
+                 contextlib.redirect_stdout(output):
+                self.assertEqual(module.main(), 0)
+            evidence = json.loads(output.getvalue())
+            self.assertEqual(evidence['custody_status'], 'active')
+            self.assertIsNone(evidence['recorded_images'])
+            self.assertIn('cannot be recovered', evidence['limitation'])
+
     def test_transient_guest_copy_retries_are_bounded_and_do_not_starve_other_paths(self):
         schedule = module.GuestCaptureSchedule(limit=2)
         first, second, third = ('first', 1), ('second', 2), ('third', 3)
