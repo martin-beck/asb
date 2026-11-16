@@ -417,9 +417,7 @@ fn probe_trace_processor(tool_dir: Option<&Path>) -> Result<(), String> {
     }
 }
 
-use crate::measurements::{
-    Collector, bounded, env_true, escape_svg, parse_float, safe_svg_name, write_unavailable,
-};
+use crate::measurements::{Collector, bounded, escape_svg, parse_float, safe_svg_name};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -866,14 +864,11 @@ impl measurements::Session {
                 }
                 state.trace_marker_output = marker_output;
             }
-            Err(error) if !env_true("ASB_MEASURE_PERFETTO") => write_unavailable(
-                &self.dir.join("perfetto.json"),
-                "perfetto",
-                format!("{error}; install it with `asb tool install perfetto` in this project"),
-            )?,
             Err(error) => {
-                return Err(format!(
-                    "cannot start Perfetto Tracebox (disable with ASB_MEASURE_PERFETTO=0): {error}"
+                return Err(measurements::configured_collector_start_error(
+                    "perfetto",
+                    "perfetto",
+                    &error.to_string(),
                 ));
             }
         }
