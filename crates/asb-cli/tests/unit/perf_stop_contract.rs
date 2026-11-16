@@ -124,7 +124,7 @@ fn perf_record_allows_delayed_flush_without_accepting_incomplete_capture() {
     launch.arg("-I").arg("-S").arg("-u").arg("-c").arg(script);
     let (mut command, route) = measurements::producer_command(&mut launch).unwrap();
     let policy = ADAPTER.producer_policy("perf");
-    assert_eq!(policy.graceful, Some(Duration::from_secs(30)));
+    assert_eq!(policy.graceful, Some(Duration::from_secs(60)));
     let mut producer = measurements::Producer::spawn_with_dependency(
         &mut command,
         route,
