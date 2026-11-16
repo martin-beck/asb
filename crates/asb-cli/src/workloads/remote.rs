@@ -37,11 +37,21 @@ const PROGRESS_POLL: Duration = Duration::from_millis(250);
 const PROGRESS_TRANSCRIPT_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_PRIVATE_REPLAY_INPUT: u64 = 64 * 1024 * 1024;
 
-/// Docker's exec inspection and `/proc` publication are host-global.  Dense
-/// cohorts must not make dozens of stopped-target scans race through the same
-/// short-lived driver trees.
-static STOPPED_TARGET_VERIFICATION: std::sync::OnceLock<std::sync::Mutex<()>> =
+/// Keep checks for one short-lived Docker target ordered without making a
+/// dense cohort verify every independently owned container serially.
+const STOPPED_TARGET_VERIFICATION_SHARDS: usize = 16;
+static STOPPED_TARGET_VERIFICATION: std::sync::OnceLock<Vec<std::sync::Mutex<()>>> =
     std::sync::OnceLock::new();
+
+fn stopped_target_verification_shard(event: &Value) -> usize {
+    let container_id = event["target"]["container_id"].as_str().unwrap_or_default();
+    let hash = container_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    (hash as usize) % STOPPED_TARGET_VERIFICATION_SHARDS
+}
 
 /// Keep a paused target's verified identity adjacent to collector attachment.
 ///
@@ -91,8 +101,12 @@ fn verify_stopped_target_until(
     mut verify: impl FnMut(&Value) -> Result<super::target::LocalTarget, String>,
 ) -> Result<super::target::LocalTarget, String> {
     let retry_deadline = deadline.min(Instant::now() + TARGET_VERIFICATION_RETRY);
-    let _verification = STOPPED_TARGET_VERIFICATION
-        .get_or_init(|| std::sync::Mutex::new(()))
+    let verification = STOPPED_TARGET_VERIFICATION.get_or_init(|| {
+        (0..STOPPED_TARGET_VERIFICATION_SHARDS)
+            .map(|_| std::sync::Mutex::new(()))
+            .collect()
+    });
+    let _verification = verification[stopped_target_verification_shard(event)]
         .lock()
         .map_err(|_| "stopped target verification synchronization failed")?;
     loop {
@@ -2218,6 +2232,44 @@ mod tests {
             "isolated measurement target has invalid identity fields"
         );
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn stopped_target_verification_allows_distinct_owned_containers_to_progress_together() {
+        let first = serde_json::json!({"target": {"container_id": "a".repeat(64)}});
+        let first_shard = super::stopped_target_verification_shard(&first);
+        let second = (0_u16..=u16::MAX)
+            .map(|suffix| {
+                serde_json::json!({
+                    "target": {"container_id": format!("{}{:04x}", "b".repeat(60), suffix)}
+                })
+            })
+            .find(|candidate| super::stopped_target_verification_shard(candidate) != first_shard)
+            .expect("at least one distinct container identity uses another shard");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let verify = |event: serde_json::Value, barrier: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                super::verify_stopped_target_until(
+                    &event,
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                    |_| {
+                        barrier.wait();
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Ok(crate::workloads::target::LocalTarget {
+                            pid: 2,
+                            namespace_pid: 2,
+                            start_time_ticks: 1,
+                            cgroup: std::path::PathBuf::from("/sys/fs/cgroup/fixture"),
+                        })
+                    },
+                )
+            })
+        };
+        let first = verify(first, barrier.clone());
+        let second = verify(second, barrier);
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
     }
 
     #[test]
