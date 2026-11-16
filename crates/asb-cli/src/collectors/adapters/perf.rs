@@ -174,11 +174,11 @@ impl CollectorAdapter for PerfCollector {
         measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
             graceful: match name {
-                "perf-symbol-custody" => Some(std::time::Duration::from_secs(60)),
-                // Large recordings can need longer to flush their final data
-                // and metadata. Symbol custody waits up to 35 seconds for the
-                // recorder, so its own bounded finalization remains ordered.
-                "perf" => Some(std::time::Duration::from_secs(60)),
+                // Dense replay cohorts stop many perf recorders and symbol
+                // custody helpers together. Give that ordered, bounded drain
+                // enough time to serialize raw captures instead of treating
+                // host scheduler pressure as incomplete measurement evidence.
+                "perf-symbol-custody" | "perf" => Some(std::time::Duration::from_secs(300)),
                 "perf-stat" => Some(std::time::Duration::from_secs(30)),
                 _ => None,
             },
