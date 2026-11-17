@@ -459,7 +459,7 @@ impl Prepared {
         // Revalidate the whole population while ALL original owners remain held.
         // This does not reacquire locks and reads no public replay archive.
         let layouts = shared_layouts(results, sweep)?;
-        let inventory = Inventory::read(&layouts, &inputs.directory)?;
+        let inventory = Inventory::read(&layouts, &inputs.directory, &inputs.initial.digest)?;
         // Historical starts retain their own previously validated generation;
         // this new stage is not yet execution authority.
         let declarations = inputs.declare_campaign_layouts_with_catalog(
