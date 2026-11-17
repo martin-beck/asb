@@ -514,6 +514,17 @@ impl Inputs {
             .recover_continuation_link(parent, results, plan)
     }
 
+    /// Explicitly preserve a collector-only failed slot. Ordinary resume later
+    /// validates the receipt and re-admits only that slot.
+    pub(super) fn recover_collector_teardown(
+        &self,
+        parent: &Path,
+        results: &Path,
+        plan: &super::plan::SweepPlan,
+    ) -> Result<Value, Error> {
+        self.recover_collector_teardown_slot(parent, results, plan)
+    }
+
     fn recovery_inputs(
         _parent: &Path,
         results: &Path,

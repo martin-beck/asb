@@ -1,6 +1,7 @@
 //! Read-only whole-population continuation classification. Not launch permission.
 use super::*;
 use crate::runner::campaign::reading;
+use crate::sweep::checkpoint::Snapshotter;
 
 type Key = (usize, u64);
 const MAX_RECORDS: usize = 65_533;
@@ -13,6 +14,9 @@ pub(in crate::sweep) use generation::{AdmittedCampaign, Guard, Prepared as Prepa
 
 #[path = "continuation_link_recovery.rs"]
 mod link_recovery;
+
+#[path = "continuation_collector_teardown_recovery.rs"]
+mod collector_teardown_recovery;
 
 struct OwnedCampaigns {
     origin: Origin,
@@ -102,6 +106,7 @@ struct Actual {
 
 struct Inventory {
     observed: BTreeSet<Key>,
+    recovered: BTreeSet<Key>,
     unsettled: BTreeSet<Key>,
     actual: BTreeMap<Key, Actual>,
 }
@@ -134,8 +139,14 @@ fn present_absolute(path: &Path) -> Result<bool, Error> {
 }
 
 impl Inventory {
-    fn read(layouts: &[Layout], checkpoint: &Path) -> Result<Self, Error> {
+    fn read(
+        layouts: &[Layout],
+        checkpoint: &Path,
+        input_digest: &str,
+        snapshotter: &Snapshotter,
+    ) -> Result<Self, Error> {
         let mut observed = BTreeSet::new();
+        let mut recovered = BTreeSet::new();
         let mut unsettled = BTreeSet::new();
         let mut files = Vec::new();
         let mut declared_bytes = 0u64;
@@ -144,6 +155,15 @@ impl Inventory {
         for (configuration, layout) in layouts.iter().enumerate() {
             for slot in &layout.plan.slots {
                 let key = (configuration, slot.id);
+                let recovered_slot = collector_teardown_recovery::read_receipt(
+                    checkpoint,
+                    layout,
+                    configuration,
+                    slot,
+                    input_digest,
+                    snapshotter,
+                )?;
+                let mut slot_observed = false;
                 let mut leaves = vec![
                     slot.workspace.clone(),
                     crate::runner::replica::runtime_path(&slot.workspace),
@@ -172,13 +192,13 @@ impl Inventory {
                 );
                 for leaf in leaves {
                     if reading::present_relative(&layout.root, &leaf)? {
-                        observed.insert(key);
+                        slot_observed = true;
                     }
                 }
                 if let Some(directory) = layout.measurement_directory(slot)
                     && present_absolute(&directory)?
                 {
-                    observed.insert(key);
+                    slot_observed = true;
                 }
                 if let Some(destination) = &layout.plan.recording
                     && present_absolute(&crate::runner::recording::association_for(
@@ -186,7 +206,7 @@ impl Inventory {
                         slot.id,
                     )?)?
                 {
-                    observed.insert(key);
+                    slot_observed = true;
                 }
                 if reading::present_relative(
                     checkpoint,
@@ -195,7 +215,7 @@ impl Inventory {
                         slot.id
                     )),
                 )? {
-                    observed.insert(key);
+                    slot_observed = true;
                 }
                 if reading::present_relative(
                     checkpoint,
@@ -204,8 +224,18 @@ impl Inventory {
                         slot.id
                     )),
                 )? {
-                    observed.insert(key);
+                    slot_observed = true;
                     unsettled.insert(key);
+                }
+                if recovered_slot {
+                    if slot_observed {
+                        return Err(recovery(
+                            "collector-teardown recovery leaves original slot evidence in place",
+                        ));
+                    }
+                    recovered.insert(key);
+                } else if slot_observed {
+                    observed.insert(key);
                 }
             }
             for batch in 1..=layout.plan.repeat {
@@ -269,6 +299,11 @@ impl Inventory {
             }
             let key = (file.configuration, id);
             observed.insert(key);
+            if recovered.contains(&key) {
+                return Err(recovery(
+                    "collector-teardown recovery conflicts with an actual completion",
+                ));
+            }
             if actual
                 .insert(
                     key,
@@ -287,6 +322,7 @@ impl Inventory {
         }
         Ok(Self {
             observed,
+            recovered,
             unsettled,
             actual,
         })
@@ -344,7 +380,12 @@ impl Inputs {
             layouts,
             owners,
         } = owned;
-        let inventory = Inventory::read(&layouts, &self.directory)?;
+        let inventory = Inventory::read(
+            &layouts,
+            &self.directory,
+            &self.initial.digest,
+            &self.snapshotter,
+        )?;
         let declarations = self.declare_campaign_layouts_with_catalog(
             parent,
             results,
@@ -393,6 +434,10 @@ impl Inputs {
         for (configuration, layout) in declarations.layouts.iter().enumerate() {
             for slot in &layout.plan.slots {
                 if candidate_keys.contains(&(configuration, slot.id)) {
+                    continue;
+                }
+                if inventory.recovered.contains(&(configuration, slot.id)) {
+                    pending.entry(configuration).or_default().insert(slot.id);
                     continue;
                 }
                 if inventory.observed.contains(&(configuration, slot.id)) {
