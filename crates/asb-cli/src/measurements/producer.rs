@@ -313,6 +313,11 @@ fn capture(
     _dependency: Option<Arc<dyn Send + Sync>>,
     #[cfg(test)] fault: Option<Fault>,
 ) -> Completion {
+    // A principal exit proves the collector itself is no longer producing.
+    // Its gate must still publish quiescence before any raw capture is trusted,
+    // but a guardian that lingers after that exit can otherwise consume the
+    // whole settlement budget under a dense cohort.
+    const PRINCIPAL_EXIT_GUARDIAN_GRACE: Duration = Duration::from_secs(8);
     let mut exit = None;
     let mut cleanup_confirmed = false;
     let mut out = gate.take_stdout();
@@ -339,6 +344,8 @@ fn capture(
         let mut grace = None;
         let mut stopped = false;
         let mut drain = None;
+        let mut principal_exit_observed = None;
+        let mut guardian_cancel_requested = false;
         loop {
             if drain.is_none() {
                 let observed = gate.try_wait();
@@ -369,8 +376,35 @@ fn capture(
                     return Err("collector was cancelled without a graceful flush contract; raw capture retained".into());
                 }
             }
+            if stopped && drain.is_none() && exit.is_none() {
+                exit = gate
+                    .refresh_principal_exit()
+                    .map_err(|error| error.to_string())?
+                    .map(|principal| principal.status());
+            }
+            if exit.is_some() && principal_exit_observed.is_none() {
+                principal_exit_observed = Some(Instant::now());
+            }
             if drain.is_none() && grace.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err("collector graceful flush deadline exceeded; forced cancellation cannot prove complete capture".into());
+            }
+            if drain.is_none()
+                && !guardian_cancel_requested
+                && principal_exit_observed.is_some_and(|observed| {
+                    observed.elapsed() >= PRINCIPAL_EXIT_GUARDIAN_GRACE
+                })
+            {
+                // Preserve the existing proof boundary: this only asks the
+                // owned guardian to finish after its direct principal is
+                // known exited. `try_wait` must still observe the guardian's
+                // quiescence receipt and the capture pump must drain before
+                // this producer can publish any collector result.
+                gate.request_cancel().map_err(|error| {
+                    format!(
+                        "collector guardian did not settle after confirmed principal exit: {error}"
+                    )
+                })?;
+                guardian_cancel_requested = true;
             }
             let mut drained = [false; 2];
             for (index, pipe) in [
