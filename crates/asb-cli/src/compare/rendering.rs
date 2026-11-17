@@ -520,13 +520,14 @@ fn write_histogram_svg(
     if max <= min {
         max = min + 1.0;
     }
-    let width = (max - min) / BINS as f64;
+    let x_axis = numeric_axis((min, max), title);
+    let width = (x_axis.max - x_axis.min) / BINS as f64;
     let counts = agents
         .iter()
         .map(|(agent, values)| {
             let mut bins = vec![0usize; BINS];
             for value in values {
-                let index = (((*value - min) / width).floor() as usize).min(BINS - 1);
+                let index = (((*value - x_axis.min) / width).floor() as usize).min(BINS - 1);
                 bins[index] += 1;
             }
             (agent.clone(), bins)
@@ -539,17 +540,10 @@ fn write_histogram_svg(
         .max()
         .unwrap_or(1)
         .max(1) as f64;
+    let y_axis = numeric_axis((0.0, maximum), "sample_count");
     let mut svg = svg_header(WIDTH, 470.0, title);
     svg.push_str("<text x=\"20\" y=\"52\" font-size=\"11\">Every color is one agent. Each metric uses a shared numeric range and twelve equal-width bins.</text>");
-    append_y_axis(
-        &mut svg,
-        LEFT,
-        TOP,
-        BOTTOM,
-        RIGHT,
-        (0.0, maximum),
-        "sample_count",
-    );
+    append_y_axis(&mut svg, LEFT, TOP, BOTTOM, RIGHT, &y_axis);
     let colors = [
         "#4472c4", "#ed7d31", "#70ad47", "#a5a5a5", "#ffc000", "#5b9bd5",
     ];
@@ -562,23 +556,22 @@ fn write_histogram_svg(
             escape(agent)
         ));
         for (bin, count) in bins.iter().enumerate() {
-            let height = *count as f64 / maximum * (BOTTOM - TOP);
+            let height = domain_fraction(*count as f64, y_axis.min, y_axis.max) * (BOTTOM - TOP);
             let x = LEFT + bin as f64 * group_width + 4.0 + agent_index as f64 * bar_width;
             let y = BOTTOM - height;
-            let start = min + bin as f64 * width;
-            let end = start + width;
-            svg.push_str(&format!("<rect class=\"bar\" data-series-index=\"{agent_index}\" data-label=\"{}\" data-value=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{height:.1}\" fill=\"{color}\"><title>{}: {} samples in {}–{}</title></rect>", escape(agent), count, (bar_width - 1.0).max(1.0), escape(agent), count, format_tick(start), format_tick(end)));
+            let start = x_axis.min + bin as f64 * (x_axis.max - x_axis.min) / BINS as f64;
+            let end = start + (x_axis.max - x_axis.min) / BINS as f64;
+            svg.push_str(&format!("<rect class=\"bar\" data-series-index=\"{agent_index}\" data-label=\"{}\" data-value=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{height:.1}\" fill=\"{color}\"><title>{}: {} samples in {}–{}</title></rect>", escape(agent), count, (bar_width - 1.0).max(1.0), escape(agent), count, x_axis.format(start), x_axis.format(end)));
         }
         let legend_x = 90.0 + (agent_index % 3) as f64 * 300.0;
         let legend_y = 74.0 + (agent_index / 3) as f64 * 18.0;
         svg.push_str(&format!("<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{agent_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{legend_y:.1}\" font-size=\"12\">{}</text></g>", legend_y - 9.0, legend_x + 16.0, escape(agent)));
     }
-    for bin in 0..=BINS {
-        let x = LEFT + bin as f64 * group_width;
-        let value = min + bin as f64 * width;
-        svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"{BOTTOM}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#18212b\"/><text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\">{}</text>", BOTTOM + 5.0, BOTTOM + 22.0, format_tick(value)));
+    for value in &x_axis.ticks {
+        let x = LEFT + domain_fraction(*value, x_axis.min, x_axis.max) * (RIGHT - LEFT);
+        svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"{BOTTOM}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#18212b\"/><text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\">{}</text>", BOTTOM + 5.0, BOTTOM + 22.0, x_axis.format(*value)));
     }
-    svg.push_str("<text x=\"574\" y=\"452\" text-anchor=\"middle\" font-size=\"12\">metric value bin</text></svg>\n");
+    svg.push_str(&format!("<text x=\"574\" y=\"452\" text-anchor=\"middle\" font-size=\"12\">metric value bin ({})</text></svg>\n", escape(&x_axis.unit)));
     fs::write(path, svg)
         .map_err(|error| Error::Run(format!("cannot write {}: {error}", path.display())))
 }

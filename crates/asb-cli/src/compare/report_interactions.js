@@ -51,7 +51,9 @@ function renameChartPickerRows(){
   for(const row of [...(document.querySelectorAll('[data-highlight-row]')||[])]){
     const title=titles.get(row.dataset.highlightRow);
     const cell=title&&row.querySelector&&row.querySelector('td');
-    if(cell)cell.textContent=title;
+    const link=cell&&cell.querySelector('a[href]');
+    if(link)link.textContent=title;
+    else if(cell)cell.textContent=title;
   }
 }
 foldReportTables();

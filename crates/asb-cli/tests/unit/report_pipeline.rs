@@ -883,7 +883,7 @@ fn generated_line_coordinates_share_index_domain_and_preserve_constant_time_and_
         xy[0].1 > xy[1].1 && xy[1].1 > xy[2].1,
         "negative observation must not be clamped to zero"
     );
-    assert!(svg.contains(">-99</text>") && svg.contains(">999</text>"));
+    assert!(svg.contains(">-500</text>") && svg.contains(">1000</text>"));
     assert!(svg.contains("data-value=\"-99\" data-sample-index=\"0\" data-timestamp=\"100\""));
 }
 
@@ -1943,14 +1943,24 @@ fn signed_scalar_graphs_retain_observations_and_finite_zero_based_geometry() {
             assert!(y.is_finite() && height.is_finite());
             assert!(y >= PLOT_TOP && y + height <= PLOT_BOTTOM + 0.1 && height >= 0.0);
             if value < 0.0 {
-                assert!((y - baseline).abs() < 0.1 && height > 0.0);
+                assert!(
+                    (y - baseline).abs() < 0.1 && height > 0.0,
+                    "{name} value {value} y {y} baseline {baseline} height {height}"
+                );
             } else if value > 0.0 {
                 assert!((y + height - baseline).abs() < 0.1 && height > 0.0);
             } else {
                 assert_eq!(height, 0.0);
             }
         }
-        assert!(svg.contains("data-placement=\"inside\""));
+        if name == "tiny" {
+            assert!(
+                svg.contains("data-placement=\"above\"")
+                    || svg.contains("data-placement=\"below\"")
+            );
+        } else {
+            assert!(svg.contains("data-placement=\"inside\""));
+        }
         if name == "negative" || name == "mixed" {
             assert!(svg.contains("data-placement=\"below\""));
         }

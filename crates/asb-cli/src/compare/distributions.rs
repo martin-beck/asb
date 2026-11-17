@@ -62,19 +62,14 @@ fn svg_comparison(metric: &str, agents: &AgentValues) -> String {
     }
     let min = nums.iter().copied().fold(f64::INFINITY, f64::min);
     let max = nums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let position = |v: f64| {
-        if min == max {
-            420.0
-        } else {
-            190.0 + domain_fraction(v, min, max) * 460.0
-        }
-    };
+    let value_axis = numeric_axis((min, max), metric);
+    let position = |v: f64| 190.0 + domain_fraction(v, value_axis.min, value_axis.max) * 460.0;
     let bands = agents
         .values()
         .map(|(_, values)| ((values.len().saturating_sub(1)) as f64 * 3.2).max(20.0) * 2.0 + 30.0)
         .collect::<Vec<_>>();
-    let axis = bands.iter().sum::<f64>() + 20.0;
-    let height = axis + 50.0;
+    let axis_y = bands.iter().sum::<f64>() + 20.0;
+    let height = axis_y + 50.0;
     let mut out = format!(
         "<svg class=\"replica-boxplot\" viewBox=\"0 0 720 {height:.2}\" role=\"img\" aria-label=\"{} distribution by agent\">",
         escape(metric)
@@ -102,9 +97,23 @@ fn svg_comparison(metric: &str, agents: &AgentValues) -> String {
         out.push_str("</g>");
         y += band;
     }
-    let labels = axis + 17.0;
-    let unit = axis + 36.0;
-    out.push_str(&format!("<line x1=\"190\" y1=\"{axis:.2}\" x2=\"650\" y2=\"{axis:.2}\" stroke=\"#274765\"/><text x=\"190\" y=\"{labels:.2}\" font-size=\"11\">{}</text><text x=\"650\" y=\"{labels:.2}\" text-anchor=\"end\" font-size=\"11\">{}</text><text x=\"420\" y=\"{unit:.2}\" text-anchor=\"middle\" font-size=\"11\">{}</text></svg>",axis_value(min),axis_value(max),escape(metric_unit(metric))));
+    let labels = axis_y + 17.0;
+    let unit = axis_y + 36.0;
+    out.push_str(&format!(
+        "<line x1=\"190\" y1=\"{axis_y:.2}\" x2=\"650\" y2=\"{axis_y:.2}\" stroke=\"#274765\"/>"
+    ));
+    for value in &value_axis.ticks {
+        let x = position(*value);
+        out.push_str(&format!(
+            "<line x1=\"{x:.2}\" y1=\"{axis_y:.2}\" x2=\"{x:.2}\" y2=\"{:.2}\" stroke=\"#274765\"/><text x=\"{x:.2}\" y=\"{labels:.2}\" text-anchor=\"middle\" font-size=\"11\">{}</text>",
+            axis_y + 5.0,
+            value_axis.format(*value)
+        ));
+    }
+    out.push_str(&format!(
+        "<text x=\"420\" y=\"{unit:.2}\" text-anchor=\"middle\" font-size=\"11\">{}</text></svg>",
+        escape(&value_axis.unit)
+    ));
     out
 }
 
@@ -114,14 +123,6 @@ fn svg(metric: &str, values: &[(String, f64)]) -> String {
         metric,
         &BTreeMap::from([("agent".into(), (values.len(), values.to_vec()))]),
     )
-}
-
-fn axis_value(value: f64) -> String {
-    if value != 0.0 && (value.abs() < 0.01 || value.abs() >= 1e9) {
-        format!("{value:.8e}")
-    } else {
-        value.to_string()
-    }
 }
 
 /// Group matching trial and agent observations, preserving provider, model and dataset identity.
@@ -306,7 +307,8 @@ mod tests {
         let graph = svg("elapsed_ms", &[("one".into(), 0.0), ("two".into(), 0.0)]);
         assert_eq!(graph.matches("class=\"replica-point\"").count(), 2);
         assert!(!graph.contains("NaN"));
-        assert_ne!(axis_value(1000.1), axis_value(1000.2));
+        let axis = numeric_axis((1000.1, 1000.2), "elapsed_ms");
+        assert_ne!(axis.format(axis.min), axis.format(axis.max));
     }
 
     #[test]
