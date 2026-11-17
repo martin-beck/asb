@@ -1049,6 +1049,7 @@ fn staged_unlinked_child() -> (Fixture, SweepPlan, PathBuf, Inputs, PathBuf, Vec
         roots: inputs.roots.clone(),
         context: inputs.context.clone(),
         initial: inputs.initial.clone(),
+        stability: None,
         runtime: None,
     };
     let classified = inputs

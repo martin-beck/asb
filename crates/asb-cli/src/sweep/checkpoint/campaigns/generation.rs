@@ -450,7 +450,7 @@ impl Prepared {
         }
         let inputs = &mut self.guard.inputs;
         if self.origin != Origin::read(inputs, &self.parent, results, sweep)?
-            || inputs.final_fingerprint()? != inputs.initial
+            || inputs.final_fingerprint()? != *inputs.stability.as_ref().unwrap_or(&inputs.initial)
         {
             return Err(recovery(
                 "original continuation inputs/index changed before admission",

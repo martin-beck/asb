@@ -198,6 +198,7 @@ fn inputs_environment(plan: &SweepPlan, results: &Path) -> Inputs {
         context,
         snapshotter,
         initial,
+        stability: None,
         runtime: None,
     };
     state.publish("pending", None).unwrap();
