@@ -459,7 +459,7 @@ impl Inputs {
             campaigns::verify_private_inputs(results, plan)?;
             campaigns::verify_current_normalization(parent, results, plan, request.invocation_dir)?;
         }
-        let current = Self::build(
+        let mut current = Self::build(
             parent,
             results,
             plan,
@@ -467,18 +467,25 @@ impl Inputs {
             request.replay_sources,
             request.invocation_dir,
         )?;
-        if current.initial != saved.initial
-            && !current.allows_collector_teardown_repair(
+        let collector_teardown_repair = current.initial != saved.initial
+            && current.allows_collector_teardown_repair(
                 &saved,
                 plan.execution.is_some(),
                 request.mode,
                 request.allow_collector_teardown_repair,
                 request.prior_asb_executable,
-            )
-        {
+            );
+        if current.initial != saved.initial && !collector_teardown_repair {
             return Err(resume_error(
                 "the executable, configuration, runtime, environment or replay inputs changed; a collector teardown repair requires --allow-collector-teardown-repair plus --prior-asb-executable that reproduces the original input seal",
             ));
+        }
+        // Campaign reservation manifests are immutable declarations made
+        // before any replica ran. A verified teardown-only binary repair must
+        // continue to validate those declarations against their original seal,
+        // not reject them merely because the collector implementation changed.
+        if collector_teardown_repair {
+            current.initial = saved.initial.clone();
         }
         if plan.execution.is_some() {
             current.verify_campaign_reservations(results, plan)?;
