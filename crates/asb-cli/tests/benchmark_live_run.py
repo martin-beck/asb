@@ -32,7 +32,7 @@ class NormalRunQualification(unittest.TestCase):
         tape_mode = os.environ.get("ASB_TEST_BENCHMARK_TAPE_MODE")
         namespace_collectors = os.environ.get("ASB_TEST_NAMESPACE_COLLECTORS") == "1"
         extra_collectors = [name for name in os.environ.get("ASB_TEST_BENCHMARK_COLLECTORS", "").split(",") if name]
-        collector_selection = (["agent-memory", "agent-workers"] if namespace_collectors else []) + extra_collectors
+        collector_selection = (["agent-memory", "agent-workers", "cpu-accounting"] if namespace_collectors else []) + extra_collectors
         sweep = os.environ.get("ASB_TEST_BENCHMARK_SWEEP") == "1"
         measured = os.environ.get("ASB_TEST_BENCHMARK_MEASURED") == "1" or bool(collector_selection)
         self.assertIn(tape_mode, [None, "record", "replay"])
@@ -204,6 +204,19 @@ class NormalRunQualification(unittest.TestCase):
                         self.assertIn("not agent-only CPU", accounting["container_scope"])
                         self.assertIn("container_cpu_user_ms", accounting["metrics"])
                         if namespace_collectors:
+                            components = json.loads((measurement_root / "components.json").read_text())
+                            agent_timing = components["components"]["agent.execute"]
+                            self.assertGreater(
+                                agent_timing["cpu_user_ms"] + agent_timing["cpu_system_ms"],
+                                0,
+                                agent_timing,
+                            )
+                            self.assertEqual(
+                                agent_timing["cpu_accounting_source"],
+                                "proc-sampling-execution-namespace",
+                            )
+                            if Path("/proc/sys/kernel/task_delayacct").read_text().strip() == "1":
+                                self.assertIsNotNone(agent_timing["io_wait_ms"], agent_timing)
                             for name in ["agent-memory", "agent-workers"]:
                                 observation = json.loads((measurement_root / (name + ".json")).read_text())
                                 self.assertEqual(observation["status"], "observed", observation)
