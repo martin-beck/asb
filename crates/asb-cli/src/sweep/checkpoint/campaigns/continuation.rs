@@ -458,10 +458,16 @@ impl Inputs {
         // Full-population metadata, actual/reference bijection, untouched
         // observations and receipt identities pass before one grouped proof.
         let inspection = declarations.prove()?;
+        let candidate_receipts: Vec<_> = inspection
+            .candidates
+            .iter()
+            .zip(receipts.iter())
+            .map(|(candidate, (receipt, _))| (candidate, receipt))
+            .collect();
+        self.verify_campaign_candidates(&candidate_receipts)?;
         let mut completed: BTreeMap<usize, BTreeMap<u64, Value>> = BTreeMap::new();
         let mut receipt_bindings = BTreeMap::new();
-        for (candidate, (receipt, identity)) in inspection.candidates.into_iter().zip(receipts) {
-            self.verify_campaign_candidate(&candidate, &receipt)?;
+        for (candidate, (_receipt, identity)) in inspection.candidates.into_iter().zip(receipts) {
             receipt_bindings.insert((candidate.configuration, candidate.slot), identity);
             completed
                 .entry(candidate.configuration)

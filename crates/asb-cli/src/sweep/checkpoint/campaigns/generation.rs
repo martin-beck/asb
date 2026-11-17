@@ -559,9 +559,13 @@ impl Prepared {
             .map(|candidate| inputs.read_campaign_receipt(candidate, &mut remaining))
             .collect::<Result<Vec<_>, _>>()?;
         let inspection = declarations.prove()?;
-        for (candidate, (receipt, _)) in inspection.candidates.iter().zip(&receipts) {
-            inputs.verify_campaign_candidate(candidate, receipt)?;
-        }
+        let candidate_receipts: Vec<_> = inspection
+            .candidates
+            .iter()
+            .zip(receipts.iter())
+            .map(|(candidate, (receipt, _))| (candidate, receipt))
+            .collect();
+        inputs.verify_campaign_candidates(&candidate_receipts)?;
         Ok(())
     }
 
