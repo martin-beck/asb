@@ -65,7 +65,13 @@ impl Guard {
     }
 
     pub(in crate::sweep) fn verify_stable(&mut self) -> Result<(), Error> {
-        if self.inputs.final_fingerprint()? != self.inputs.initial {
+        if self.inputs.final_fingerprint()?
+            != *self
+                .inputs
+                .stability
+                .as_ref()
+                .unwrap_or(&self.inputs.initial)
+        {
             return Err(recovery("declared inputs changed during continuation"));
         }
         // Keep all campaign owners, including completed-only configurations,

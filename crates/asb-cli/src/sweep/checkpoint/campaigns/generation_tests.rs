@@ -35,6 +35,16 @@ fn prepared_mode(mode: crate::tape::Mode) -> (Fixture, SweepPlan, PathBuf, Prepa
 }
 
 #[test]
+fn guard_uses_repaired_stability_for_collector_teardown_continuation() {
+    let (_, _, _, mut prepared) = prepared();
+    let repaired = prepared.guard.inputs.final_fingerprint().unwrap();
+    prepared.guard.inputs.initial.digest = "0".repeat(64);
+    prepared.guard.inputs.stability = Some(repaired);
+
+    prepared.guard.verify_stable().unwrap();
+}
+
+#[test]
 fn unused_admitted_head_reactivation_preserves_exact_authority_and_mints_no_generation() {
     for mode in [crate::tape::Mode::Replay, crate::tape::Mode::Record] {
         let (fixture, sweep, results, prepared) = prepared_mode(mode);
