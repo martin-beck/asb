@@ -66,13 +66,11 @@ pub(crate) struct Policy {
 ///
 /// A collector can finish its principal while a descendant still owns one of
 /// the capture pipes.  The owner supplied a graceful duration because it has
-/// an ordered shutdown contract, so reuse that bounded budget without letting
-/// a long perf flush make post-exit draining unbounded.
+/// an ordered shutdown contract, so reuse that bounded budget. The policy is
+/// validated at construction, so a long perf flush remains bounded while it
+/// can still close inherited descriptors before capture is finalized.
 fn post_exit_drain(policy: Policy) -> Duration {
-    policy
-        .graceful
-        .map(|graceful| graceful.min(Duration::from_secs(30)))
-        .unwrap_or(Duration::from_secs(5))
+    policy.graceful.unwrap_or(Duration::from_secs(5))
 }
 
 pub(crate) fn command(
@@ -641,7 +639,7 @@ mod tests {
             stream_bytes: 1024,
             graceful: None,
         };
-        assert_eq!(post_exit_drain(long), Duration::from_secs(30));
+        assert_eq!(post_exit_drain(long), Duration::from_secs(300));
         assert_eq!(post_exit_drain(short), Duration::from_secs(2));
         assert_eq!(post_exit_drain(none), Duration::from_secs(5));
 
@@ -655,7 +653,7 @@ mod tests {
             active: Some(Active::Process(process)),
             completion: None,
         };
-        assert_eq!(producer.stop_budget(), Duration::from_secs(338));
+        assert_eq!(producer.stop_budget(), Duration::from_secs(608));
     }
 
     #[test]
