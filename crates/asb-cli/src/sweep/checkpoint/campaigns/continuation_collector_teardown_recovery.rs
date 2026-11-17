@@ -199,11 +199,10 @@ fn eligible(layout: &Layout, slot: &crate::runner::campaign::Slot) -> Result<(),
 /// changes the already-official agent or workload result checked above.
 fn supported_perf_stat_failure(reason: &str, replica: usize) -> bool {
     let prefix = format!("replica {replica}: cannot finish perf-stat collector: ");
-    reason.contains("raw capture has not reached its stopped boundary")
-        && (reason.contains(&(prefix.clone() + "collector settlement deadline exceeded"))
-            || (reason
-                .contains(&(prefix + "collector principal did not start before guardian exit"))
-                && reason.contains("raw capture retained")))
+    reason.contains(&(prefix.clone()
+        + "collector settlement deadline exceeded; raw capture has not reached its stopped boundary"))
+        || reason.contains(&(prefix
+            + "collector principal did not start before guardian exit; raw capture retained; measurement finalization failed after task evaluation: raw capture has not reached its stopped boundary"))
 }
 
 fn move_if_present(
@@ -456,6 +455,10 @@ mod tests {
         ));
         assert!(!supported_perf_stat_failure(
             "replica 26: cannot finish perf-stat collector: collector principal did not start before guardian exit; raw capture retained",
+            26,
+        ));
+        assert!(!supported_perf_stat_failure(
+            "replica 26: cannot finish perf-stat collector: collector principal did not start before guardian exit; raw capture retained; replica 25: raw capture has not reached its stopped boundary",
             26,
         ));
         assert!(!supported_perf_stat_failure(
