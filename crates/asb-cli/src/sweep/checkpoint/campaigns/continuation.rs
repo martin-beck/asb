@@ -1,6 +1,7 @@
 //! Read-only whole-population continuation classification. Not launch permission.
 use super::*;
 use crate::runner::campaign::reading;
+use crate::sweep::checkpoint::Snapshotter;
 
 type Key = (usize, u64);
 const MAX_RECORDS: usize = 65_533;
@@ -138,7 +139,12 @@ fn present_absolute(path: &Path) -> Result<bool, Error> {
 }
 
 impl Inventory {
-    fn read(layouts: &[Layout], checkpoint: &Path, input_digest: &str) -> Result<Self, Error> {
+    fn read(
+        layouts: &[Layout],
+        checkpoint: &Path,
+        input_digest: &str,
+        snapshotter: &Snapshotter,
+    ) -> Result<Self, Error> {
         let mut observed = BTreeSet::new();
         let mut recovered = BTreeSet::new();
         let mut unsettled = BTreeSet::new();
@@ -155,6 +161,7 @@ impl Inventory {
                     configuration,
                     slot,
                     input_digest,
+                    snapshotter,
                 )?;
                 let mut slot_observed = false;
                 let mut leaves = vec![
@@ -373,7 +380,12 @@ impl Inputs {
             layouts,
             owners,
         } = owned;
-        let inventory = Inventory::read(&layouts, &self.directory, &self.initial.digest)?;
+        let inventory = Inventory::read(
+            &layouts,
+            &self.directory,
+            &self.initial.digest,
+            &self.snapshotter,
+        )?;
         let declarations = self.declare_campaign_layouts_with_catalog(
             parent,
             results,

@@ -52,6 +52,7 @@ pub(super) fn read_receipt(
     configuration: usize,
     slot: &crate::runner::campaign::Slot,
     input_digest: &str,
+    snapshotter: &Snapshotter,
 ) -> Result<bool, Error> {
     let relative = receipt_relative(configuration, slot.id);
     if !reading::present_relative(checkpoint, &relative)? {
@@ -84,7 +85,6 @@ pub(super) fn read_receipt(
             "collector-teardown recovery receipt has an invalid archive fingerprint",
         ));
     }
-    let snapshotter = Snapshotter::open(checkpoint, PathBuf::from("python3"))?;
     let archive = archive_root(layout, slot);
     let actual = snapshotter.fingerprint(
         &[Root::path("collector-teardown-archive", archive)],
@@ -239,7 +239,12 @@ impl Inputs {
         plan: &SweepPlan,
     ) -> Result<Value, Error> {
         let owned = self.own_campaigns(parent, results, plan)?;
-        let inventory = Inventory::read(&owned.layouts, &self.directory, &self.initial.digest)?;
+        let inventory = Inventory::read(
+            &owned.layouts,
+            &self.directory,
+            &self.initial.digest,
+            &self.snapshotter,
+        )?;
         let mut candidate = None;
         for (configuration, layout) in owned.layouts.iter().enumerate() {
             for slot in &layout.plan.slots {
@@ -403,8 +408,28 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(read_receipt(&inputs.directory, &layout, 0, slot, &inputs.initial.digest).unwrap());
+        assert!(
+            read_receipt(
+                &inputs.directory,
+                &layout,
+                0,
+                slot,
+                &inputs.initial.digest,
+                &inputs.snapshotter,
+            )
+            .unwrap()
+        );
         fs::write(archive.join("retained.txt"), b"changed evidence").unwrap();
-        assert!(read_receipt(&inputs.directory, &layout, 0, slot, &inputs.initial.digest).is_err());
+        assert!(
+            read_receipt(
+                &inputs.directory,
+                &layout,
+                0,
+                slot,
+                &inputs.initial.digest,
+                &inputs.snapshotter,
+            )
+            .is_err()
+        );
     }
 }
