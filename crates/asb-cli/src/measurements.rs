@@ -964,6 +964,29 @@ impl Session {
         timing.scheduler_wait_ms = Some(runqueue_ns as f64 / 1_000_000.0);
     }
 
+    /// Import already-scoped `/proc` accounting from an isolated execution
+    /// namespace. The namespace collector owns process discovery; the host
+    /// must not substitute its launch relay for the agent process tree.
+    pub(crate) fn import_process_tree_accounting(
+        &mut self,
+        cpu_user_ms: Option<f64>,
+        cpu_system_ms: Option<f64>,
+        io_wait_ms: Option<f64>,
+        scheduler_wait_ms: Option<f64>,
+    ) {
+        let timing = self
+            .component_timings
+            .entry("agent.execute".into())
+            .or_default();
+        timing.cpu_user_ms = cpu_user_ms;
+        timing.cpu_system_ms = cpu_system_ms;
+        timing.io_wait_ms = io_wait_ms;
+        timing.scheduler_wait_ms = scheduler_wait_ms;
+        timing.cpu_accounting_source = cpu_user_ms
+            .zip(cpu_system_ms)
+            .map(|_| "proc-sampling-execution-namespace".into());
+    }
+
     /// Return process-tree sampler totals when cgroup delegation is absent.
     pub(crate) fn sampled_cpu_accounting(&self) -> Option<(f64, f64)> {
         let timing = self.component_timings.get("agent.execute")?;
@@ -978,12 +1001,17 @@ impl Session {
     /// isolated execution consumed zero CPU. Keep missing totals missing.
     pub(crate) fn suppress_unobserved_sampled_cpu(&mut self) {
         if let Some(timing) = self.component_timings.get_mut("agent.execute")
-            && timing.cpu_accounting_source.as_deref() == Some("proc-sampling")
+            && matches!(
+                timing.cpu_accounting_source.as_deref(),
+                Some("proc-sampling" | "proc-sampling-execution-namespace")
+            )
             && timing.cpu_user_ms == Some(0.0)
             && timing.cpu_system_ms == Some(0.0)
         {
             timing.cpu_user_ms = None;
             timing.cpu_system_ms = None;
+            timing.io_wait_ms = None;
+            timing.scheduler_wait_ms = None;
             timing.cpu_accounting_source = None;
         }
     }

@@ -3,6 +3,7 @@
 use crate::collectors::adapters::process_accounting::Sampler;
 use crate::collectors::{CollectorAdapter, LifecycleEvent, PreflightContext, ReportCommand};
 use crate::measurements::{self, Session};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ pub(super) static ADAPTER: CpuAccounting = CpuAccounting;
 
 #[derive(Default)]
 struct State {
+    selected: bool,
     leaf: Option<Leaf>,
     reason: Option<String>,
     isolated: bool,
@@ -20,6 +22,15 @@ struct State {
     external_reason: Option<String>,
     fallback_sampler: Option<Sampler>,
     task_delayacct_enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct NamespaceSample {
+    schema_version: u8,
+    cpu_user_ms: Option<f64>,
+    cpu_system_ms: Option<f64>,
+    io_wait_ms: Option<f64>,
+    scheduler_wait_ms: Option<f64>,
 }
 
 struct ExternalCounter {
@@ -95,6 +106,58 @@ impl CollectorAdapter for CpuAccounting {
     fn description(&self) -> &'static str {
         "process-tree CPU time and scheduler accounting"
     }
+    fn prefers_execution_namespace(&self) -> bool {
+        true
+    }
+
+    fn execution_namespace_requested(&self, session: &mut Session) -> bool {
+        session.state::<State>().borrow().selected
+    }
+
+    fn export_execution_namespace_state(
+        &self,
+        session: &mut Session,
+    ) -> Result<serde_json::Value, String> {
+        let timing = session
+            .component_timing("agent.execute")
+            .cloned()
+            .unwrap_or_default();
+        serde_json::to_value(NamespaceSample {
+            schema_version: 1,
+            cpu_user_ms: timing.cpu_user_ms,
+            cpu_system_ms: timing.cpu_system_ms,
+            io_wait_ms: timing.io_wait_ms,
+            scheduler_wait_ms: timing.scheduler_wait_ms,
+        })
+        .map_err(|_| "cannot encode execution-namespace CPU accounting".into())
+    }
+
+    fn import_execution_namespace_state(
+        &self,
+        session: &mut Session,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let sample: NamespaceSample = serde_json::from_value(value.clone())
+            .map_err(|_| "invalid execution-namespace CPU accounting")?;
+        let finite_nonnegative =
+            |value: Option<f64>| value.is_none_or(|number| number.is_finite() && number >= 0.0);
+        if sample.schema_version != 1
+            || !finite_nonnegative(sample.cpu_user_ms)
+            || !finite_nonnegative(sample.cpu_system_ms)
+            || !finite_nonnegative(sample.io_wait_ms)
+            || !finite_nonnegative(sample.scheduler_wait_ms)
+            || sample.cpu_user_ms.is_some() != sample.cpu_system_ms.is_some()
+        {
+            return Err("inconsistent execution-namespace CPU accounting".into());
+        }
+        session.import_process_tree_accounting(
+            sample.cpu_user_ms,
+            sample.cpu_system_ms,
+            sample.io_wait_ms,
+            sample.scheduler_wait_ms,
+        );
+        Ok(())
+    }
     fn target_scope(&self, backend: &str) -> crate::collectors::TargetScope {
         if backend == "local-docker" {
             crate::collectors::TargetScope::Container
@@ -113,6 +176,12 @@ impl CollectorAdapter for CpuAccounting {
     }
     fn requires_pid(&self) -> bool {
         true
+    }
+
+    fn configure(&self, session: &mut Session, selected: &[String]) -> Result<(), String> {
+        session.state::<State>().borrow_mut().selected =
+            crate::collectors::selected_or_environment(self.id(), selected);
+        Ok(())
     }
     fn preflight(&self, _: &mut PreflightContext<'_>) -> Result<(), String> {
         Ok(())
@@ -231,7 +300,12 @@ impl CollectorAdapter for CpuAccounting {
             Ok(counter) => state.external = Some(counter),
             Err(reason) => state.external_reason = Some(reason),
         }
-        start_fallback_sampler(session, &mut state, pid);
+        // The workload starts this collector in the guest execution namespace,
+        // where the bound PID is the actual agent tree. Sampling the host-side
+        // launch relay would publish a different scope.
+        if !state.selected {
+            start_fallback_sampler(session, &mut state, pid);
+        }
         Ok(())
     }
 
@@ -607,6 +681,109 @@ mod tests {
                 .is_some_and(|reason| !reason.is_empty())
         );
         drop(session);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn isolated_execution_imports_guest_process_tree_accounting() {
+        let dir = std::env::temp_dir().join(format!(
+            "asb-cpu-namespace-import-{}",
+            crate::workloads::TaskIdentity::local("cpu-namespace-import", None).attempt_id
+        ));
+        let selected = vec!["cpu-accounting".to_owned()];
+        let mut host = Session::start_with_collectors(&dir, &selected, None).unwrap();
+        assert!(ADAPTER.execution_namespace_requested(&mut host));
+        ADAPTER
+            .attach_isolated_pid(&mut host, std::process::id())
+            .unwrap();
+        ADAPTER
+            .activate_isolated_pid(&mut host, std::process::id())
+            .unwrap();
+        assert!(host.state::<State>().borrow().fallback_sampler.is_none());
+
+        ADAPTER
+            .import_execution_namespace_state(
+                &mut host,
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "cpu_user_ms": 12.5,
+                    "cpu_system_ms": 3.25,
+                    "io_wait_ms": 7.0,
+                    "scheduler_wait_ms": 1.5,
+                }),
+            )
+            .unwrap();
+        let timing = host.component_timing("agent.execute").unwrap();
+        assert_eq!(timing.cpu_user_ms, Some(12.5));
+        assert_eq!(timing.cpu_system_ms, Some(3.25));
+        assert_eq!(timing.io_wait_ms, Some(7.0));
+        assert_eq!(timing.scheduler_wait_ms, Some(1.5));
+        assert_eq!(
+            timing.cpu_accounting_source.as_deref(),
+            Some("proc-sampling-execution-namespace")
+        );
+        ADAPTER.finish(&mut host).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("cpu-accounting.json")).unwrap()).unwrap();
+        assert_eq!(value["metrics"]["cpu_user_ms"], 12.5);
+        assert_eq!(value["metrics"]["cpu_system_ms"], 3.25);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn execution_namespace_accounting_rejects_inconsistent_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "asb-cpu-namespace-invalid-{}",
+            crate::workloads::TaskIdentity::local("cpu-namespace-invalid", None).attempt_id
+        ));
+        let selected = vec!["cpu-accounting".to_owned()];
+        let mut host = Session::start_with_collectors(&dir, &selected, None).unwrap();
+        for invalid in [
+            serde_json::json!({"schema_version": 2, "cpu_user_ms": 1.0, "cpu_system_ms": 1.0, "io_wait_ms": 0.0, "scheduler_wait_ms": 0.0}),
+            serde_json::json!({"schema_version": 1, "cpu_user_ms": 1.0, "cpu_system_ms": null, "io_wait_ms": 0.0, "scheduler_wait_ms": 0.0}),
+            serde_json::json!({"schema_version": 1, "cpu_user_ms": 1.0, "cpu_system_ms": 1.0, "io_wait_ms": -1.0, "scheduler_wait_ms": 0.0}),
+        ] {
+            assert!(
+                ADAPTER
+                    .import_execution_namespace_state(&mut host, &invalid)
+                    .is_err()
+            );
+        }
+        drop(host);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn isolated_zero_namespace_sample_remains_unavailable() {
+        let dir = std::env::temp_dir().join(format!(
+            "asb-cpu-namespace-zero-{}",
+            crate::workloads::TaskIdentity::local("cpu-namespace-zero", None).attempt_id
+        ));
+        let selected = vec!["cpu-accounting".to_owned()];
+        let mut host = Session::start_with_collectors(&dir, &selected, None).unwrap();
+        ADAPTER
+            .attach_isolated_pid(&mut host, std::process::id())
+            .unwrap();
+        ADAPTER
+            .import_execution_namespace_state(
+                &mut host,
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "cpu_user_ms": 0.0,
+                    "cpu_system_ms": 0.0,
+                    "io_wait_ms": 0.0,
+                    "scheduler_wait_ms": 0.0,
+                }),
+            )
+            .unwrap();
+        ADAPTER.finish(&mut host).unwrap();
+        let timing = host.component_timing("agent.execute").unwrap();
+        assert!(timing.cpu_user_ms.is_none());
+        assert!(timing.cpu_system_ms.is_none());
+        assert!(timing.io_wait_ms.is_none());
+        assert!(timing.scheduler_wait_ms.is_none());
+        assert!(timing.cpu_accounting_source.is_none());
+        drop(host);
         fs::remove_dir_all(dir).unwrap();
     }
 
