@@ -8,6 +8,17 @@ enlarged views. The opt-in `generate_flamegraph_browser_fixture` test takes
 `ASB_TEST_FLAMEGRAPH` and retains a two-run report under the project target
 directory for browser validation.
 
+When equivalent runs use replica concurrency, `asb compare` also derives one
+mean, median, and p95 folded-stack flamegraph for every agent/trial/provider/
+model/concurrency population. The population includes every completed repeat
+and replica, rather than one representative run. Its concurrency reports add
+three folded-stack diffs between the lowest and highest configured
+concurrencies. At concurrency one, all three derived profiles are exact copies
+of the recorded folded stacks and SVG. Comparison publishes these files only
+inside its replacement `comparison/` directory; it never changes campaign
+plans, checkpoints, outcomes, or collector evidence, so a rebuilt binary with
+post-processing changes remains compatible with `asb sweep --continue`.
+
 The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
 uses a local model fixture to record one official SWE-bench task and replay it
 in two isolated replicas. It checks the grade, cleanup and native tool-stream

@@ -1724,6 +1724,14 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
                 })
                 .to_string(),
             );
+            fixture.write(
+                &format!("sweep-results/{index:03}-{index}/{measurements}/flamegraph.folded"),
+                format!("root;{agent};sample {concurrency}\n"),
+            );
+            fixture.write(
+                &format!("sweep-results/{index:03}-{index}/{measurements}/flamegraph.svg"),
+                format!("<svg><title>{agent}-{concurrency}-{replica}</title></svg>\n"),
+            );
         }
     }
 
@@ -1738,6 +1746,8 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(concurrency_report.contains("Measurement collection commands"));
     assert!(concurrency_report.contains("foldReportTables"));
     assert!(concurrency_report.contains("groupReportCharts"));
+    assert!(concurrency_report.contains("Aggregate flamegraphs"));
+    assert!(concurrency_report.contains("setSeriesVisible"));
     let graphs = fs::read_dir(directory)
         .unwrap()
         .flatten()
@@ -1786,6 +1796,8 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(agent_report.contains("Measurement collection commands"));
     assert!(agent_report.contains("foldReportTables"));
     assert!(agent_report.contains("groupReportCharts"));
+    assert!(agent_report.contains("Aggregate flamegraphs"));
+    assert!(agent_report.contains("setSeriesVisible"));
     for file in [
         "report.html",
         "agent-summary-report.html",
@@ -1821,6 +1833,22 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
         fs::read_to_string(&report)
             .unwrap()
             .contains("agent-concurrency-report.html")
+    );
+    let aggregate_flamegraphs = fs::read_dir(directory)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("concurrency-flamegraph-") && name.ends_with(".svg")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        aggregate_flamegraphs.len() >= 24,
+        "profiles plus mean/median/p95 diffs"
     );
 }
 

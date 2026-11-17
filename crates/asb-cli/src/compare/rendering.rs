@@ -547,18 +547,21 @@ fn write_histogram_svg(
     let bar_width = (group_width - 8.0) / counts.len().max(1) as f64;
     for (agent_index, (agent, bins)) in counts.iter().enumerate() {
         let color = colors[agent_index % colors.len()];
-        svg.push_str(&format!("<g data-benchmark=\"{}\">", escape(agent)));
+        svg.push_str(&format!(
+            "<g data-benchmark=\"{}\" data-series-index=\"{agent_index}\">",
+            escape(agent)
+        ));
         for (bin, count) in bins.iter().enumerate() {
             let height = *count as f64 / maximum * (BOTTOM - TOP);
             let x = LEFT + bin as f64 * group_width + 4.0 + agent_index as f64 * bar_width;
             let y = BOTTOM - height;
             let start = min + bin as f64 * width;
             let end = start + width;
-            svg.push_str(&format!("<rect class=\"bar\" data-label=\"{}\" data-value=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{height:.1}\" fill=\"{color}\"><title>{}: {} samples in {}–{}</title></rect>", escape(agent), count, (bar_width - 1.0).max(1.0), escape(agent), count, format_tick(start), format_tick(end)));
+            svg.push_str(&format!("<rect class=\"bar\" data-series-index=\"{agent_index}\" data-label=\"{}\" data-value=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{height:.1}\" fill=\"{color}\"><title>{}: {} samples in {}–{}</title></rect>", escape(agent), count, (bar_width - 1.0).max(1.0), escape(agent), count, format_tick(start), format_tick(end)));
         }
         let legend_x = 90.0 + (agent_index % 3) as f64 * 300.0;
         let legend_y = 74.0 + (agent_index / 3) as f64 * 18.0;
-        svg.push_str(&format!("<rect x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text x=\"{:.1}\" y=\"{legend_y:.1}\" font-size=\"12\">{}</text></g>", legend_y - 9.0, legend_x + 16.0, escape(agent)));
+        svg.push_str(&format!("<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{agent_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{legend_y:.1}\" font-size=\"12\">{}</text></g>", legend_y - 9.0, legend_x + 16.0, escape(agent)));
     }
     for bin in 0..=BINS {
         let x = LEFT + bin as f64 * group_width;

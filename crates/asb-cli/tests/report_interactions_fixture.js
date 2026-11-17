@@ -24,10 +24,12 @@ const bars=[...barSvg.matchAll(/<rect\b[^>]*class="bar"[^>]*>/g)].map(match=>ele
 nodes.push(...bars);
 const points=nodes.filter(node=>node.classList.contains('series-point'));
 const lines=nodes.filter(node=>node.classList.contains('series'));
+const legends=nodes.filter(node=>node.classList.contains('legend-item'));
 assert.equal(points.length,2);
 assert.deepEqual(points.map(point=>point.dataset.timestamp),['0','200']);
 assert.deepEqual(points.map(point=>point.dataset.value),['1','3']);
 assert.equal(lines.length,2,'null gap must split the generated line');
+assert.equal(legends.length,1,'generated line graph must expose one legend toggle');
 assert.ok(html.includes('data-dimension-benchmark="000-0"'));
 assert.ok(svgText.includes('data-benchmark="000-0"'));
 const svg=element(attributes(svgText.match(/<svg\b[^>]*>/)[0]));
@@ -44,6 +46,13 @@ const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>mat
 const script=scripts.find(script=>script.includes('Nearest displayed observed sample'));
 assert.ok(script,'test must execute the script embedded in the generated report');
 eval(script);
+legends[0].fire('click',{stopPropagation(){}});
+assert.ok(legends[0].classList.contains('legend-hidden'));
+assert.ok(points.every(point=>point.classList.contains('series-hidden')));
+assert.ok(lines.every(line=>line.classList.contains('series-hidden')));
+legends[0].fire('keydown',{key:'Enter',preventDefault(){}});
+assert.ok(!legends[0].classList.contains('legend-hidden'));
+assert.ok(points.every(point=>!point.classList.contains('series-hidden')));
 if(barSvg){
   assert.equal(bars.length,1);
   assert.ok(Number(bars[0].getAttribute('height'))>0,'accepted negative scalar must have visible geometry');
