@@ -96,6 +96,7 @@ fn publisher_child() {
         roots: setup.roots,
         context: setup.context,
         initial: setup.initial,
+        stability: None,
         runtime: None,
     };
     assert_eq!(

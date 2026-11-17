@@ -16,6 +16,7 @@ pub(in crate::sweep::checkpoint) fn inputs(results: &Path, plan: &SweepPlan) -> 
         roots,
         context,
         initial,
+        stability: None,
         runtime: None,
     }
 }

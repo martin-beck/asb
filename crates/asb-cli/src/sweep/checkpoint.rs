@@ -350,6 +350,10 @@ pub(super) struct Inputs {
     roots: Vec<Root>,
     context: Value,
     initial: Fingerprint,
+    // A collector-teardown repair must retain the original seal for campaign
+    // evidence, while checking the repaired executable's closure for changes
+    // during this continuation.
+    stability: Option<Fingerprint>,
     runtime: Option<(Vec<crate::runtime_inputs::Dependency>, PathBuf)>,
 }
 
@@ -369,6 +373,8 @@ struct SavedInputSeal {
     scope: String,
     roots: Vec<Root>,
     initial: Fingerprint,
+    #[serde(default)]
+    stability: Option<Fingerprint>,
     r#final: Option<Fingerprint>,
 }
 
@@ -379,8 +385,13 @@ impl SavedInputSeal {
             || !self.initial.valid()
             || self.roots.len() > 100000
             || match self.status.as_str() {
-                "pending" => self.r#final.is_some(),
-                "stable" => self.r#final.as_ref() != Some(&self.initial),
+                "pending" => self.r#final.is_some() || self.stability.is_some(),
+                "stable" => match &self.stability {
+                    Some(stability) => {
+                        !stability.valid() || self.r#final.as_ref() != Some(stability)
+                    }
+                    None => self.r#final.as_ref() != Some(&self.initial),
+                },
                 _ => true,
             }
         {
@@ -485,7 +496,9 @@ impl Inputs {
         // continue to validate those declarations against their original seal,
         // not reject them merely because the collector implementation changed.
         if collector_teardown_repair {
+            let repaired_stability = current.initial.clone();
             current.initial = saved.initial.clone();
+            current.stability = Some(repaired_stability);
         }
         if plan.execution.is_some() {
             current.verify_campaign_reservations(results, plan)?;
@@ -572,6 +585,7 @@ impl Inputs {
             roots,
             context: json!({"protocol":"asb-publication-recovery-file-stability-v1","scope":"not-execution-admission"}),
             initial: saved.initial,
+            stability: None,
             runtime: None,
         })
     }
@@ -696,6 +710,7 @@ impl Inputs {
             roots,
             context,
             initial,
+            stability: None,
             runtime: Some((runtime, invocation_dir.to_path_buf())),
         };
         Ok(state)
@@ -708,7 +723,7 @@ impl Inputs {
     pub(super) fn finish_borrowed(&mut self) -> Result<(), Error> {
         match self.final_fingerprint() {
             Ok(after) => self.publish(
-                if after.digest == self.initial.digest {
+                if after.digest == self.stability.as_ref().unwrap_or(&self.initial).digest {
                     "stable"
                 } else {
                     "changed"
@@ -725,7 +740,7 @@ impl Inputs {
     /// Completed-only campaign reuse has no newly admitted work to settle.
     /// Recheck inputs without rewriting the original seal/provenance locators.
     pub(super) fn verify_stable_borrowed(&mut self) -> Result<(), Error> {
-        if self.final_fingerprint()? != self.initial {
+        if self.final_fingerprint()? != *self.stability.as_ref().unwrap_or(&self.initial) {
             return Err(resume_error(
                 "declared inputs changed while reusing completed campaigns",
             ));
@@ -754,7 +769,7 @@ impl Inputs {
     fn publish(&self, status: &str, after: Option<&Fingerprint>) -> Result<(), Error> {
         let content = serde_json::to_vec_pretty(&json!({"schema_version":1,"status":status,
             "scope":"input-stability-only-not-a-resume-receipt", "roots":self.roots,
-            "initial":self.initial,"final":after}))
+            "initial":self.initial,"stability":self.stability,"final":after}))
         .map_err(|_| Error::Io("cannot encode private input seal".into()))?;
         let temporary = self.directory.join(format!(
             ".state-{}",
@@ -924,6 +939,7 @@ mod tests {
             scope: "input-stability-only-not-a-resume-receipt".into(),
             roots: vec![executable.clone(), configuration.clone()],
             initial: fingerprint.clone(),
+            stability: None,
             r#final: Some(fingerprint),
         };
         let inputs = Inputs {
@@ -932,6 +948,7 @@ mod tests {
             roots: vec![executable.clone(), configuration.clone()],
             context,
             initial: saved.initial.clone(),
+            stability: None,
             runtime: None,
         };
         std::fs::write(&executable.path, "repaired executable").unwrap();
@@ -950,6 +967,52 @@ mod tests {
             true,
             Some(&prior_executable),
         ));
+    }
+
+    #[test]
+    fn collector_teardown_repair_keeps_the_repaired_closure_stable() {
+        let directory = Directory::new();
+        let executable = directory.0.join("asb");
+        let configuration = directory.0.join("benchmark.toml");
+        std::fs::write(&executable, "original executable").unwrap();
+        std::fs::write(&configuration, "original configuration").unwrap();
+        let state = directory.0.join("state");
+        let snapshotter = Snapshotter::open(&state, "python3".into()).unwrap();
+        let roots = vec![
+            Root {
+                name: "asb-executable".into(),
+                path: executable.clone(),
+                bind_location: false,
+                direct_file: true,
+            },
+            Root::path("configuration", configuration),
+        ];
+        let context = json!({"protocol":"fixture"});
+        let original = snapshotter
+            .fingerprint(&roots, &context, false, &[])
+            .unwrap();
+        std::fs::write(&executable, "repaired executable").unwrap();
+        let repaired = snapshotter
+            .fingerprint(&roots, &context, false, &[])
+            .unwrap();
+        let mut inputs = Inputs {
+            directory: state.clone(),
+            snapshotter,
+            roots,
+            context,
+            initial: original.clone(),
+            stability: Some(repaired.clone()),
+            runtime: None,
+        };
+
+        inputs.verify_stable_borrowed().unwrap();
+        inputs.finish_borrowed().unwrap();
+        let saved: SavedInputSeal =
+            serde_json::from_slice(&std::fs::read(state.join("inputs.json")).unwrap()).unwrap();
+        saved.validate().unwrap();
+        assert_eq!(saved.initial, original);
+        assert_eq!(saved.stability, Some(repaired.clone()));
+        assert_eq!(saved.r#final, Some(repaired));
     }
 
     struct Directory(PathBuf);
@@ -1068,6 +1131,7 @@ mod tests {
                 roots,
                 context,
                 initial,
+                stability: None,
                 runtime: None,
             };
             inputs.publish("pending", None).unwrap();
