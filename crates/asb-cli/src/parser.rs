@@ -1561,8 +1561,8 @@ struct SweepArgs {
     #[arg(long, requires = "resume", conflicts_with_all = ["record", "replay", "recover_recording", "import_grades", "reconcile_completed", "repeat", "track", "seed", "show_output", "cassette_root", "respect_record_timings", "max_active_attempts", "jobs"])]
     recover_continuation: bool,
     /// Archive exactly one successful replay slot whose retained batch failure
-    /// proves the old perf-stat collector-settlement defect. This never starts
-    /// an agent or evaluator; rerun with ordinary --resume afterwards.
+    /// proves a supported post-evaluation perf-stat producer defect. This
+    /// never starts an agent or evaluator; rerun with ordinary --resume afterwards.
     #[arg(long, requires_all = ["resume", "replay-direction", "allow_collector_teardown_repair", "prior_asb_executable", "cassette_root"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
     recover_collector_teardown: bool,
     #[arg(
