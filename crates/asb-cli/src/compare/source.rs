@@ -96,6 +96,16 @@ pub(super) fn read_svg(path: &Path, artifact: &str) -> Result<String, Error> {
     Ok(svg)
 }
 
+/// Check a report SVG without retaining its document in the report model.
+///
+/// Flamegraphs can be many megabytes each. They are rendered from their
+/// report-relative artifact in a sandboxed frame, so holding every document
+/// until HTML publication would make comparison memory grow with every run.
+pub(super) fn validate_svg(path: &Path, artifact: &str) -> Result<(), Error> {
+    drop(read_svg(path, artifact)?);
+    Ok(())
+}
+
 pub(super) struct Request {
     pub path: String,
     pub parent: PathBuf,
@@ -343,7 +353,14 @@ pub(super) fn load_at(
                 Some(crate::collectors::ArtifactDisplay::Svg { .. })
             ) && !previews.contains_key(href)
             {
-                previews.insert(href.clone(), read_svg(physical, href)?);
+                if name == "flamegraph.svg" {
+                    validate_svg(physical, href)?;
+                    // An empty value marks a validated external SVG. Unlike
+                    // other collector charts, flamegraphs are not inlined.
+                    previews.insert(href.clone(), String::new());
+                } else {
+                    previews.insert(href.clone(), read_svg(physical, href)?);
+                }
             }
         }
     }

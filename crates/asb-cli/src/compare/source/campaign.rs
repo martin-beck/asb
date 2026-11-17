@@ -193,7 +193,14 @@ pub(super) fn rows(
                 Some(crate::collectors::ArtifactDisplay::Svg { .. })
             ) && !previews.contains_key(href)
             {
-                previews.insert(href.clone(), read_svg(physical, href)?);
+                if name == "flamegraph.svg" {
+                    super::validate_svg(physical, href)?;
+                    // Keep only a validated external-artifact marker. A
+                    // campaign can have hundreds of large flamegraphs.
+                    previews.insert(href.clone(), String::new());
+                } else {
+                    previews.insert(href.clone(), read_svg(physical, href)?);
+                }
             }
         }
         rows.push(row);
