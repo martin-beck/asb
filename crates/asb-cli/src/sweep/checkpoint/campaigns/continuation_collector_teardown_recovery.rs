@@ -139,7 +139,37 @@ fn write_receipt(path: &Path, receipt: &Receipt, replace: bool) -> Result<(), Er
     Ok(())
 }
 
-fn eligible(layout: &Layout, slot: &crate::runner::campaign::Slot) -> Result<(), Error> {
+fn terminal_record_relative(
+    layout: &Layout,
+    slot: &crate::runner::campaign::Slot,
+    generation: Option<&str>,
+) -> Result<PathBuf, Error> {
+    let legacy = PathBuf::from(format!("batch-{}/finished.json", slot.batch));
+    if let Some(generation) = generation {
+        let generated = PathBuf::from(".asb-generations")
+            .join(generation)
+            .join(format!("batch-{}", slot.batch))
+            .join("finished.json");
+        if reading::present_relative(&layout.root, &generated)? {
+            return Ok(generated);
+        }
+        return Err(recovery(
+            "collector-teardown recovery has no catalog-authorized batch terminal record",
+        ));
+    }
+    if reading::present_relative(&layout.root, &legacy)? {
+        return Ok(legacy);
+    }
+    Err(recovery(
+        "collector-teardown recovery has no catalog-authorized batch terminal record",
+    ))
+}
+
+fn eligible(
+    layout: &Layout,
+    slot: &crate::runner::campaign::Slot,
+    generation: Option<&str>,
+) -> Result<PathBuf, Error> {
     if layout.outcome(slot)?.is_some() {
         return Err(recovery(
             "collector-teardown recovery requires a slot without an actual completion",
@@ -176,10 +206,13 @@ fn eligible(layout: &Layout, slot: &crate::runner::campaign::Slot) -> Result<(),
             "collector-teardown recovery requires an otherwise successful officially resolved slot",
         ));
     }
-    let batch = layout.root.join(format!("batch-{}", slot.batch));
-    let finished: Value =
-        serde_json::from_slice(&reading::bounded(&batch.join("finished.json"), 64 * 1024)?)
-            .map_err(|_| recovery("collector-teardown batch terminal record is malformed"))?;
+    let terminal_record = terminal_record_relative(layout, slot, generation)?;
+    let finished: Value = serde_json::from_slice(&reading::bounded_relative(
+        &layout.root,
+        &terminal_record,
+        64 * 1024,
+    )?)
+    .map_err(|_| recovery("collector-teardown batch terminal record is malformed"))?;
     let reason = finished["failure_reason"]
         .as_str()
         .ok_or_else(|| recovery("collector-teardown batch has no failure reason"))?;
@@ -191,7 +224,7 @@ fn eligible(layout: &Layout, slot: &crate::runner::campaign::Slot) -> Result<(),
             "collector-teardown batch failure is not the supported perf-stat settlement defect",
         ));
     }
-    Ok(())
+    Ok(terminal_record)
 }
 
 /// Only the two known post-evaluation perf-stat producer defects are eligible.
@@ -245,6 +278,14 @@ impl Inputs {
         plan: &SweepPlan,
     ) -> Result<Value, Error> {
         let owned = self.own_campaigns(parent, results, plan)?;
+        let generation = self
+            .read_generation_catalog(results, plan, &owned.layouts)?
+            .map(|catalog| {
+                catalog
+                    .head_snapshot()
+                    .map(|snapshot| snapshot.admission.generation)
+            })
+            .transpose()?;
         let inventory = Inventory::read(
             &owned.layouts,
             &self.directory,
@@ -258,15 +299,18 @@ impl Inputs {
                 if !inventory.observed.contains(&key) || inventory.actual.contains_key(&key) {
                     continue;
                 }
-                eligible(layout, slot)?;
-                if candidate.replace((configuration, layout, slot)).is_some() {
+                let terminal_record = eligible(layout, slot, generation.as_deref())?;
+                if candidate
+                    .replace((configuration, layout, slot, terminal_record))
+                    .is_some()
+                {
                     return Err(recovery(
                         "collector-teardown recovery requires exactly one eligible observed slot",
                     ));
                 }
             }
         }
-        let (configuration, layout, slot) = candidate
+        let (configuration, layout, slot, terminal_record) = candidate
             .ok_or_else(|| recovery("no eligible collector-teardown-only slot was found"))?;
         let receipt_path = receipt_path(&self.directory, configuration, slot.id);
         let archive = archive_root(layout, slot);
@@ -317,11 +361,15 @@ impl Inputs {
                 batch.join(format!("outcomes/{}.json", slot.replica)),
                 "outcome.json",
             ),
-            (batch.join("finished.json"), "batch-finished.json"),
             (layout.root.join("finished.json"), "campaign-finished.json"),
         ] {
             move_if_present(&source, &archive.join(name), &mut moved)?;
         }
+        move_if_present(
+            &layout.root.join(terminal_record),
+            &archive.join("batch-finished.json"),
+            &mut moved,
+        )?;
         if let Some(measurements) = layout.measurement_directory(slot) {
             move_if_present(&measurements, &archive.join("measurements"), &mut moved)?;
         }
@@ -575,5 +623,64 @@ mod tests {
             "replica 25: cannot finish perf-stat collector: collector settlement deadline exceeded; raw capture has not reached its stopped boundary",
             26,
         ));
+    }
+
+    #[test]
+    fn terminal_record_uses_catalog_generation_when_legacy_record_is_absent() {
+        let (_fixture, plan, results, _inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let slot = &layout.plan.slots[0];
+        let expected = PathBuf::from(".asb-generations")
+            .join("generation")
+            .join(format!("batch-{}", slot.batch))
+            .join("finished.json");
+        let path = layout.root.join(&expected);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"{}\n").unwrap();
+
+        assert_eq!(
+            terminal_record_relative(&layout, slot, Some("generation")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn terminal_record_rejects_legacy_evidence_when_catalog_generation_is_absent() {
+        let (_fixture, plan, results, _inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let slot = &layout.plan.slots[0];
+        let legacy = layout
+            .root
+            .join(format!("batch-{}/finished.json", slot.batch));
+        fs::write(legacy, b"{}\n").unwrap();
+
+        let error = terminal_record_relative(&layout, slot, Some("generation")).unwrap_err();
+        assert!(error.to_string().contains(
+            "collector-teardown recovery has no catalog-authorized batch terminal record"
+        ));
+    }
+
+    #[test]
+    fn terminal_record_prefers_the_catalog_generation_over_legacy_evidence() {
+        let (_fixture, plan, results, _inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let slot = &layout.plan.slots[0];
+        let legacy = PathBuf::from(format!("batch-{}/finished.json", slot.batch));
+        fs::write(layout.root.join(&legacy), b"{}\n").unwrap();
+        let expected = PathBuf::from(".asb-generations")
+            .join("generation")
+            .join(format!("batch-{}", slot.batch))
+            .join("finished.json");
+        let generated = layout.root.join(&expected);
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(generated, b"{}\n").unwrap();
+
+        assert_eq!(
+            terminal_record_relative(&layout, slot, Some("generation")).unwrap(),
+            expected
+        );
     }
 }
