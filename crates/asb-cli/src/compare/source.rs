@@ -106,6 +106,56 @@ pub(super) fn validate_svg(path: &Path, artifact: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Validate a report-relative SVG which remains external to the report HTML.
+///
+/// Flamegraphs can be substantially larger than the bounded inline-preview
+/// limit. They are referenced from a CSP-constrained image wrapper, so validate
+/// their regular-file shape and SVG prefix without retaining the whole document
+/// in memory.
+pub(super) fn validate_external_svg(path: &Path, artifact: &str) -> Result<(), Error> {
+    const MAX_EXTERNAL_SVG_BYTES: u64 = 256 * 1024 * 1024;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        Error::Run(format!(
+            "cannot read external SVG artifact {artifact}: {error}"
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        Error::Run(format!(
+            "cannot inspect external SVG artifact {artifact}: {error}"
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_EXTERNAL_SVG_BYTES {
+        return Err(Error::Run(format!(
+            "external SVG artifact {artifact} is not a bounded regular SVG file"
+        )));
+    }
+    let mut prefix = [0_u8; 1024];
+    let count = file.read(&mut prefix).map_err(|error| {
+        Error::Run(format!(
+            "cannot read external SVG artifact {artifact}: {error}"
+        ))
+    })?;
+    let prefix = std::str::from_utf8(&prefix[..count]).map_err(|error| {
+        Error::Run(format!(
+            "cannot read external SVG artifact {artifact}: {error}"
+        ))
+    })?;
+    let trimmed = prefix.trim_start();
+    if !trimmed.starts_with("<svg") && !trimmed.starts_with("<?xml") {
+        return Err(Error::Run(format!(
+            "external SVG artifact {artifact} does not contain an SVG document"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) struct Request {
     pub path: String,
     pub parent: PathBuf,
