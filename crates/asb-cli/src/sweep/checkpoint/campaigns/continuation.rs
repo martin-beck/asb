@@ -147,6 +147,7 @@ impl Inventory {
     ) -> Result<Self, Error> {
         let mut observed = BTreeSet::new();
         let mut recovered = BTreeSet::new();
+        let mut recovered_observed = BTreeSet::new();
         let mut unsettled = BTreeSet::new();
         let mut files = Vec::new();
         let mut declared_bytes = 0u64;
@@ -229,9 +230,7 @@ impl Inventory {
                 }
                 if recovered_slot {
                     if slot_observed {
-                        return Err(recovery(
-                            "collector-teardown recovery leaves original slot evidence in place",
-                        ));
+                        recovered_observed.insert(key);
                     }
                     recovered.insert(key);
                 } else if slot_observed {
@@ -299,11 +298,6 @@ impl Inventory {
             }
             let key = (file.configuration, id);
             observed.insert(key);
-            if recovered.contains(&key) {
-                return Err(recovery(
-                    "collector-teardown recovery conflicts with an actual completion",
-                ));
-            }
             if actual
                 .insert(
                     key,
@@ -317,6 +311,13 @@ impl Inventory {
             {
                 return Err(recovery(
                     "multiple actual completions claim one original slot",
+                ));
+            }
+        }
+        for key in recovered_observed {
+            if !actual.contains_key(&key) {
+                return Err(recovery(
+                    "collector-teardown recovery leaves original slot evidence in place",
                 ));
             }
         }

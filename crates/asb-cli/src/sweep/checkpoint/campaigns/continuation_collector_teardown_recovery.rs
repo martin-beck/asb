@@ -440,6 +440,51 @@ mod tests {
     }
 
     #[test]
+    fn recovered_slot_with_a_verified_replacement_completion_is_reusable() {
+        let (_fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let slot = &layout.plan.slots[0];
+        let slot_id = slot.id;
+        let archive = archive_root(&layout, slot);
+        fs::create_dir_all(&archive).unwrap();
+        fs::write(archive.join("retained.txt"), b"original evidence").unwrap();
+        let fingerprint = inputs
+            .snapshotter
+            .fingerprint(
+                &[Root::path("collector-teardown-archive", archive.clone())],
+                &context(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let receipt = Receipt {
+            schema_version: 1,
+            scope: SCOPE.into(),
+            status: "complete".into(),
+            configuration: 0,
+            slot: slot.id,
+            input_digest: inputs.initial.digest.clone(),
+            archive: archive_relative(slot),
+            fingerprint: Some(fingerprint),
+        };
+        write_receipt(
+            &receipt_path(&inputs.directory, 0, slot.id),
+            &receipt,
+            false,
+        )
+        .unwrap();
+        let inventory = Inventory::read(
+            &[layout],
+            &inputs.directory,
+            &inputs.initial.digest,
+            &inputs.snapshotter,
+        )
+        .unwrap();
+        assert!(inventory.actual.contains_key(&(0, slot_id)));
+    }
+
+    #[test]
     fn recovery_accepts_only_known_post_evaluation_perf_stat_failures() {
         assert!(supported_perf_stat_failure(
             "replica 26: cannot finish perf-stat collector: collector settlement deadline exceeded; raw capture has not reached its stopped boundary",
