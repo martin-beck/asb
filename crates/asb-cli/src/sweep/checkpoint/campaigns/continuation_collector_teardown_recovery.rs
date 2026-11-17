@@ -145,22 +145,24 @@ fn terminal_record_relative(
     generation: Option<&str>,
 ) -> Result<PathBuf, Error> {
     let legacy = PathBuf::from(format!("batch-{}/finished.json", slot.batch));
-    if reading::present_relative(&layout.root, &legacy)? {
-        return Ok(legacy);
-    }
-    let generation = generation.ok_or_else(|| {
-        recovery("collector-teardown recovery has no catalog-authorized batch terminal record")
-    })?;
-    let generated = PathBuf::from(".asb-generations")
-        .join(generation)
-        .join(format!("batch-{}", slot.batch))
-        .join("finished.json");
-    if !reading::present_relative(&layout.root, &generated)? {
+    if let Some(generation) = generation {
+        let generated = PathBuf::from(".asb-generations")
+            .join(generation)
+            .join(format!("batch-{}", slot.batch))
+            .join("finished.json");
+        if reading::present_relative(&layout.root, &generated)? {
+            return Ok(generated);
+        }
         return Err(recovery(
             "collector-teardown recovery has no catalog-authorized batch terminal record",
         ));
     }
-    Ok(generated)
+    if reading::present_relative(&layout.root, &legacy)? {
+        return Ok(legacy);
+    }
+    Err(recovery(
+        "collector-teardown recovery has no catalog-authorized batch terminal record",
+    ))
 }
 
 fn eligible(
@@ -644,15 +646,41 @@ mod tests {
     }
 
     #[test]
-    fn terminal_record_rejects_an_absent_catalog_generation_record() {
+    fn terminal_record_rejects_legacy_evidence_when_catalog_generation_is_absent() {
         let (_fixture, plan, results, _inputs) =
             settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
         let layout = plan.read_campaigns(&results).unwrap().remove(0);
         let slot = &layout.plan.slots[0];
+        let legacy = layout
+            .root
+            .join(format!("batch-{}/finished.json", slot.batch));
+        fs::write(legacy, b"{}\n").unwrap();
 
         let error = terminal_record_relative(&layout, slot, Some("generation")).unwrap_err();
         assert!(error.to_string().contains(
             "collector-teardown recovery has no catalog-authorized batch terminal record"
         ));
+    }
+
+    #[test]
+    fn terminal_record_prefers_the_catalog_generation_over_legacy_evidence() {
+        let (_fixture, plan, results, _inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let slot = &layout.plan.slots[0];
+        let legacy = PathBuf::from(format!("batch-{}/finished.json", slot.batch));
+        fs::write(layout.root.join(&legacy), b"{}\n").unwrap();
+        let expected = PathBuf::from(".asb-generations")
+            .join("generation")
+            .join(format!("batch-{}", slot.batch))
+            .join("finished.json");
+        let generated = layout.root.join(&expected);
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(generated, b"{}\n").unwrap();
+
+        assert_eq!(
+            terminal_record_relative(&layout, slot, Some("generation")).unwrap(),
+            expected
+        );
     }
 }
