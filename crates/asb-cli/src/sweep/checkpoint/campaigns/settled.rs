@@ -10,9 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 const METADATA: u64 = 64 * 1024;
 const SCOPE: &str = "settled-campaign-slot-declared-evidence";
+const RECEIPT_VERIFIERS: usize = 4;
 
 #[path = "recording_recovery.rs"]
 mod recording_recovery;
@@ -219,10 +224,18 @@ impl Inputs {
             ..
         } = declarations.prove()?;
         // Finish every read-only validation before the first receipt write.
+        let inherited_candidates: Vec<_> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                inherited
+                    .get(&(candidate.configuration, candidate.slot))
+                    .map(|receipt| (candidate, receipt))
+            })
+            .collect();
+        self.verify_campaign_candidates(&inherited_candidates)?;
         let mut newly_completed = Vec::new();
         for candidate in candidates {
-            if let Some(receipt) = inherited.get(&(candidate.configuration, candidate.slot)) {
-                self.verify_campaign_candidate(&candidate, receipt)?;
+            if inherited.contains_key(&(candidate.configuration, candidate.slot)) {
                 continue;
             }
             let destination =
@@ -589,6 +602,94 @@ impl Inputs {
             return Err(resume_error("campaign completed evidence changed"));
         }
         Ok(())
+    }
+
+    /// Receipt fingerprints are independent immutable reads. Bound their
+    /// verification so large resumed sweeps do not serialize every completed
+    /// slot before admitting the remaining work.
+    fn verify_campaign_candidates(
+        &self,
+        candidates: &[(&Candidate, &Receipt)],
+    ) -> Result<(), Error> {
+        verify_bounded(candidates, RECEIPT_VERIFIERS, |(candidate, receipt)| {
+            self.verify_campaign_candidate(candidate, receipt)
+        })
+    }
+}
+
+fn verify_bounded<T: Sync>(
+    candidates: &[T],
+    limit: usize,
+    verify: impl Fn(&T) -> Result<(), Error> + Sync,
+) -> Result<(), Error> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let next = AtomicUsize::new(0);
+    let failure = Mutex::new(None);
+    let workers = candidates.len().min(limit.max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    if failure.lock().expect("receipt verifier lock").is_some() {
+                        return;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(candidate) = candidates.get(index) else {
+                        return;
+                    };
+                    if let Err(error) = verify(candidate) {
+                        let mut recorded = failure.lock().expect("receipt verifier lock");
+                        if recorded.is_none() {
+                            *recorded = Some(error);
+                        }
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    match failure.into_inner().expect("receipt verifier lock") {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod bounded_verification_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn bounded_verification_checks_every_candidate_without_exceeding_its_limit() {
+        let candidates = [0_u8; 9];
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let completed = AtomicUsize::new(0);
+        verify_bounded(&candidates, 3, |_| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            active.fetch_sub(1, Ordering::SeqCst);
+            completed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), candidates.len());
+        assert!(peak.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[test]
+    fn bounded_verification_preserves_a_failure() {
+        let error = verify_bounded(&[0_u8, 1, 2], 2, |candidate| {
+            (*candidate != 1)
+                .then_some(())
+                .ok_or_else(|| Error::Run("fixture verification failure".into()))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "fixture verification failure");
     }
 }
 
