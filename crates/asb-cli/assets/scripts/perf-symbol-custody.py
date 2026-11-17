@@ -774,24 +774,6 @@ def main():
         if not control.startswith('fifo:') or control.count(',') != 1:
             return 2
         request, ack = control[5:].split(',', 1)
-        current = identity(root)
-        if current is None or current[1] != start:
-            return 2
-        if recorder:
-            current_recorder = identity(recorder[0])
-            if current_recorder is None or current_recorder[1] != recorder[1]:
-                return 2
-            try:
-                root_fd = os.open(f'/proc/{root}/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
-            except OSError as error:
-                container = container_for(root, start)
-                if container is None:
-                    print('Cannot access the benchmark process root for perf symbol capture: '
-                          f'{error}. No verified local Docker container was found.', file=sys.stderr)
-                    return 2
-                guest_pid = namespace_pid(root, start)
-                if guest_script and guest_pid:
-                    guest_roots = [(guest_pid, start)]
         with open(request, 'rb', buffering=0) as reader, open(ack, 'wb', buffering=0) as writer:
             if reader.read(7) != b'enable\n':
                 return 2
@@ -807,6 +789,17 @@ def main():
                     if root_fd is not None:
                         os.close(root_fd)
                     return report_and_exit('recorder-exited-before-custody')
+                try:
+                    root_fd = os.open(f'/proc/{root}/root', os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+                except OSError as error:
+                    container = container_for(root, start)
+                    if container is None:
+                        print('Cannot access the benchmark process root for perf symbol capture: '
+                              f'{error}. No verified local Docker container was found.', file=sys.stderr)
+                        return 2
+                    guest_pid = namespace_pid(root, start)
+                    if guest_script and guest_pid:
+                        guest_roots = [(guest_pid, start)]
     while not stopping:
         members = tree(members)
         if members is None:

@@ -37,7 +37,7 @@ class CustodyTest(unittest.TestCase):
 
             def execute():
                 with mock.patch.object(module.sys, 'argv', argv), \
-                     mock.patch.object(module, 'identity', side_effect=[(1, 456), None]), \
+                     mock.patch.object(module, 'identity', return_value=None), \
                      mock.patch.object(module.signal, 'signal'), \
                      contextlib.redirect_stdout(output):
                     result.append(module.main())
@@ -202,17 +202,53 @@ class CustodyTest(unittest.TestCase):
                 self.assertFalse(module.cache_container_file(args[0], args[1], 'deadbeef', *args[3:], 1024 * 1024))
 
     def test_inaccessible_guest_root_reports_the_permission_problem(self):
-        stderr = io.StringIO()
-        argv = ['helper', '12', '34', '1000', '1000', '/cache', '/perf',
-                '/symbols', 'fifo:/request,/ack', '56', '78', '/perf.data']
-        with mock.patch.object(module.sys, 'argv', argv), \
-             mock.patch.object(module, 'identity', side_effect=[(1, 34), (1, 78)]), \
-             mock.patch.object(module, 'container_for', return_value=None), \
-             mock.patch.object(module.os, 'open', side_effect=PermissionError('denied')), \
-             contextlib.redirect_stderr(stderr):
-            self.assertEqual(module.main(), 2)
-        self.assertIn('Cannot access the benchmark process root', stderr.getvalue())
-        self.assertIn('denied', stderr.getvalue())
+        with tempfile.TemporaryDirectory(prefix='asb-symbol-inaccessible-root-') as directory:
+            root = Path(directory)
+            request = root / 'request'
+            ack = root / 'ack'
+            os.mkfifo(request, 0o600)
+            os.mkfifo(ack, 0o600)
+            stderr = io.StringIO()
+            argv = ['helper', '12', '34', '1000', '1000', '/cache', '/perf',
+                    '/symbols', f'fifo:{request},{ack}', '56', '78', '/perf.data']
+            result = []
+            original_open = os.open
+
+            def deny_root(path, *args):
+                if path == '/proc/12/root':
+                    raise PermissionError('denied')
+                return original_open(path, *args)
+
+            def execute():
+                with mock.patch.object(module.sys, 'argv', argv), \
+                     mock.patch.object(module, 'identity', side_effect=[(1, 34), (1, 78)]), \
+                     mock.patch.object(module, 'container_for', return_value=None), \
+                     mock.patch.object(module.os, 'open', side_effect=deny_root), \
+                     mock.patch.object(module.signal, 'signal'), \
+                     contextlib.redirect_stderr(stderr):
+                    result.append(module.main())
+
+            control = original_open(request, os.O_RDWR | os.O_NONBLOCK)
+            acknowledgement = original_open(ack, os.O_RDWR | os.O_NONBLOCK)
+            thread = threading.Thread(target=execute)
+            thread.start()
+            os.write(control, b'enable\n')
+            for _ in range(100):
+                try:
+                    if os.read(acknowledgement, 4) == b'ack\n':
+                        break
+                except BlockingIOError:
+                    pass
+                time.sleep(0.01)
+            else:
+                self.fail('symbol helper did not acknowledge activation')
+            thread.join(timeout=2)
+            os.close(control)
+            os.close(acknowledgement)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [2])
+            self.assertIn('Cannot access the benchmark process root', stderr.getvalue())
+            self.assertIn('denied', stderr.getvalue())
 
     @unittest.skipUnless(shutil.which('cc'), 'requires a C compiler')
     def test_settlement_recovers_short_lived_recorded_image_from_pinned_root(self):
