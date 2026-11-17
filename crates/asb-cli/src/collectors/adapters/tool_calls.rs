@@ -4,6 +4,7 @@ use super::super::{
     CollectorAdapter, ReportCommand, ReportGraph, ReportRow, configuration_label,
     report_filename_component,
 };
+use crate::compare::{domain_fraction, numeric_axis};
 use std::collections::BTreeSet;
 
 pub(super) struct ToolCallsCollector;
@@ -56,16 +57,18 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
         })
         .min()?;
     let span = (maximum.saturating_sub(minimum)).max(1) as f64;
+    let time_axis = numeric_axis((0.0, span), "elapsed_ms");
     let classes = classes.into_iter().collect::<Vec<_>>();
     let width = 920.0;
     let left = 190.0;
     let plot_width = 700.0;
     let row_height = 30.0;
-    let height = 90.0 + row_height * classes.len() as f64;
+    let height = 116.0 + row_height * classes.len() as f64;
     let mut svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><title>LLM tool-call classes over provider-response time</title><style>text{{font:12px sans-serif;fill:#18212b}}.axis{{stroke:#9aa5b1}}.cell{{fill:#2563eb}}.duration{{stroke:#f59e0b;stroke-width:3}}</style><text x="20" y="25" font-size="16">LLM tool-call classes over provider-response time — {}</text><text x="{}" y="48">response-observed time (ms from first tool call); orange extension = observed tool execution duration</text>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><title>LLM tool-call classes over provider-response time</title><style>text{{font:12px sans-serif;fill:#18212b}}.axis{{stroke:#9aa5b1}}.cell{{fill:#2563eb}}.duration{{stroke:#f59e0b;stroke-width:3}}</style><text x="20" y="25" font-size="16">LLM tool-call classes over provider-response time — {}</text><text x="{}" y="48">response-observed time ({} from first tool call); orange extension = observed tool execution duration</text>"#,
         escape(&configuration_label(row)),
-        left
+        left,
+        escape(&time_axis.unit)
     );
     for (class_index, class) in classes.iter().enumerate() {
         let y = 65.0 + class_index as f64 * row_height;
@@ -86,7 +89,9 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
         else {
             continue;
         };
-        let x = left + (time.saturating_sub(minimum) as f64 / span) * plot_width;
+        let relative = time.saturating_sub(minimum) as f64;
+        let x = left
+            + domain_fraction(relative, time_axis.min, time_axis.max).clamp(0.0, 1.0) * plot_width;
         let duration = call
             .get("execution_duration_ms")
             .and_then(serde_json::Value::as_u64)
@@ -111,11 +116,27 @@ fn heatmap(index: usize, row: &ReportRow<'_>) -> Option<ReportGraph> {
                 );
                 svg.push_str(&format!(r#"<rect class="cell" x="{x:.2}" y="{y:.2}" width="8" height="10"><title>{}</title></rect>"#, escape(&title)));
                 if duration > 0.0 {
-                    svg.push_str(&format!(r#"<line class="duration" x1="{x:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}"><title>{}</title></line>"#, y + 5.0, x + (duration / span) * plot_width, y + 5.0, escape(&title)));
+                    let end = left
+                        + domain_fraction(relative + duration, time_axis.min, time_axis.max)
+                            .clamp(0.0, 1.0)
+                            * plot_width;
+                    svg.push_str(&format!(r#"<line class="duration" x1="{x:.2}" y1="{:.2}" x2="{end:.2}" y2="{:.2}"><title>{}</title></line>"#, y + 5.0, y + 5.0, escape(&title)));
                 }
             }
         }
     }
+    let axis_y = height - 18.0;
+    for value in &time_axis.ticks {
+        let x = left
+            + domain_fraction(*value, time_axis.min, time_axis.max).clamp(0.0, 1.0) * plot_width;
+        svg.push_str(&format!(r#"<line class="axis" x1="{x:.2}" y1="{:.2}" x2="{x:.2}" y2="{:.2}"/><text x="{x:.2}" y="{:.2}" text-anchor="middle">{}</text>"#, axis_y - 14.0, axis_y - 9.0, axis_y, time_axis.format(*value)));
+    }
+    svg.push_str(&format!(
+        r#"<text x="{}" y="{}" text-anchor="middle">time ({})</text>"#,
+        left + plot_width / 2.0,
+        height - 2.0,
+        escape(&time_axis.unit)
+    ));
     svg.push_str("</svg>");
     Some(ReportGraph {
         filename: format!(
@@ -174,5 +195,38 @@ mod tests {
         assert!(graph.svg.contains("fixture-model:high"));
         assert!(graph.svg.contains("filesystem.read"));
         assert!(graph.svg.contains("execution 25 ms"));
+    }
+
+    #[test]
+    fn heatmap_scales_long_response_windows_to_seconds() {
+        let metrics = BTreeMap::new();
+        let documents = BTreeMap::from([(
+            "tool-calls".into(),
+            serde_json::json!({"calls":[
+                {"name":"first","response_observed_unix_ms":100,"classes":["filesystem.read"]},
+                {"name":"second","response_observed_unix_ms":10101,"classes":["filesystem.read"]}
+            ]}),
+        )]);
+        let graph = heatmap(
+            0,
+            &ReportRow {
+                label: "agent",
+                agent: "agent",
+                provider: "fixture-provider",
+                model: "fixture-model",
+                thinking_effort: None,
+                workload: "fixture-workload",
+                trial: "fixture-trial",
+                configured_concurrency: 1,
+                replica_index: None,
+                execution_cohort: None,
+                metrics: &metrics,
+                components: None,
+                documents: &documents,
+            },
+        )
+        .expect("tool call graph");
+        assert!(graph.svg.contains("time (s)"));
+        assert!(graph.svg.contains(">10</text>"));
     }
 }

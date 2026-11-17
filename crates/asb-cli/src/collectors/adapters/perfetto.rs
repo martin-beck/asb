@@ -2,6 +2,7 @@ use super::super::{
     ArtifactDisplay, CollectorAdapter, LifecycleEvent, PreflightContext, ProcessContext,
     ProcessData, ReportArtifactLink, ReportCommand, ReportGraph, ReportPrimaryLink, ReportRow,
 };
+use crate::compare::{domain_fraction, numeric_axis};
 use crate::measurements;
 mod bootstrap;
 mod observer;
@@ -1182,7 +1183,7 @@ fn write_state_timeline_svg(
     tids.truncate(64);
     let height = 150 + tids.len() * 24;
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"980\" height=\"{height}\" viewBox=\"0 0 980 {height}\"><title>Bounded process-tree scheduler-state timeline</title><rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><text x=\"18\" y=\"25\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"bold\">Observed scheduler-state timeline</text><text x=\"18\" y=\"45\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#52606d\">Execution-relative milliseconds; one lane per unique thread lifetime. I/O classification can be unknown.</text>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"980\" height=\"{height}\" viewBox=\"0 0 980 {height}\"><title>Bounded process-tree scheduler-state timeline</title><rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><text x=\"18\" y=\"25\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"bold\">Observed scheduler-state timeline</text><text x=\"18\" y=\"45\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#52606d\">Execution-relative time; one lane per unique thread lifetime. I/O classification can be unknown.</text>"
     );
     svg.push_str(&format!("<text x=\"18\" y=\"62\" font-family=\"sans-serif\" font-size=\"11\">Showing {} of {} intervals, {} of {} observed threads; {} unfinished states excluded. Full known-duration totals are independent of this view.</text>",spans.len(),summary.intervals,tids.len(),summary.threads,summary.unfinished));
     for (index, (label, color)) in [
@@ -1198,22 +1199,29 @@ fn write_state_timeline_svg(
         let x = 100 + index * 160;
         svg.push_str(&format!("<rect x=\"{x}\" y=\"76\" width=\"9\" height=\"9\" fill=\"{color}\"/><text x=\"{}\" y=\"85\" font-family=\"sans-serif\" font-size=\"10\">{label}</text>", x + 12));
     }
+    let timeline_axis = numeric_axis((0.0, (end - start) as f64 / 1_000_000.0), "elapsed_ms");
+    let timeline_x = |milliseconds: f64| {
+        100.0 + 850.0 * domain_fraction(milliseconds, timeline_axis.min, timeline_axis.max)
+    };
     for (row, (utid, tid)) in tids.iter().enumerate() {
         let y = 102 + row * 24;
         svg.push_str(&format!("<text x=\"18\" y=\"{}\" font-family=\"monospace\" font-size=\"11\"><title>unique thread {utid}</title>tid {tid}</text><rect x=\"100\" y=\"{}\" width=\"850\" height=\"16\" fill=\"#edf1f4\"/>", y + 12, y));
         for s in spans.iter().filter(|s| s.utid == *utid) {
-            let x = 100.0 + 850.0 * (s.ts.saturating_sub(start) as f64 / (end - start) as f64);
-            let w = 850.0 * s.dur as f64 / (end - start) as f64;
+            let start_ms = s.ts.saturating_sub(start) as f64 / 1_000_000.0;
+            let end_ms =
+                s.ts.saturating_add(s.dur).min(end).saturating_sub(start) as f64 / 1_000_000.0;
+            let x = timeline_x(start_ms);
+            let w = (timeline_x(end_ms) - x).max(0.0);
             let (label, color) = state_style(&s.state, s.io_wait);
             svg.push_str(&format!("<rect x=\"{x:.2}\" y=\"{y}\" width=\"{w:.2}\" height=\"16\" fill=\"{color}\"><title>{label}: {} ns</title></rect>", s.dur));
         }
     }
     let axis_y = height - 16;
-    for tick in 0..=5 {
-        let x = 100 + 170 * tick;
-        let ms = (end - start) as f64 * tick as f64 / 5_000_000.0;
-        svg.push_str(&format!("<text x=\"{x}\" y=\"{axis_y}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">{ms:.1} ms</text>"));
+    for value in &timeline_axis.ticks {
+        let x = timeline_x(*value);
+        svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"{}\" x2=\"{x:.1}\" y2=\"{}\" stroke=\"#52606d\"/><text x=\"{x:.1}\" y=\"{axis_y}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">{}</text>", axis_y - 20, axis_y - 15, timeline_axis.format(*value)));
     }
+    svg.push_str(&format!("<text x=\"525\" y=\"{}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">time ({})</text>", axis_y + 14, escape_svg(&timeline_axis.unit)));
     svg.push_str("</svg>\n");
     fs::write(dir.join("perfetto-state-timeline.svg"), svg)
         .map_err(|e| format!("cannot write Perfetto state timeline SVG: {e}"))

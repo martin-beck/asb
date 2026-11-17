@@ -9,6 +9,7 @@ use super::super::{
     ArtifactDisplay, CollectorAdapter, ReportCommand, ReportGraph, ReportRow, SelectionExtension,
     SelectionOption,
 };
+use crate::compare::{domain_fraction, numeric_axis};
 use crate::measurements::{self, ComponentTiming, Session};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -380,17 +381,20 @@ fn bottleneck_graph(rows: &[ReportRow<'_>]) -> Option<ReportGraph> {
         let height = 100.0 + findings.len() as f64 * 24.0;
         let left = 330.0;
         let right = 940.0;
+        let confidence_axis = numeric_axis((0.0, 1.0), "ratio");
         let mut svg = format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 980 {height:.0}\" role=\"img\" aria-label=\"AgentSysPerf bottleneck finding confidence\"><title>AgentSysPerf bottleneck findings</title><rect width=\"980\" height=\"{height:.0}\" fill=\"#fff\"/><text x=\"24\" y=\"32\" font-family=\"sans-serif\" font-size=\"18\" font-weight=\"700\">AgentSysPerf bottleneck findings</text><text x=\"24\" y=\"54\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#61707f\">Diagnostic confidence only; findings do not affect ASB grades or rankings.</text>"
         );
-        for tick in 0..=4 {
-            let value = tick as f64 / 4.0;
-            let x = left + (right - left) * value;
-            svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"72\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#dce4ec\"/><text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{value:.2}</text>", height - 22.0, height - 7.0));
+        for value in &confidence_axis.ticks {
+            let x = left
+                + (right - left)
+                    * domain_fraction(*value, confidence_axis.min, confidence_axis.max);
+            svg.push_str(&format!("<line x1=\"{x:.1}\" y1=\"72\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#dce4ec\"/><text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{}</text>", height - 22.0, height - 7.0, confidence_axis.format(*value)));
         }
         for (index, (label, confidence)) in findings.iter().enumerate() {
             let y = 76.0 + index as f64 * 24.0;
-            let width = (right - left) * confidence;
+            let width = (right - left)
+                * domain_fraction(*confidence, confidence_axis.min, confidence_axis.max);
             svg.push_str(&format!("<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"11\">{}</text><rect class=\"bar\" data-label=\"{}\" data-value=\"{confidence:.3}\" x=\"{left}\" y=\"{:.1}\" width=\"{width:.1}\" height=\"16\" rx=\"3\" fill=\"#4472c4\"><title>{}: confidence {confidence:.3}</title></rect>", left - 10.0, y + 12.0, escape(label), escape(label), y, escape(label)));
         }
         svg.push_str("</svg>\n");
@@ -553,35 +557,50 @@ fn scaling_svg(title: &str, curve: &[(usize, f64, f64, String)]) -> String {
         .map(|point| point.2)
         .fold(0.0f64, f64::max)
         .max(1.0);
-    let x = |concurrency: usize| left + (right - left) * concurrency as f64 / max_concurrency;
-    let y_latency =
-        |latency: f64| upper_bottom - (upper_bottom - upper_top) * latency / max_latency;
-    let y_rate = |rate: f64| lower_bottom - (lower_bottom - lower_top) * rate / max_rate;
+    let concurrency_axis = numeric_axis((0.0, max_concurrency), "concurrency");
+    let latency_axis = numeric_axis((0.0, max_latency), "elapsed_ms");
+    let rate_axis = numeric_axis((0.0, max_rate), "completed_per_s");
+    let x = |concurrency: usize| {
+        left + (right - left)
+            * domain_fraction(
+                concurrency as f64,
+                concurrency_axis.min,
+                concurrency_axis.max,
+            )
+    };
+    let y_latency = |latency: f64| {
+        upper_bottom
+            - (upper_bottom - upper_top)
+                * domain_fraction(latency, latency_axis.min, latency_axis.max)
+    };
+    let y_rate = |rate: f64| {
+        lower_bottom
+            - (lower_bottom - lower_top) * domain_fraction(rate, rate_axis.min, rate_axis.max)
+    };
     let mut svg = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.0} 500\" role=\"img\" aria-label=\"{}\"><rect width=\"{width:.0}\" height=\"500\" fill=\"#fff\"/><text x=\"24\" y=\"30\" font-family=\"sans-serif\" font-size=\"17\" font-weight=\"700\">{}</text><text x=\"24\" y=\"50\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#61707f\">Only complete, sealed cohorts. Rate is completions divided by summed end-to-end elapsed time; it is not inferred wall-clock throughput.</text>",
         escape(title),
         escape(title)
     );
-    for (top, bottom, label, maximum) in [
+    for (top, bottom, label, axis) in [
         (
             upper_top,
             upper_bottom,
-            "p95 end-to-end latency (ms)",
-            max_latency,
+            "p95 end-to-end latency",
+            &latency_axis,
         ),
         (
             lower_top,
             lower_bottom,
-            "aggregate service rate (completed/s)",
-            max_rate,
+            "aggregate service rate",
+            &rate_axis,
         ),
     ] {
-        for tick in 0..=4 {
-            let fraction = tick as f64 / 4.0;
-            let y = bottom - (bottom - top) * fraction;
-            svg.push_str(&format!("<line x1=\"{left:.1}\" y1=\"{y:.1}\" x2=\"{right:.1}\" y2=\"{y:.1}\" stroke=\"#dce4ec\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{:.1}</text>", left - 8.0, y + 3.0, maximum * fraction));
+        for value in &axis.ticks {
+            let y = bottom - (bottom - top) * domain_fraction(*value, axis.min, axis.max);
+            svg.push_str(&format!("<line x1=\"{left:.1}\" y1=\"{y:.1}\" x2=\"{right:.1}\" y2=\"{y:.1}\" stroke=\"#dce4ec\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{}</text>", left - 8.0, y + 3.0, axis.format(*value)));
         }
-        svg.push_str(&format!("<text x=\"{left:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"12\" font-weight=\"700\">{label}</text>", top - 8.0));
+        svg.push_str(&format!("<text x=\"{left:.1}\" y=\"{:.1}\" font-family=\"sans-serif\" font-size=\"12\" font-weight=\"700\">{label} ({})</text>", top - 8.0, escape(&axis.unit)));
     }
     for (index, (concurrency, latency, rate, label)) in curve.iter().enumerate() {
         let px = x(*concurrency);
@@ -595,7 +614,11 @@ fn scaling_svg(title: &str, curve: &[(usize, f64, f64, String)]) -> String {
         ] {
             svg.push_str(&format!("<circle cx=\"{px:.1}\" cy=\"{y:.1}\" r=\"4\" fill=\"{color}\"><title>{}: concurrency {}, {:.3} {unit}</title></circle>", escape(label), concurrency, value));
         }
-        svg.push_str(&format!("<text x=\"{px:.1}\" y=\"482\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{concurrency}</text>"));
+    }
+    for value in &concurrency_axis.ticks {
+        let px = left
+            + (right - left) * domain_fraction(*value, concurrency_axis.min, concurrency_axis.max);
+        svg.push_str(&format!("<text x=\"{px:.1}\" y=\"482\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"10\" fill=\"#61707f\">{}</text>", concurrency_axis.format(*value)));
     }
     svg.push_str(&format!("<text x=\"{:.1}\" y=\"496\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"11\">configured concurrency</text><text x=\"{left:.1}\" y=\"270\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#4472c4\">● latency</text><text x=\"{:.1}\" y=\"270\" font-family=\"sans-serif\" font-size=\"11\" fill=\"#e07a28\">● service rate</text></svg>\n", width / 2.0, left + 120.0));
     svg
@@ -1218,6 +1241,20 @@ mod tests {
 
         // A partial cohort cannot become a fabricated scaling point.
         assert!(scaling_graphs(&rows[..rows.len() - 1]).is_empty());
+    }
+
+    #[test]
+    fn scaling_svg_uses_shared_time_units_and_rounded_axes() {
+        let svg = scaling_svg(
+            "fixture",
+            &[
+                (1, 100.0, 1.0, "one".into()),
+                (2, 10_001.0, 2.0, "two".into()),
+            ],
+        );
+        assert!(svg.contains("p95 end-to-end latency (s)"));
+        assert!(svg.contains("aggregate service rate (completed/s)"));
+        assert!(svg.contains(">10</text>"));
     }
 
     #[test]
