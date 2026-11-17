@@ -4829,7 +4829,7 @@ fn concurrent_bpftrace_sudo_help_and_sweep_failures_are_reported_once() {
 
 #[cfg(unix)]
 #[test]
-fn concurrent_sysstat_permission_preflight_is_deduplicated_before_agent_start() {
+fn concurrent_process_collectors_do_not_require_pidstat() {
     use std::os::unix::fs::PermissionsExt;
     for collector in ["mpstat", "iostat"] {
         let project = replay_project(4);
@@ -4846,22 +4846,13 @@ fn concurrent_sysstat_permission_preflight_is_deduplicated_before_agent_start() 
             );
         project.write("benchmark.toml", &config);
         let result = replay(&project, "success", &[]);
-        let error = stderr(&result);
-        expect_failure(&result, "4 concurrent benchmark replica(s) failed");
-        assert_eq!(
-            error.matches("cannot execute pidstat").count(),
-            1,
-            "{error}"
-        );
-        assert_eq!(error.matches("chmod u+x").count(), 1, "{error}");
-        assert!(error.contains("replicas 1, 2, 3, 4"), "{error}");
-        assert!(!project.0.join("run-concurrency-1.log").exists());
+        expect_success(&result);
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn cpu_and_io_collectors_use_project_local_pidstat_in_preflight_and_run() {
+fn cpu_and_io_collectors_do_not_spawn_project_local_pidstat() {
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(1);
     let calls = project.0.join("pidstat-calls");
@@ -4880,14 +4871,9 @@ fn cpu_and_io_collectors_use_project_local_pidstat_in_preflight_and_run() {
     project.write("benchmark.toml", &config);
     let result = replay(&project, "success", &[]);
     expect_success(&result);
-    let calls = std::fs::read_to_string(calls).unwrap();
     assert!(
-        calls.lines().filter(|line| line.starts_with("-u ")).count() >= 2,
-        "{calls}"
-    );
-    assert!(
-        calls.lines().filter(|line| line.starts_with("-d ")).count() >= 2,
-        "{calls}"
+        !calls.exists(),
+        "direct process-tree collection must not invoke project-local pidstat"
     );
 }
 
@@ -4966,36 +4952,7 @@ fn replay_collector_failure_can_be_ignored_with_durable_evidence() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn replay_cannot_ignore_unknown_collector_custody() {
-    use std::os::unix::fs::PermissionsExt;
-    let project = replay_project(1);
-    let marker = project.0.join("pidstat-preflight-done");
-    let script = format!(
-        "#!/bin/sh\nif [ ! -e '{}' ]; then touch '{}'; exit 0; fi\nexit 7\n",
-        marker.display(),
-        marker.display()
-    );
-    project.write(".asb-tools/mpstat/bin/pidstat", &script);
-    std::fs::set_permissions(
-        project.0.join(".asb-tools/mpstat/bin/pidstat"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
-        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
-    project.write("benchmark.toml", &config);
-    let result = replay(&project, "bpf-clock", &["--json", "--ignore-collector"]);
-    assert!(!result.status.success());
-    assert!(
-        stderr(&result).contains("collector cleanup is unconfirmed"),
-        "{}",
-        stderr(&result)
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
+fn replay_ignore_collector_keeps_direct_sysstat_collectors_active() {
     use std::os::unix::fs::PermissionsExt;
     for collector in ["mpstat", "iostat"] {
         let project = replay_project(1);
@@ -5019,29 +4976,21 @@ fn replay_ignore_collector_skips_unexecutable_sysstat_without_spawning_it() {
             "preflight must not execute the unavailable tool"
         );
         let row: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(row["replay_operational_success"], false);
-        let events = row["ignored_failures"].as_array().unwrap();
-        assert!(events.iter().any(|event| {
-            event["kind"] == "collector_error"
-                && event["ignored"] == true
-                && event["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains(collector))
-        }));
+        assert_eq!(row["replay_operational_success"], true);
+        assert!(
+            row["ignored_failures"]
+                .as_array()
+                .is_none_or(|events| events.is_empty())
+        );
         let dir = project
             .0
             .join(row["measurement_directory"].as_str().unwrap());
         let artifact: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join(format!("{collector}.json"))).unwrap())
                 .unwrap();
-        assert_eq!(artifact["status"], "unavailable");
-        assert!(artifact["metrics"].as_object().unwrap().is_empty());
-        let startup: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("collector-startup.json")).unwrap())
-                .unwrap();
-        assert_eq!(startup["stage"], "before-collector-probe");
-        assert_eq!(startup["events"][0]["collector"], collector);
-        assert_eq!(startup["events"][0]["ignored"], true);
+        assert_eq!(artifact["source"], "direct-procfs-process-tree");
+        assert!(artifact["metrics"].is_object());
+        assert!(!dir.join("collector-startup.json").exists());
         let run: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
         assert_eq!(run["ignored_failures"], row["ignored_failures"]);
@@ -5178,29 +5127,7 @@ fn replay_ignore_collector_skips_dependents_without_running_their_probes() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn replay_ignore_collector_does_not_suppress_a_spawned_preflight_failure() {
-    use std::os::unix::fs::PermissionsExt;
-    let project = replay_project(1);
-    let marker = project.0.join("pidstat-ran");
-    let script = format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display());
-    project.write(".asb-tools/mpstat/bin/pidstat", &script);
-    std::fs::set_permissions(
-        project.0.join(".asb-tools/mpstat/bin/pidstat"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    let config = std::fs::read_to_string(project.0.join("benchmark.toml")).unwrap()
-        + "[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['mpstat']\n";
-    project.write("benchmark.toml", &config);
-    let output = replay(&project, "success", &["--json", "--ignore-collector"]);
-    assert!(!output.status.success());
-    assert!(marker.exists());
-    assert!(stderr(&output).contains("pidstat"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn ignored_collector_startup_remains_auditable_when_replay_later_fails() {
+fn direct_sysstat_collection_does_not_invent_startup_warnings_on_replay_failure() {
     use std::os::unix::fs::PermissionsExt;
     let project = replay_project(1);
     project.write(".asb-tools/mpstat/bin/pidstat", "#!/bin/sh\nexit 7\n");
@@ -5223,12 +5150,12 @@ fn ignored_collector_startup_remains_auditable_when_replay_later_fails() {
         ],
     );
     assert!(!output.status.success());
-    let startup: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(project.0.join("measurements/collector-startup.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(startup["events"][0]["collector"], "mpstat");
-    assert_eq!(startup["events"][0]["ignored"], true);
+    assert!(
+        !project
+            .0
+            .join("measurements/collector-startup.json")
+            .exists()
+    );
 }
 
 #[cfg(target_os = "linux")]
