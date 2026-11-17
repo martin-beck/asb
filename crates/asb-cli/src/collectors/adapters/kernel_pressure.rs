@@ -1,6 +1,6 @@
 //! Pressure observations from the CPU collector's exclusive agent-tree leaf.
 //! A whole-container or host PSI file is never an isolation fallback.
-mod capture;
+pub(crate) mod capture;
 #[cfg(test)]
 mod tests;
 

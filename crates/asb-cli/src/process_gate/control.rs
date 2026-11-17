@@ -220,6 +220,10 @@ impl Parent {
             }
         }
     }
+
+    pub fn observation_failed(&self) -> bool {
+        self.failed
+    }
 }
 
 #[cfg(test)]
