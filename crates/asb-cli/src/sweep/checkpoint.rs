@@ -353,6 +353,14 @@ pub(super) struct Inputs {
     runtime: Option<(Vec<crate::runtime_inputs::Dependency>, PathBuf)>,
 }
 
+pub(super) struct ResumeRequest<'a> {
+    pub mode: Option<crate::tape::Mode>,
+    pub replay_sources: &'a [PathBuf],
+    pub invocation_dir: &'a Path,
+    pub allow_collector_teardown_repair: bool,
+    pub prior_asb_executable: Option<&'a Path>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavedInputSeal {
@@ -408,9 +416,7 @@ impl Inputs {
         parent: &Path,
         results: &Path,
         plan: &super::plan::SweepPlan,
-        mode: Option<crate::tape::Mode>,
-        replay_sources: &[PathBuf],
-        invocation_dir: &Path,
+        request: ResumeRequest<'_>,
     ) -> Result<Self, Error> {
         let directory = results.join(".checkpoint");
         if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir())
@@ -451,12 +457,27 @@ impl Inputs {
         saved.validate()?;
         if plan.execution.is_some() {
             campaigns::verify_private_inputs(results, plan)?;
-            campaigns::verify_current_normalization(parent, results, plan, invocation_dir)?;
+            campaigns::verify_current_normalization(parent, results, plan, request.invocation_dir)?;
         }
-        let current = Self::build(parent, results, plan, mode, replay_sources, invocation_dir)?;
-        if current.initial != saved.initial {
+        let current = Self::build(
+            parent,
+            results,
+            plan,
+            request.mode,
+            request.replay_sources,
+            request.invocation_dir,
+        )?;
+        if current.initial != saved.initial
+            && !current.allows_collector_teardown_repair(
+                &saved,
+                plan.execution.is_some(),
+                request.mode,
+                request.allow_collector_teardown_repair,
+                request.prior_asb_executable,
+            )
+        {
             return Err(resume_error(
-                "the executable, configuration, runtime, environment or replay inputs changed",
+                "the executable, configuration, runtime, environment or replay inputs changed; a collector teardown repair requires --allow-collector-teardown-repair plus --prior-asb-executable that reproduces the original input seal",
             ));
         }
         if plan.execution.is_some() {
@@ -736,6 +757,69 @@ impl Inputs {
     }
 }
 
+/// This is an explicit operator override for an ASB executable repair that is
+/// limited to collector teardown. The old whole-input digest cannot identify a
+/// changed executable separately, so retain the campaign's immutable evidence
+/// checks and require every non-executable declared root to remain structurally
+/// identical. It never enables a fresh run, live/record mode, or a pending
+/// input seal.
+impl Inputs {
+    fn allows_collector_teardown_repair(
+        &self,
+        saved: &SavedInputSeal,
+        campaign: bool,
+        mode: Option<crate::tape::Mode>,
+        requested: bool,
+        prior_asb_executable: Option<&Path>,
+    ) -> bool {
+        if !requested
+            || !campaign
+            || mode != Some(crate::tape::Mode::Replay)
+            || saved.status != "stable"
+        {
+            return false;
+        }
+        let Some(prior_asb_executable) = prior_asb_executable else {
+            return false;
+        };
+        let mut historical_roots = saved.roots.clone();
+        let mut saved_executables: Vec<_> = historical_roots
+            .iter_mut()
+            .filter(|root| root.name == "asb-executable")
+            .collect();
+        let current_executables: Vec<_> = self
+            .roots
+            .iter()
+            .filter(|root| root.name == "asb-executable")
+            .collect();
+        if saved_executables.len() != 1
+            || current_executables.len() != 1
+            || saved_executables[0].bind_location
+            || !saved_executables[0].direct_file
+        {
+            return false;
+        }
+        saved_executables[0].path = match std::path::absolute(prior_asb_executable) {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
+        current_executables[0].bind_location == saved_executables[0].bind_location
+            && current_executables[0].direct_file == saved_executables[0].direct_file
+            && saved
+                .roots
+                .iter()
+                .filter(|root| root.name != "asb-executable")
+                .eq(self
+                    .roots
+                    .iter()
+                    .filter(|root| root.name != "asb-executable"))
+            && self
+                .snapshotter
+                .fingerprint(&historical_roots, &self.context, false, &[])
+                .is_ok_and(|fingerprint| fingerprint == saved.initial)
+    }
+}
+
 fn resume_error(reason: &str) -> Error {
     Error::Input(format!(
         "cannot resume this sweep: {reason}; existing results were not replaced; restore the original inputs or run without --resume for a fresh sweep"
@@ -787,6 +871,67 @@ mod tests {
             }
             .valid()
         );
+    }
+
+    #[test]
+    fn collector_teardown_override_revalidates_original_non_executable_inputs() {
+        let directory = Directory::new();
+        let current_executable = directory.0.join("asb");
+        let prior_executable = directory.0.join("asb-before-repair");
+        let configuration_path = directory.0.join("benchmark.toml");
+        std::fs::write(&current_executable, "original executable").unwrap();
+        std::fs::write(&prior_executable, "original executable").unwrap();
+        std::fs::write(&configuration_path, "original configuration").unwrap();
+        let executable = Root {
+            name: "asb-executable".into(),
+            path: current_executable,
+            bind_location: false,
+            direct_file: true,
+        };
+        let configuration = Root::path("configuration", configuration_path.clone());
+        let state = directory.0.join("state");
+        let snapshotter = Snapshotter::open(&state, "python3".into()).unwrap();
+        let context = json!({"protocol":"fixture"});
+        let fingerprint = snapshotter
+            .fingerprint(
+                &[executable.clone(), configuration.clone()],
+                &context,
+                false,
+                &[],
+            )
+            .unwrap();
+        let saved = SavedInputSeal {
+            schema_version: 1,
+            status: "stable".into(),
+            scope: "input-stability-only-not-a-resume-receipt".into(),
+            roots: vec![executable.clone(), configuration.clone()],
+            initial: fingerprint.clone(),
+            r#final: Some(fingerprint),
+        };
+        let inputs = Inputs {
+            directory: state,
+            snapshotter,
+            roots: vec![executable.clone(), configuration.clone()],
+            context,
+            initial: saved.initial.clone(),
+            runtime: None,
+        };
+        std::fs::write(&executable.path, "repaired executable").unwrap();
+        assert!(inputs.allows_collector_teardown_repair(
+            &saved,
+            true,
+            Some(crate::tape::Mode::Replay),
+            true,
+            Some(&prior_executable),
+        ));
+        std::fs::write(&configuration_path, "changed configuration").unwrap();
+        assert!(!inputs.allows_collector_teardown_repair(
+            &saved,
+            true,
+            Some(crate::tape::Mode::Replay),
+            true,
+            Some(&prior_executable),
+        ));
     }
 
     struct Directory(PathBuf);

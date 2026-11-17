@@ -121,6 +121,13 @@ pub(crate) struct Options<'a> {
     pub jobs: usize,
     pub max_active_attempts: Option<usize>,
     pub resume: bool,
+    /// Permit a stable replay campaign to continue after an explicit
+    /// collector-teardown-only executable repair. All non-executable input
+    /// roots and campaign receipts remain validated.
+    pub allow_collector_teardown_repair: bool,
+    /// Preserved ASB executable that sealed a retained replay checkpoint before
+    /// the collector-teardown repair replaced the running executable.
+    pub prior_asb_executable: Option<&'a Path>,
     /// Maximum failed configurations tolerated while continuing. `None` keeps
     /// the existing fail-after-summary behaviour.
     pub continue_after_failures: Option<usize>,
@@ -162,6 +169,8 @@ impl Default for Options<'_> {
             jobs: 1,
             max_active_attempts: None,
             resume: false,
+            allow_collector_teardown_repair: false,
+            prior_asb_executable: None,
             continue_after_failures: None,
             reconcile_completed: false,
             import_grades: false,

@@ -433,6 +433,10 @@ pub(crate) fn run_with_interactive(
                 return fail(stderr, &io_error(error).to_string());
             }
             let cassette_root = options.cassette_root.as_deref().map(|path| base.join(path));
+            let prior_asb_executable = options
+                .prior_asb_executable
+                .as_deref()
+                .map(|path| base.join(path));
             sweep::run_with_options(
                 &path,
                 sweep::Options {
@@ -466,6 +470,8 @@ pub(crate) fn run_with_interactive(
                     jobs: usize::from(options.jobs),
                     max_active_attempts: options.max_active_attempts.map(usize::from),
                     resume: options.resume || options.continue_after_failures.is_some(),
+                    allow_collector_teardown_repair: options.allow_collector_teardown_repair,
+                    prior_asb_executable: prior_asb_executable.as_deref(),
                     continue_after_failures: options
                         .continue_after_failures
                         .map(|value| value.unwrap_or(usize::MAX)),
@@ -1534,6 +1540,16 @@ struct SweepArgs {
     /// Reuse validated completed groups and run untouched configurations; incomplete groups require recovery.
     #[arg(long)]
     resume: bool,
+    /// Continue a stable replay after an explicit collector-teardown-only ASB executable repair. Configuration, workload, cassette, runtime and campaign evidence must still match.
+    #[arg(long, requires_all = ["resume", "replay-direction"])]
+    allow_collector_teardown_repair: bool,
+    /// ASB executable preserved before a collector-teardown repair; it must reproduce the original checkpoint input seal.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "allow_collector_teardown_repair"
+    )]
+    prior_asb_executable: Option<String>,
     /// Continue an interrupted sweep. Optionally stop after this many failed benchmarks; without a value, continue after any number of failures.
     #[arg(long = "continue", num_args = 0..=1, value_name = "FAILED")]
     continue_after_failures: Option<Option<usize>>,

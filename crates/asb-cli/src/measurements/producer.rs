@@ -196,7 +196,7 @@ impl Producer {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]
             Some(Active::Process(process)) => {
-                process.policy.graceful.unwrap_or_default() + Duration::from_secs(8)
+                process.policy.graceful.unwrap_or_default() + GUARDIAN_SETTLEMENT_BUDGET
             }
             #[cfg(test)]
             Some(Active::Snapshot(_)) => ProcessTreeSnapshot::stop_budget(),
@@ -275,6 +275,10 @@ struct Process {
 
 #[cfg(target_os = "linux")]
 const PRINCIPAL_EXIT_GUARDIAN_GRACE: Duration = Duration::from_secs(8);
+// The guardian must still prove quiescence and the pipes must drain before a
+// result can publish. This only gives a dense host enough bounded time to
+// schedule that cleanup after the principal has already exited.
+const GUARDIAN_SETTLEMENT_BUDGET: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "linux")]
 impl Process {
@@ -676,7 +680,7 @@ mod tests {
             active: Some(Active::Process(process)),
             completion: None,
         };
-        assert_eq!(producer.stop_budget(), Duration::from_secs(308));
+        assert_eq!(producer.stop_budget(), Duration::from_secs(330));
     }
 
     #[test]
