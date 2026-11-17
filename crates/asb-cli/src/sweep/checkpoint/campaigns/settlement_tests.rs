@@ -483,9 +483,9 @@ fn remote_allocation_uses_original_invocation_and_actual_closed_attempt_linkage(
             .unwrap(),
             _ => (),
         }
-        let calls = std::cell::Cell::new(0);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = state.seal_campaigns_fixture(&fixture.0, &results, &plan, |context| {
-            calls.set(calls.get() + 1);
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(context.recovery.project_root, fixture.0);
             assert_ne!(
                 context.recovery.reference.preparation_id,
@@ -504,7 +504,7 @@ fn remote_allocation_uses_original_invocation_and_actual_closed_attempt_linkage(
         });
         if matches!(case, "valid" | "alias") {
             result.unwrap();
-            assert_eq!(calls.get(), 4);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
             assert!(
                 results
                     .join(".checkpoint/campaign-completed/000001/000002.json")
