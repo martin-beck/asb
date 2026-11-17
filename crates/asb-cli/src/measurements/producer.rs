@@ -272,6 +272,10 @@ struct Process {
     handle: Option<std::thread::JoinHandle<Completion>>,
     policy: Policy,
 }
+
+#[cfg(target_os = "linux")]
+const PRINCIPAL_EXIT_GUARDIAN_GRACE: Duration = Duration::from_secs(8);
+
 #[cfg(target_os = "linux")]
 impl Process {
     fn settle_before(
@@ -317,7 +321,6 @@ fn capture(
     // Its gate must still publish quiescence before any raw capture is trusted,
     // but a guardian that lingers after that exit can otherwise consume the
     // whole settlement budget under a dense cohort.
-    const PRINCIPAL_EXIT_GUARDIAN_GRACE: Duration = Duration::from_secs(8);
     let mut exit = None;
     let mut cleanup_confirmed = false;
     let mut out = gate.take_stdout();
@@ -390,15 +393,16 @@ fn capture(
             }
             if drain.is_none()
                 && !guardian_cancel_requested
-                && principal_exit_observed.is_some_and(|observed| {
-                    observed.elapsed() >= PRINCIPAL_EXIT_GUARDIAN_GRACE
-                })
+                && exit.is_some()
+                && guardian_cancellation_due(stopped, principal_exit_observed)
             {
                 // Preserve the existing proof boundary: this only asks the
                 // owned guardian to finish after its direct principal is
-                // known exited. `try_wait` must still observe the guardian's
-                // quiescence receipt and the capture pump must drain before
-                // this producer can publish any collector result.
+                // known exited. An explicit stop must not spend its bounded
+                // parent-settlement budget on an additional passive grace:
+                // the principal is already gone, and `try_wait` must still
+                // observe guardian quiescence plus a fully drained pump
+                // before this producer can publish any collector result.
                 gate.request_cancel().map_err(|error| {
                     format!(
                         "collector guardian did not settle after confirmed principal exit: {error}"
@@ -505,6 +509,13 @@ fn capture(
             completion
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn guardian_cancellation_due(stopped: bool, principal_exit_observed: Option<Instant>) -> bool {
+    stopped
+        || principal_exit_observed
+            .is_some_and(|observed| observed.elapsed() >= PRINCIPAL_EXIT_GUARDIAN_GRACE)
 }
 
 #[cfg(target_os = "linux")]
@@ -666,6 +677,17 @@ mod tests {
             completion: None,
         };
         assert_eq!(producer.stop_budget(), Duration::from_secs(308));
+    }
+
+    #[test]
+    fn explicit_stop_cancels_a_guardian_once_principal_exit_is_confirmed() {
+        let just_observed = Instant::now();
+        assert!(guardian_cancellation_due(true, Some(just_observed)));
+        assert!(!guardian_cancellation_due(false, Some(just_observed)));
+        assert!(guardian_cancellation_due(
+            false,
+            Some(just_observed - PRINCIPAL_EXIT_GUARDIAN_GRACE),
+        ));
     }
 
     #[test]
