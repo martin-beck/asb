@@ -385,7 +385,12 @@ impl ManagedGate {
                 // but the final principal-exit frame can become readable just
                 // after the pre-wait poll above. Consume it before callers
                 // classify a settled capture as lacking a principal result.
-                control.poll(id).map_err(incompatible)?;
+                // A malformed optional observation was already recorded by
+                // `observe`; preserve the verified guardian exit rather than
+                // converting it into a second, contradictory ABI failure.
+                if !control.observation_failed() {
+                    control.poll(id).map_err(incompatible)?;
+                }
             }
             let code = self.receiver.quiescent.ok_or_else(|| io::Error::other(format!(
                 "native gate exited without a quiescence receipt; descendant cleanup is unconfirmed; role={} program={} gate_pid={} exit={status:?}",
