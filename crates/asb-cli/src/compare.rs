@@ -569,16 +569,25 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     html.push_str(&coverage::metric_html(&prepared.metric_groups));
     html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Each row is one selected task attempt for an agent/provider/model/workload combination. Runtime, success rate, token usage, host metadata, component timings, and structured collector measurements are summarized in the table and charts. Network wait remains null unless directly observed. The complete machine-readable evidence inventory is available in comparison.json.</p></section>");
     html.push_str(&collector_commands_html(benchmarks));
-    html.push_str("<section class=\"filters\"><div class=\"section-title\"><h2>Filter results</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\">");
+    let mut filters = String::from(
+        "<div class=\"section-title\"><h2>Filter results</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\">",
+    );
     for (group, values) in dimensions {
-        html.push_str(&format!("<fieldset><legend>{}</legend>", title_case(group)));
+        filters.push_str(&format!("<fieldset><legend>{}</legend>", title_case(group)));
         for value in values {
             let escaped = escape(value);
-            html.push_str(&format!("<label><input type=\"checkbox\" data-group=\"{group}\" value=\"{escaped}\" checked><span>{escaped}</span></label>"));
+            filters.push_str(&format!("<label><input type=\"checkbox\" data-group=\"{group}\" value=\"{escaped}\" checked><span>{escaped}</span></label>"));
         }
-        html.push_str("</fieldset>");
+        filters.push_str("</fieldset>");
     }
-    html.push_str("</div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
+    filters.push_str("</div><p class=\"filter-count\" id=\"filter-count\"></p>");
+    html.push_str("<section class=\"filters\">");
+    html.push_str(&folded_section_html(
+        "folded-filter-pane",
+        "Filter results",
+        filters,
+    ));
+    html.push_str("</section>");
     if !aggregate {
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar to keep it visually marked while comparing results.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
         for graph in &graphs {
@@ -836,18 +845,27 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     }
     if aggregate {
         html.push_str(&distributions::html(benchmarks));
-        html.push_str("<section><h2>Other analysis artifacts</h2><p>Original per-run charts and cohort analyses remain available as files.</p><a href=\"cohort-analysis.json\">Cohort analysis data</a><ul>");
+        let mut artifacts = String::from(
+            "<p>Original per-run charts and cohort analyses remain available as files.</p><a href=\"cohort-analysis.json\">Cohort analysis data</a><ul>",
+        );
         for graph in &graphs {
             let label =
                 analysis::graph_section(graph).map_or(graph.as_str(), |section| section.title);
-            html.push_str(&format!(
+            artifacts.push_str(&format!(
                 "<li><a href=\"{}\">{} ({})</a></li>",
                 escape(graph),
                 escape(label),
                 escape(graph)
             ));
         }
-        html.push_str("</ul></section>");
+        artifacts.push_str("</ul>");
+        html.push_str("<section>");
+        html.push_str(&folded_section_html(
+            "folded-artifact-section",
+            "Other analysis artifacts",
+            artifacts,
+        ));
+        html.push_str("</section>");
     } else {
         let mut sections = std::collections::BTreeMap::<(&str, &str), Vec<&String>>::new();
         for graph in &graphs {
@@ -859,20 +877,23 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             }
         }
         for ((title, description), section_graphs) in sections {
-            html.push_str(&format!("<section><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">{}</p></div><div class=\"charts\">", escape(title), escape(description)));
-            for graph in section_graphs {
-                html.push_str(&chart_figure(stage, graph)?);
-            }
-            html.push_str("</div></section>");
+            let section_graphs = section_graphs.into_iter().cloned().collect::<Vec<_>>();
+            html.push_str(&format!(
+                "<section><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">{}</p></div>",
+                escape(title),
+                escape(description)
+            ));
+            html.push_str(&collector_chart_groups_html(stage, &section_graphs)?);
+            html.push_str("</section>");
         }
-        html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div><div class=\"charts\">");
-        for graph in graphs
+        let remaining_graphs = graphs
             .iter()
             .filter(|graph| analysis::graph_section(graph).is_none())
-        {
-            html.push_str(&chart_figure(stage, graph)?);
-        }
-        html.push_str("</div></section>");
+            .cloned()
+            .collect::<Vec<_>>();
+        html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div>");
+        html.push_str(&collector_chart_groups_html(stage, &remaining_graphs)?);
+        html.push_str("</section>");
     }
     html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
     html.push_str(INTERACTIVE_SCRIPT);
@@ -1101,14 +1122,19 @@ fn graph_presentation(comparison_dir: &Path, graph: &str) -> Result<ChartPresent
     Ok(chart_presentation(&svg, graph))
 }
 
-/// Render a report table closed by default.  This is emitted directly by every
-/// report writer so report readability does not depend on JavaScript running.
-pub(super) fn folded_table_html(summary: &str, contents: impl AsRef<str>) -> String {
+/// Render a static disclosure closed by default. Every report writer uses this
+/// so report readability does not depend on JavaScript running.
+pub(super) fn folded_section_html(class: &str, summary: &str, contents: impl AsRef<str>) -> String {
     format!(
-        "<details class=\"folded-table\"><summary>{}</summary>{}</details>",
+        "<details class=\"{class}\"><summary>{}</summary>{}</details>",
         escape(summary),
         contents.as_ref()
     )
+}
+
+/// Render a report table closed by default.
+pub(super) fn folded_table_html(summary: &str, contents: impl AsRef<str>) -> String {
+    folded_section_html("folded-table", summary, contents)
 }
 
 /// Render already-generated charts under stable collector headings.  Every
@@ -1128,16 +1154,19 @@ pub(super) fn collector_chart_groups_html(
 
     let mut html = String::new();
     for (collector, entries) in groups {
-        html.push_str(&format!(
-            "<details class=\"collector-graph-group\"><summary>{} ({} graph{})</summary><div class=\"charts collector-charts\">",
-            escape(collector),
-            entries.len(),
-            if entries.len() == 1 { "" } else { "s" },
+        let charts = entries
+            .iter()
+            .map(|graph| chart_figure(comparison_dir, graph))
+            .collect::<Result<String, Error>>()?;
+        html.push_str(&folded_section_html(
+            "collector-graph-group",
+            &format!(
+                "{collector} ({} graph{})",
+                entries.len(),
+                if entries.len() == 1 { "" } else { "s" },
+            ),
+            format!("<div class=\"charts collector-charts\">{charts}</div>"),
         ));
-        for graph in entries {
-            html.push_str(&chart_figure(comparison_dir, graph)?);
-        }
-        html.push_str("</div></details>");
     }
     Ok(html)
 }
@@ -1216,7 +1245,7 @@ const HTML_HEAD: &str = r#"<!doctype html><html lang="en"><head><meta charset="u
 :root{color-scheme:light;--ink:#18212b;--muted:#61707f;--line:#dce4ec;--panel:#fff;--accent:#1769aa;--accent-soft:#e8f2fa;--bg:#f4f7fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1500px;margin:auto;padding:36px 28px 56px}.hero{background:linear-gradient(135deg,#12344d,#1769aa);color:#fff;border-radius:18px;padding:42px 46px;box-shadow:0 14px 32px #12344d33}.hero h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.05;margin:4px 0 14px;letter-spacing:-.04em}.hero p{max-width:760px;margin:0;color:#e5f2fb;font-size:16px}.eyebrow{font-size:11px!important;letter-spacing:.16em;font-weight:700}.explain,.filters,section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:20px;padding:24px;box-shadow:0 4px 14px #17324d0b}.explain{border-left:4px solid var(--accent)}h2{font-size:19px;margin:0}.section-title{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}legend{font-weight:700;color:var(--accent);padding:0 5px}label{display:flex;gap:8px;align-items:flex-start;margin:6px 0;color:var(--muted);overflow-wrap:anywhere}input{accent-color:var(--accent);margin-top:4px}.filter-count,.muted{color:var(--muted);margin:14px 0 0}.text-link,a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button{background:#fff;border:1px solid #b9c9d8;border-radius:7px;color:var(--accent);cursor:pointer;padding:7px 11px;margin-left:6px}button:hover{background:var(--accent-soft)}.table-wrap{overflow:auto}table{border-collapse:collapse;min-width:100%;white-space:nowrap}th{text-align:left;background:#eef4f8;color:#405466;font-size:12px;letter-spacing:.04em;text-transform:uppercase}th,td{border-bottom:1px solid var(--line);padding:12px 10px;vertical-align:top}.links{white-space:normal;min-width:170px}.links a{display:inline-block;margin:0 8px 5px 0;font-size:12px}.artifact-list{padding-left:18px;margin:8px 0;white-space:normal}.perfetto-metric{display:block;width:min(760px,100%);height:180px;border:0;margin:8px 0}.status{display:block;color:#9a4b00;background:#fff4e5;border-radius:5px;font-size:11px;padding:3px 6px;margin-top:4px;max-width:260px;white-space:normal}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.charts figure{margin:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfdff}.charts img{width:100%;height:auto;display:block}.charts figcaption{padding:8px 2px 2px;font-size:12px;overflow-wrap:anywhere}footer{color:var(--muted);text-align:center;padding:28px 0 0}code{background:#e9eef3;border-radius:4px;padding:2px 5px}@media(max-width:700px){.shell{padding:18px 12px}.hero{padding:30px 24px}.section-title{align-items:flex-start;flex-direction:column}.section-title button{margin:0 6px 0 0}}
 </style></head><body>"#;
 
-const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan';color:var(--muted);font-size:11px}.collector-graph-group{grid-column:1/-1;border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group>summary,.folded-table>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.folded-table[open]>summary{margin-bottom:12px}.collector-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
+const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan';color:var(--muted);font-size:11px}.collector-graph-group,.report-graph-group,.folded-filter-pane,.folded-artifact-section{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group{grid-column:1/-1}.collector-graph-group>summary,.report-graph-group>summary,.folded-filter-pane>summary,.folded-artifact-section>summary,.folded-table>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.report-graph-group[open]>summary,.folded-filter-pane[open]>summary,.folded-artifact-section[open]>summary,.folded-table[open]>summary{margin-bottom:12px}.collector-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
 
 const HIGHLIGHT_STYLE: &str = r#".interactive-chart.highlighted{outline:5px solid #d81b60;outline-offset:3px;box-shadow:0 0 0 9px #d81b6033}.highlight-toggle{display:inline-flex;align-items:center;gap:5px;margin:0 6px 0 0;color:#8d1748;font-weight:700}.highlight-toggle input{accent-color:#d81b60;margin:0}.chart-picker tr.highlighted{background:#fff0f5;box-shadow:inset 5px 0 #d81b60}"#;
 
@@ -2078,6 +2107,15 @@ mod tests {
         assert!(html[flamegraphs..].starts_with(
             "<section class=\"flamegraph-section\"><details><summary>Flamegraphs</summary>"
         ));
+        assert!(
+            html.contains(
+                "<details class=\"folded-filter-pane\"><summary>Filter results</summary>"
+            )
+        );
+        assert!(html.contains("<details class=\"report-graph-group\"><summary>bug-fix · default"));
+        assert!(html.contains(
+            "<details class=\"folded-artifact-section\"><summary>Other analysis artifacts</summary>"
+        ));
         assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
         assert_eq!(html.matches("Download original SVG").count(), 2);
         assert_eq!(html.matches("Download folded stacks").count(), 2);
@@ -2290,6 +2328,11 @@ mod tests {
         .unwrap();
         assert_eq!(comparison["benchmarks"][0]["status"], "completed");
         assert!(report.contains("Filter results"));
+        assert!(
+            report.contains(
+                "<details class=\"folded-filter-pane\"><summary>Filter results</summary>"
+            )
+        );
         assert!(report.contains("data-group=\"agent\""));
         assert!(report.contains("No selected benchmarks have data for this graph."));
         assert!(report.contains("installReportFilters(document)"));
@@ -2302,6 +2345,7 @@ mod tests {
         assert!(report.contains(">Details</th>"));
         assert!(report.contains("All metrics"));
         assert!(report.contains("metric-tool_call_count.svg"));
+        assert!(report.contains("<details class=\"collector-graph-group\"><summary>"));
         assert!(report.contains("Host metadata"));
         assert!(report.contains("Neoverse-N1"));
         assert!(report.contains("Component timings"));
