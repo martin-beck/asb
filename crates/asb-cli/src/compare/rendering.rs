@@ -441,11 +441,20 @@ fn write_agent_html_report(
     if !collector_graphs.is_empty() {
         html.push_str("<section class=\"explain\"><strong>Collector diagnostics</strong><p>Specialized collector graphs are included below with their original cross-run scope. They are diagnostic evidence, not per-agent scalar aggregates or benchmark scores.</p></section>");
     }
-    html.push_str("<section class=\"filters\"><div class=\"section-title\"><h2>Filter agents</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\"><fieldset><legend>Agent</legend>");
+    let mut filters = String::from(
+        "<div class=\"section-title\"><h2>Filter agents</h2><div><button type=\"button\" data-action=\"all\">Select all</button><button type=\"button\" data-action=\"none\">Clear all</button></div></div><div class=\"filter-grid\"><fieldset><legend>Agent</legend>",
+    );
     for agent in &agents {
-        html.push_str(&format!("<label><input type=\"checkbox\" data-group=\"agent\" value=\"{}\" checked><span>{}</span></label>", escape(agent), escape(agent)));
+        filters.push_str(&format!("<label><input type=\"checkbox\" data-group=\"agent\" value=\"{}\" checked><span>{}</span></label>", escape(agent), escape(agent)));
     }
-    html.push_str("</fieldset></div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
+    filters.push_str("</fieldset></div><p class=\"filter-count\" id=\"filter-count\"></p>");
+    html.push_str("<section class=\"filters\">");
+    html.push_str(&folded_section_html(
+        "folded-filter-pane",
+        "Filter agents",
+        filters,
+    ));
+    html.push_str("</section>");
     let mut picker = String::from(
         "<div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>",
     );
@@ -603,6 +612,7 @@ mod tests {
             assert!(html.contains("AgentSysPerf scaling diagnostic"));
             assert!(html.contains("<details class=\"folded-table\"><summary>Chart highlights"));
             assert!(html.contains("<details class=\"folded-table\"><summary>Agent observations"));
+            assert!(html.contains("<details class=\"folded-filter-pane\"><summary>Filter agents"));
             assert!(html.contains(
                 "<details class=\"collector-graph-group\"><summary>AgentSysPerf (2 graphs)"
             ));

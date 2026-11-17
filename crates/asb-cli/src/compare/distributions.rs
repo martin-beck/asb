@@ -209,7 +209,13 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             .into_iter()
             .collect::<Vec<_>>()
             .join(", ");
-        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><h2>{} · {}</h2><p>{} / {} · {} planned rows · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&first.workload), escape(trial_label(first)), escape(&first.provider), escape(&super::model_display(first)), group.len(), concurrencies));
+        let summary = format!(
+            "{} · {} ({} planned rows)",
+            first.workload,
+            trial_label(first),
+            group.len()
+        );
+        html.push_str(&format!("<section id=\"distribution-{config}\" class=\"distribution-group\" data-members=\"{}\"><details class=\"report-graph-group\"><summary>{}</summary><p>{} / {} · configured concurrency {}</p><div class=\"charts\">", escape(&members), escape(&summary), escape(&first.provider), escape(&super::model_display(first)), concurrencies));
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }
@@ -228,7 +234,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
                 svg_comparison(&metric, &values)
             ));
         }
-        html.push_str("</div></section>");
+        html.push_str("</div></details></section>");
     }
     html
 }
