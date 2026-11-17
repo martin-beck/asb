@@ -18,6 +18,7 @@ use std::sync::{
 const METADATA: u64 = 64 * 1024;
 const SCOPE: &str = "settled-campaign-slot-declared-evidence";
 const RECEIPT_VERIFIERS: usize = 4;
+const RETAINED_OUTCOME_VERIFIERS: usize = 4;
 
 #[path = "recording_recovery.rs"]
 mod recording_recovery;
@@ -119,6 +120,32 @@ struct ResolvedStart {
     binding: generation::Resolved,
 }
 
+// Retained evaluator checks can launch an official workload helper. Keep all
+// data needed for that read-only check owned so declarations can be completed
+// first, then validated with a bounded amount of parallelism.
+struct RetainedValidation {
+    project_root: PathBuf,
+    project_config: crate::project::ProjectConfig,
+    reference: AttemptReference,
+    summary: Value,
+}
+
+impl RetainedValidation {
+    fn verify(
+        &self,
+        verify: &impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        verify(&crate::workloads::recovery::RetainedOutcomeContext {
+            recovery: crate::workloads::recovery::RecoveryContext {
+                project_root: &self.project_root,
+                project_config: &self.project_config,
+                reference: &self.reference,
+            },
+            summary: &self.summary,
+        })
+    }
+}
+
 fn resolve_start(
     layout: &Layout,
     slot: &Slot,
@@ -187,7 +214,8 @@ impl Inputs {
         parent: &Path,
         results: &Path,
         plan: &SweepPlan,
-        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>
+        + Sync,
     ) -> Result<(), Error> {
         self.seal_campaigns_with(parent, results, plan, verify)
     }
@@ -197,7 +225,8 @@ impl Inputs {
         parent: &Path,
         results: &Path,
         plan: &SweepPlan,
-        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>
+        + Sync,
     ) -> Result<(), Error> {
         let declarations = self.declare_campaign_layouts(
             parent,
@@ -301,7 +330,8 @@ impl Inputs {
         results: &Path,
         plan: &SweepPlan,
         layouts: Vec<Layout>,
-        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>
+        + Sync,
     ) -> Result<DeclaredInspection, Error> {
         let catalog = self.read_generation_catalog(results, plan, &layouts)?;
         self.declare_campaign_layouts_with_catalog(
@@ -375,7 +405,8 @@ impl Inputs {
         results: &Path,
         plan: &SweepPlan,
         layouts: Vec<Layout>,
-        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+        verify: impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>
+        + Sync,
         catalog: Option<&Catalog>,
     ) -> Result<DeclaredInspection, Error> {
         self.verify_campaign_reservations(results, plan)?;
@@ -438,6 +469,7 @@ impl Inputs {
         let mut attempts = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut eligible = BTreeSet::new();
+        let mut retained = Vec::new();
         for (index, evidence) in declarations.declarations() {
             let record = &records[index];
             let layout = &layouts[record.configuration];
@@ -509,7 +541,7 @@ impl Inputs {
                 &record.path,
                 &evidence,
                 compatibility,
-                &verify,
+                &mut retained,
             )?;
             candidates.push(Candidate {
                 configuration: record.configuration,
@@ -523,6 +555,12 @@ impl Inputs {
             });
             eligible.insert(index);
         }
+        // All layout, outcome, allocation, and workspace checks above remain
+        // serially ordered. Only independent retained evaluator reads run in
+        // parallel, and every one must pass before declaring the batch.
+        verify_bounded(&retained, RETAINED_OUTCOME_VERIFIERS, |candidate| {
+            candidate.verify(&verify)
+        })?;
         declarations.retain_candidates(&eligible);
         let unsettled = declarations.unsettled().to_vec();
         Ok(DeclaredInspection {
@@ -759,7 +797,7 @@ fn slot_roots(
     path: &Path,
     evidence: &OutcomeEvidence<'_>,
     compatibility: &crate::cassette::Compatibility,
-    verify: &impl Fn(&crate::workloads::recovery::RetainedOutcomeContext<'_>) -> Result<(), Error>,
+    retained: &mut Vec<RetainedValidation>,
 ) -> Result<Vec<Root>, Error> {
     let SlotOwner {
         layout,
@@ -924,14 +962,12 @@ fn slot_roots(
                     "campaign workspace lost its original allocation linkage",
                 ));
             }
-            verify(&crate::workloads::recovery::RetainedOutcomeContext {
-                recovery: crate::workloads::recovery::RecoveryContext {
-                    project_root: &project_root,
-                    project_config: &project_config,
-                    reference: &allocation.reference,
-                },
-                summary: evidence.summary,
-            })?;
+            retained.push(RetainedValidation {
+                project_root,
+                project_config,
+                reference: allocation.reference,
+                summary: evidence.summary.clone(),
+            });
             roots.push(Root::path("allocation", layout.root.join(allocation_path)));
         }
     }
