@@ -1109,9 +1109,13 @@ fn derived_flamegraph_figure(
     svg: &str,
     folded: &str,
 ) -> Result<String, Error> {
-    let document = source::read_svg(&stage.join(svg), svg)?;
+    source::validate_external_svg(&stage.join(svg), svg)?;
+    let document = format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
+        escape(svg)
+    );
     Ok(format!(
-        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details><iframe title=\"{}\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a></figure>",
+        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details><iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a></figure>",
         escape(title),
         escape(title),
         escape(&document),
@@ -1328,6 +1332,29 @@ mod tests {
             before, after,
             "post-processing leaves continuation evidence unchanged"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn derived_flamegraphs_keep_large_svg_documents_external() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-large-derived-flamegraph-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let svg = "aggregate.svg";
+        let mut document = String::from("<svg>");
+        document.push_str(&" ".repeat(16 * 1024 * 1024));
+        document.push_str("</svg>");
+        fs::write(root.join(svg), document).unwrap();
+
+        let html = derived_flamegraph_figure(&root, "aggregate", svg, "aggregate.folded").unwrap();
+        assert!(html.contains("srcdoc="), "{html}");
+        assert!(html.contains("img-src 'self'"), "{html}");
+        assert!(html.contains("aggregate.svg"), "{html}");
+        assert!(!html.contains("allow-scripts"), "{html}");
+
         fs::remove_dir_all(root).unwrap();
     }
 }
