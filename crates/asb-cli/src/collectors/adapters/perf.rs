@@ -178,8 +178,13 @@ impl CollectorAdapter for PerfCollector {
                 // custody helpers together. Give that ordered, bounded drain
                 // enough time to serialize raw captures instead of treating
                 // host scheduler pressure as incomplete measurement evidence.
-                "perf-symbol-custody" | "perf" => Some(std::time::Duration::from_secs(300)),
-                "perf-stat" => Some(std::time::Duration::from_secs(30)),
+                // `perf stat` has the same inherited-pipe and symbol/drain
+                // shape as `perf record` under an isolated agent tree.  Its
+                // old 30-second drain could reject an otherwise completed
+                // replay solely while the final writer descriptor closed.
+                "perf-symbol-custody" | "perf" | "perf-stat" => {
+                    Some(std::time::Duration::from_secs(300))
+                }
                 _ => None,
             },
         }
