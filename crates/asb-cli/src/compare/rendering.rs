@@ -460,7 +460,7 @@ fn write_agent_html_report(
     );
     for graph in &graphs {
         let title = graph_presentation(stage, graph)?.title;
-        picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&title), escape(graph)));
+        picker.push_str(&chart_picker_row(graph, &title));
     }
     picker.push_str("</tbody></table></div>");
     html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar.</p></div>");
@@ -478,7 +478,17 @@ fn write_agent_html_report(
     html.push_str("<section><div class=\"section-title\"><h2>Agent observations</h2><p class=\"muted\">Per-agent count, mean, median, and p95 for every collected scalar.</p></div>");
     html.push_str(&folded_table_html("Agent observations", observations));
     html.push_str("</section><section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">Hover values, zoom with the wheel, drag to pan, or enlarge a graph.</p></div>");
-    html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+    let report_agents = rows
+        .iter()
+        .map(|row| row.agent.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    html.push_str(&collector_chart_groups_html(
+        stage,
+        &graphs,
+        &report_agents,
+    )?);
     html.push_str("</section><footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
     html.push_str(INTERACTIVE_SCRIPT);
     html.push_str(HTML_SCRIPT);

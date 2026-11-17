@@ -19,6 +19,13 @@ inside its replacement `comparison/` directory; it never changes campaign
 plans, checkpoints, outcomes, or collector evidence, so a rebuilt binary with
 post-processing changes remains compatible with `asb sweep --continue`.
 
+Every generated comparison report groups related dotted metric charts in closed
+subgroups when a prefix has at least two graphs. Each chart retains a closed
+measurement description, and component-timing groups include the recorded
+agent-flow and collector-boundary diagram. Presentation removes separator
+escaping from component timing titles only; metric identities and filenames
+remain lossless and unchanged.
+
 The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
 uses a local model fixture to record one official SWE-bench task and replay it
 in two isolated replicas. It checks the grade, cleanup and native tool-stream
