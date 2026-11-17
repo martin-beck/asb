@@ -295,9 +295,13 @@ impl<'a> PreparedSweep<'a> {
                 parent,
                 &results,
                 &plan,
-                mode,
-                &replay_sources,
-                options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+                checkpoint::ResumeRequest {
+                    mode,
+                    replay_sources: &replay_sources,
+                    invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+                    allow_collector_teardown_repair: options.allow_collector_teardown_repair,
+                    prior_asb_executable: options.prior_asb_executable,
+                },
             )?;
             if options.reconcile_completed {
                 checkpoint.reconcile_completed(parent, &results, &plan)?;
