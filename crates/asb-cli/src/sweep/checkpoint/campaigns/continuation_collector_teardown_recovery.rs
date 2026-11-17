@@ -1,6 +1,6 @@
-//! Explicit recovery for an otherwise successful slot lost only to the old
-//! perf-stat settlement deadline. This preserves evidence before ordinary
-//! continuation re-admits the slot.
+//! Explicit recovery for an otherwise successful slot lost only to a supported
+//! post-evaluation perf-stat producer defect. This preserves evidence before
+//! ordinary continuation re-admits the slot.
 use super::*;
 use crate::sweep::checkpoint::Snapshotter;
 use serde::{Deserialize, Serialize};
