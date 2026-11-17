@@ -183,20 +183,27 @@ fn eligible(layout: &Layout, slot: &crate::runner::campaign::Slot) -> Result<(),
     let reason = finished["failure_reason"]
         .as_str()
         .ok_or_else(|| recovery("collector-teardown batch has no failure reason"))?;
-    let required = format!(
-        "replica {}: cannot finish perf-stat collector: collector settlement deadline exceeded",
-        slot.replica
-    );
     if finished["schema_version"] != 1
         || finished["failed"] != true
-        || !reason.contains(&required)
-        || !reason.contains("raw capture has not reached its stopped boundary")
+        || !supported_perf_stat_failure(reason, slot.replica)
     {
         return Err(recovery(
             "collector-teardown batch failure is not the supported perf-stat settlement defect",
         ));
     }
     Ok(())
+}
+
+/// Only the two known post-evaluation perf-stat producer defects are eligible.
+/// Both retain raw data but fail before the capture can be frozen, and neither
+/// changes the already-official agent or workload result checked above.
+fn supported_perf_stat_failure(reason: &str, replica: usize) -> bool {
+    let prefix = format!("replica {replica}: cannot finish perf-stat collector: ");
+    reason.contains("raw capture has not reached its stopped boundary")
+        && (reason.contains(&(prefix.clone() + "collector settlement deadline exceeded"))
+            || (reason
+                .contains(&(prefix + "collector principal did not start before guardian exit"))
+                && reason.contains("raw capture retained")))
 }
 
 fn move_if_present(
@@ -431,5 +438,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn recovery_accepts_only_known_post_evaluation_perf_stat_failures() {
+        assert!(supported_perf_stat_failure(
+            "replica 26: cannot finish perf-stat collector: collector settlement deadline exceeded; raw capture has not reached its stopped boundary",
+            26,
+        ));
+        assert!(supported_perf_stat_failure(
+            "replica 26: cannot finish perf-stat collector: collector principal did not start before guardian exit; raw capture retained; measurement finalization failed after task evaluation: raw capture has not reached its stopped boundary",
+            26,
+        ));
+        assert!(!supported_perf_stat_failure(
+            "replica 26: cannot finish perf-stat collector: collector settlement deadline exceeded",
+            26,
+        ));
+        assert!(!supported_perf_stat_failure(
+            "replica 26: cannot finish perf-stat collector: collector principal did not start before guardian exit; raw capture retained",
+            26,
+        ));
+        assert!(!supported_perf_stat_failure(
+            "replica 26: cannot finish perf collector: collector settlement deadline exceeded; raw capture has not reached its stopped boundary",
+            26,
+        ));
+        assert!(!supported_perf_stat_failure(
+            "replica 25: cannot finish perf-stat collector: collector settlement deadline exceeded; raw capture has not reached its stopped boundary",
+            26,
+        ));
     }
 }
