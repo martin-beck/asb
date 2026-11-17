@@ -35,6 +35,12 @@ class DockerProbeError(DockerAccessError):
 
 _API_TIMEOUT_SECONDS = 600.0
 _ACCESS_PROBE_TIMEOUT_SECONDS = 120.0
+# A replay cohort may begin many isolated task servers at once.  Their Docker
+# control requests are intentionally serialized, so this is an admission wait
+# budget rather than a single daemon-probe timeout.  Keep it bounded, but do
+# not make a valid dense cohort fail merely because earlier replicas are still
+# resolving the same retained image and baseline.
+_CONTROL_PLANE_ADMISSION_TIMEOUT_SECONDS = 900.0
 _CLOSE_SECONDS = 3.0
 _TERM_GRACE = 2.0
 # Each SDK connection is a `docker system dial-stdio` child. Keep a small,
@@ -55,7 +61,7 @@ def _docker_control_lock_path():
 
 
 @contextmanager
-def _docker_control_section(wait_seconds=_ACCESS_PROBE_TIMEOUT_SECONDS):
+def _docker_control_section(wait_seconds=_CONTROL_PLANE_ADMISSION_TIMEOUT_SECONDS):
     """Serialize one bounded local Docker control-plane operation.
 
     Starting an entire cohort's session negotiation or workspace lifecycle at

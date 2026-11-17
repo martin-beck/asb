@@ -1,5 +1,6 @@
 """Socketpair transport tests: no Docker, network or elevated access."""
 import importlib.util
+import inspect
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,11 @@ SPEC.loader.exec_module(RUNTIME)
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_dense_replay_control_admission_is_not_limited_by_probe_timeout(self):
+        default = inspect.signature(RUNTIME._docker_control_section).parameters["wait_seconds"].default
+        self.assertEqual(default, RUNTIME._CONTROL_PLANE_ADMISSION_TIMEOUT_SECONDS)
+        self.assertGreater(default, RUNTIME._ACCESS_PROBE_TIMEOUT_SECONDS)
+
     def test_docker_access_probe_allows_slow_success_and_reports_timeout(self):
         with patch.object(RUNTIME.shutil, "which", side_effect=lambda name: "/bin/docker" if name == "docker" else None), \
              patch.object(RUNTIME.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
