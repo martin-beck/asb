@@ -333,13 +333,17 @@ fn real_settings_orchestration_preserves_best_effort_and_one_probe() {
             .is_none()
     );
     assert_eq!(fake.probes, 1);
-    assert_eq!(fake.calls.len(), 2);
+    assert_eq!(fake.calls.len(), 3);
     assert_eq!(
         fake.calls[0].1.args,
-        ["sysctl", "-w", "kernel.perf_event_paranoid=-1"]
+        ["sysctl", "-w", "kernel.task_delayacct=1"]
     );
     assert_eq!(
         fake.calls[1].1.args,
+        ["sysctl", "-w", "kernel.perf_event_paranoid=-1"]
+    );
+    assert_eq!(
+        fake.calls[2].1.args,
         ["sysctl", "-w", "kernel.sched_schedstats=1"]
     );
     assert!(
@@ -348,7 +352,8 @@ fn real_settings_orchestration_preserves_best_effort_and_one_probe() {
             .all(|(mode, _)| *mode == SudoMode::Interactive)
     );
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("could not change kernel.perf_event_paranoid=-1"));
+    assert!(text.contains("could not change kernel.task_delayacct=1"));
+    assert!(text.contains("changed kernel.perf_event_paranoid=-1"));
     assert!(text.contains("changed kernel.sched_schedstats=1"));
 }
 
@@ -366,6 +371,7 @@ fn existing_settings_need_no_consent_and_unavailable_sudo_never_mutates() {
             |setting| match setting {
                 "kernel.perf_event_paranoid" => Some("-1\n".into()),
                 "kernel.sched_schedstats" => Some("1\n".into()),
+                "kernel.task_delayacct" => Some("1\n".into()),
                 _ => None,
             }
         )
@@ -379,7 +385,7 @@ fn existing_settings_need_no_consent_and_unavailable_sudo_never_mutates() {
             .unwrap()
             .matches("already enabled")
             .count(),
-        2
+        3
     );
 }
 
@@ -407,9 +413,13 @@ fn partial_ready_settings_execute_only_the_pending_setting() {
     .unwrap();
     assert!(result.is_none());
     assert_eq!(fake.probes, 1);
-    assert_eq!(fake.calls.len(), 1);
+    assert_eq!(fake.calls.len(), 2);
     assert_eq!(
         fake.calls[0].1.args,
+        ["sysctl", "-w", "kernel.task_delayacct=1"]
+    );
+    assert_eq!(
+        fake.calls[1].1.args,
         ["sysctl", "-w", "kernel.sched_schedstats=1"]
     );
     let text = String::from_utf8(output).unwrap();
@@ -419,6 +429,7 @@ fn partial_ready_settings_execute_only_the_pending_setting() {
         1
     );
     assert_eq!(text.matches("changed kernel.sched_schedstats=1").count(), 1);
+    assert_eq!(text.matches("changed kernel.task_delayacct=1").count(), 1);
     assert!(!text.contains("sudo sysctl -w kernel.perf_event_paranoid"));
     assert!(!text.contains("changed kernel.perf_event_paranoid"));
 }

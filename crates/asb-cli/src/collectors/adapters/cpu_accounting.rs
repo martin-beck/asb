@@ -19,6 +19,7 @@ struct State {
     external: Option<ExternalCounter>,
     external_reason: Option<String>,
     fallback_sampler: Option<Sampler>,
+    task_delayacct_enabled: bool,
 }
 
 struct ExternalCounter {
@@ -115,6 +116,15 @@ impl CollectorAdapter for CpuAccounting {
     }
     fn preflight(&self, _: &mut PreflightContext<'_>) -> Result<(), String> {
         Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn host_settings(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        &[(
+            "kernel.task_delayacct",
+            "1",
+            "process-tree block-I/O wait accounting",
+        )]
     }
 
     fn attach_pid(&self, session: &mut Session, pid: u32) -> Result<(), String> {
@@ -236,7 +246,9 @@ impl CollectorAdapter for CpuAccounting {
                 session.record_process_tree_accounting(
                     sample.user_ticks,
                     sample.system_ticks,
-                    sample.io_delay_ticks,
+                    state
+                        .task_delayacct_enabled
+                        .then_some(sample.io_delay_ticks),
                     sample.runqueue_ns,
                 );
             }
@@ -252,6 +264,13 @@ impl CollectorAdapter for CpuAccounting {
 
 fn start_fallback_sampler(session: &Session, state: &mut State, pid: u32) {
     if state.fallback_sampler.is_none() {
+        state.task_delayacct_enabled = super::process_accounting::task_delayacct_enabled();
+        if !state.task_delayacct_enabled {
+            append_reason(
+                &mut state.reason,
+                "kernel.task_delayacct is disabled or unreadable; process-tree I/O wait is unavailable. Run `asb init --configure-host` and approve kernel.task_delayacct=1 before the next benchmark.",
+            );
+        }
         state.fallback_sampler = session
             .measurement_target()
             .or_else(|| measurements::ProcessIdentity::read(pid))
@@ -264,9 +283,22 @@ fn stop_fallback_sampler(session: &mut Session, state: &mut State) {
         session.record_process_tree_accounting(
             sample.user_ticks,
             sample.system_ticks,
-            sample.io_delay_ticks,
+            state
+                .task_delayacct_enabled
+                .then_some(sample.io_delay_ticks),
             sample.runqueue_ns,
         );
+    }
+}
+
+fn append_reason(reason: &mut Option<String>, detail: &str) {
+    match reason {
+        Some(reason) if reason.contains(detail) => {}
+        Some(reason) => {
+            reason.push(' ');
+            reason.push_str(detail);
+        }
+        None => *reason = Some(detail.into()),
     }
 }
 
@@ -433,6 +465,37 @@ mod tests {
         ] {
             assert_eq!(parse_cpu_stat(text), None);
         }
+    }
+
+    #[test]
+    fn disabled_task_delayacct_is_unavailable_not_zero() {
+        let dir = std::env::temp_dir().join(
+            crate::workloads::TaskIdentity::local("task-delayacct-disabled", None).attempt_id,
+        );
+        let mut session = Session::start_with_collectors(&dir, &[], None).unwrap();
+        session.record_process_tree_accounting(10, 5, None, 3);
+        let timing = session.component_timing("agent.execute").unwrap();
+        assert_eq!(timing.io_wait_ms, None);
+        assert_eq!(timing.scheduler_wait_ms, Some(0.000_003));
+        drop(session);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn enabled_task_delayacct_retains_measured_zero() {
+        let dir = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("task-delayacct-enabled", None).attempt_id);
+        let mut session = Session::start_with_collectors(&dir, &[], None).unwrap();
+        session.record_process_tree_accounting(10, 5, Some(0), 3);
+        assert_eq!(
+            session
+                .component_timing("agent.execute")
+                .unwrap()
+                .io_wait_ms,
+            Some(0.0)
+        );
+        drop(session);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

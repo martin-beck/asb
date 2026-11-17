@@ -948,7 +948,7 @@ impl Session {
         &mut self,
         user_ticks: u64,
         system_ticks: u64,
-        io_delay_ticks: u64,
+        io_delay_ticks: Option<u64>,
         runqueue_ns: u64,
     ) {
         let timing = self
@@ -959,7 +959,7 @@ impl Session {
             timing.cpu_user_ms = Some(user_ticks as f64 * 1_000.0 / hz as f64);
             timing.cpu_system_ms = Some(system_ticks as f64 * 1_000.0 / hz as f64);
             timing.cpu_accounting_source = Some("proc-sampling".into());
-            timing.io_wait_ms = Some(io_delay_ticks as f64 * 1_000.0 / hz as f64);
+            timing.io_wait_ms = io_delay_ticks.map(|ticks| ticks as f64 * 1_000.0 / hz as f64);
         }
         timing.scheduler_wait_ms = Some(runqueue_ns as f64 / 1_000_000.0);
     }

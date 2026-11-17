@@ -245,6 +245,13 @@ fn read_tree(root: ProcessIdentity) -> Option<BTreeMap<Identity, Sample>> {
             continue;
         }
         let Some(sample) = read_process(pid) else {
+            // A process can naturally disappear after discovery. A live
+            // descendant with unreadable accounting, however, would make a
+            // tree total incomplete, so withhold the sample rather than
+            // publishing a plausible but inaccurate value.
+            if identity.matches() {
+                return None;
+            }
             continue;
         };
         if !identity.in_tree(root) {
@@ -257,12 +264,12 @@ fn read_tree(root: ProcessIdentity) -> Option<BTreeMap<Identity, Sample>> {
 
 fn read_process(pid: u32) -> Option<Sample> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let schedstat = fs::read_to_string(format!("/proc/{pid}/schedstat")).ok();
-    let io = fs::read_to_string(format!("/proc/{pid}/io")).ok();
-    parse_sample(&stat, schedstat.as_deref(), io.as_deref())
+    let schedstat = fs::read_to_string(format!("/proc/{pid}/schedstat")).ok()?;
+    let io = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    parse_sample(&stat, &schedstat, &io)
 }
 
-fn parse_sample(stat: &str, schedstat: Option<&str>, io: Option<&str>) -> Option<Sample> {
+fn parse_sample(stat: &str, schedstat: &str, io: &str) -> Option<Sample> {
     let fields = stat
         .rsplit_once(')')?
         .1
@@ -270,29 +277,30 @@ fn parse_sample(stat: &str, schedstat: Option<&str>, io: Option<&str>) -> Option
         .collect::<Vec<_>>();
     let user_ticks = fields.get(11)?.parse().ok()?;
     let system_ticks = fields.get(12)?.parse().ok()?;
-    let io_delay_ticks = fields
-        .get(39)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let runqueue_ns = schedstat
-        .and_then(|value| value.split_whitespace().nth(1)?.parse().ok())
-        .unwrap_or(0);
+    let io_delay_ticks = fields.get(39).and_then(|value| value.parse().ok())?;
+    let runqueue_ns = schedstat.split_whitespace().nth(1)?.parse().ok()?;
     let io_value = |key| {
-        io.and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix(key)?.trim().parse().ok())
-        })
-        .unwrap_or(0)
+        io.lines()
+            .find_map(|line| line.strip_prefix(key)?.trim().parse().ok())
     };
     Some(Sample {
         user_ticks,
         system_ticks,
         io_delay_ticks,
         runqueue_ns,
-        read_bytes: io_value("read_bytes:"),
-        write_bytes: io_value("write_bytes:"),
-        cancelled_write_bytes: io_value("cancelled_write_bytes:"),
+        read_bytes: io_value("read_bytes:")?,
+        write_bytes: io_value("write_bytes:")?,
+        cancelled_write_bytes: io_value("cancelled_write_bytes:")?,
     })
+}
+
+pub(super) fn task_delayacct_enabled() -> bool {
+    fs::read_to_string("/proc/sys/kernel/task_delayacct")
+        .is_ok_and(|value| task_delayacct_enabled_from(&value))
+}
+
+fn task_delayacct_enabled_from(value: &str) -> bool {
+    value.trim() == "1"
 }
 
 #[cfg(test)]
@@ -300,15 +308,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_proc_stat_and_optional_schedstat() {
+    fn parses_complete_procfs_accounting_fields() {
         let mut fields = vec!["0"; 40];
         fields[11] = "13";
         fields[12] = "5";
         fields[39] = "7";
         let sample = parse_sample(
             &format!("123 (agent) {}", fields.join(" ")),
-            Some("1 11 2"),
-            Some("read_bytes: 1024\nwrite_bytes: 2048\ncancelled_write_bytes: 512\n"),
+            "1 11 2",
+            "read_bytes: 1024\nwrite_bytes: 2048\ncancelled_write_bytes: 512\n",
         )
         .unwrap();
         assert_eq!(sample.user_ticks, 13);
@@ -318,8 +326,32 @@ mod tests {
         assert_eq!(sample.read_bytes, 1024);
         assert_eq!(sample.write_bytes, 2048);
         assert_eq!(sample.cancelled_write_bytes, 512);
-        assert!(parse_sample("not a proc stat", None, None).is_none());
-        assert!(parse_sample("123 (agent) S", None, None).is_none());
+        assert!(parse_sample("not a proc stat", "1 2 3", "read_bytes: 1").is_none());
+        assert!(parse_sample("123 (agent) S", "1 2 3", "read_bytes: 1").is_none());
+        assert!(
+            parse_sample(
+                &format!("123 (agent) {}", fields.join(" ")),
+                "",
+                "read_bytes: 1024\nwrite_bytes: 2048\ncancelled_write_bytes: 512\n",
+            )
+            .is_none()
+        );
+        assert!(
+            parse_sample(
+                &format!("123 (agent) {}", fields.join(" ")),
+                "1 11 2",
+                "read_bytes: 1024\nwrite_bytes: 2048\n",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn task_delayacct_parser_accepts_only_enabled_kernel_setting() {
+        assert!(task_delayacct_enabled_from("1\n"));
+        for value in ["0", "2", "", "one"] {
+            assert!(!task_delayacct_enabled_from(value));
+        }
     }
 
     #[test]
