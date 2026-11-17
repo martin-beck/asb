@@ -335,8 +335,9 @@ impl Inputs {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if name == format!("measurements-concurrency-{}", slot.replica)
-                || !(name.ends_with(&marker) || name.starts_with(&format!("{marker}.")))
-                    && !name.contains(&format!("{marker}."))
+                || !(name.ends_with(&marker)
+                    || name.starts_with(&format!("{marker}."))
+                    || name.contains(&format!("{marker}.")))
             {
                 continue;
             }
