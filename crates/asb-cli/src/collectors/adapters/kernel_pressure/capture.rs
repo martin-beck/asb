@@ -17,7 +17,7 @@ pub(super) struct Snapshot {
     unavailable: BTreeMap<String, String>,
 }
 
-pub(super) struct Capture {
+pub(crate) struct Capture {
     points: Vec<(u64, Snapshot)>,
     unavailable: BTreeMap<String, String>,
     peaks: BTreeMap<String, u64>,
@@ -30,6 +30,13 @@ pub(super) struct Capture {
     missed_scheduled_intervals: u64,
     previous_scheduled_sample_us: Option<u64>,
     interval_us: u64,
+}
+
+pub(crate) struct IoThroughput {
+    pub(crate) metrics: BTreeMap<String, f64>,
+    pub(crate) series: BTreeMap<String, Vec<f64>>,
+    pub(crate) timestamps: BTreeMap<String, Vec<f64>>,
+    pub(crate) unavailable: BTreeMap<String, String>,
 }
 
 impl Capture {
@@ -121,12 +128,12 @@ impl Capture {
     }
 }
 
-pub(super) struct Sampler {
+pub(crate) struct Sampler {
     stop: Sender<()>,
     handle: Option<JoinHandle<Capture>>,
 }
 impl Sampler {
-    pub(super) fn start(path: PathBuf, interval_ms: u64) -> Result<Self, String> {
+    pub(crate) fn start(path: PathBuf, interval_ms: u64) -> Result<Self, String> {
         let initial_started = Instant::now();
         let initial = snapshot(&path);
         let initial_read_us = initial_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
@@ -185,7 +192,7 @@ impl Sampler {
             handle: Some(handle),
         })
     }
-    pub(super) fn stop(mut self) -> Result<Capture, String> {
+    pub(crate) fn stop(mut self) -> Result<Capture, String> {
         let _ = self.stop.send(());
         self.handle
             .take()
@@ -426,6 +433,105 @@ fn converted(key: &str, delta: u64, wall_us: u64) -> (String, f64) {
             format!("{key}_per_s"),
             delta as f64 / wall_us as f64 * 1_000_000.0,
         )
+    }
+}
+
+/// Extract block-I/O throughput from a verified cgroup capture without
+/// reinterpreting it as direct `/proc/<pid>/io` accounting. This is shared by
+/// iostat so short-lived descendants remain charged to the execution cgroup.
+pub(crate) fn io_throughput(capture: &Capture) -> IoThroughput {
+    const FIELDS: [(&str, &str, f64); 4] = [
+        ("io.read_bytes", "container.io.read_kib_per_s", 1024.0),
+        ("io.write_bytes", "container.io.write_kib_per_s", 1024.0),
+        ("io.read_count", "container.io.read_ops_per_s", 1.0),
+        ("io.write_count", "container.io.write_ops_per_s", 1.0),
+    ];
+    let mut metrics = BTreeMap::new();
+    let mut series = BTreeMap::new();
+    let mut timestamps = BTreeMap::new();
+    let mut unavailable = BTreeMap::new();
+    for (source, target, _) in FIELDS {
+        if let Some(reason) = capture.unavailable.get(source) {
+            unavailable.insert(target.into(), reason.clone());
+        }
+    }
+    let Some((_, initial)) = capture.points.first() else {
+        return IoThroughput {
+            metrics,
+            series,
+            timestamps,
+            unavailable,
+        };
+    };
+    let Some((duration_us, final_value)) = capture.points.last() else {
+        return IoThroughput {
+            metrics,
+            series,
+            timestamps,
+            unavailable,
+        };
+    };
+    if *duration_us == 0 {
+        return IoThroughput {
+            metrics,
+            series,
+            timestamps,
+            unavailable,
+        };
+    }
+    for (source, target, divisor) in FIELDS {
+        if unavailable.contains_key(target) {
+            continue;
+        }
+        match (initial.values.get(source), final_value.values.get(source)) {
+            (Some(before), Some(after)) if after >= before => {
+                metrics.insert(
+                    target.into(),
+                    (after - before) as f64 / divisor / *duration_us as f64 * 1_000_000.0,
+                );
+            }
+            (Some(_), Some(_)) => {
+                unavailable.insert(target.into(), "counter decreased during execution".into());
+            }
+            _ => {
+                unavailable.insert(target.into(), "counter is not exposed".into());
+            }
+        }
+    }
+    for pair in capture.points.windows(2) {
+        let (start_us, before) = &pair[0];
+        let (end_us, after) = &pair[1];
+        let Some(elapsed_us) = end_us.checked_sub(*start_us).filter(|value| *value > 0) else {
+            continue;
+        };
+        for (source, target, divisor) in FIELDS {
+            if unavailable.contains_key(target) {
+                continue;
+            }
+            let Some(delta) = before
+                .values
+                .get(source)
+                .zip(after.values.get(source))
+                .and_then(|(before, after)| after.checked_sub(*before))
+            else {
+                unavailable.insert(target.into(), "counter is not exposed".into());
+                continue;
+            };
+            series
+                .entry(target.into())
+                .or_insert_with(Vec::new)
+                .push(delta as f64 / divisor / elapsed_us as f64 * 1_000_000.0);
+            timestamps
+                .entry(target.into())
+                .or_insert_with(Vec::new)
+                .push(*end_us as f64 / 1_000.0);
+        }
+    }
+    IoThroughput {
+        metrics,
+        series,
+        timestamps,
+        unavailable,
     }
 }
 
@@ -738,6 +844,69 @@ mod tests {
                 .contains("runtime helpers")
         );
     }
+
+    #[test]
+    fn cgroup_io_throughput_retains_short_lived_descendant_activity() {
+        let mut capture = Capture::new(
+            point(&[
+                ("io.read_bytes", 1_024),
+                ("io.write_bytes", 2_048),
+                ("io.read_count", 1),
+                ("io.write_count", 2),
+            ]),
+            1,
+            1_000_000,
+        );
+        capture.push(
+            1_000_000,
+            1_000_000,
+            point(&[
+                ("io.read_bytes", 3_072),
+                ("io.write_bytes", 10_240),
+                ("io.read_count", 4),
+                ("io.write_count", 6),
+            ]),
+            1,
+            Some(1_000_000),
+        );
+        let observed = io_throughput(&capture);
+        assert_eq!(observed.metrics["container.io.read_kib_per_s"], 2.0);
+        assert_eq!(observed.metrics["container.io.write_kib_per_s"], 8.0);
+        assert_eq!(observed.metrics["container.io.read_ops_per_s"], 3.0);
+        assert_eq!(observed.metrics["container.io.write_ops_per_s"], 4.0);
+        assert_eq!(observed.series["container.io.write_kib_per_s"], vec![8.0]);
+        assert_eq!(
+            observed.timestamps["container.io.write_kib_per_s"],
+            vec![1_000.0]
+        );
+        assert!(observed.unavailable.is_empty());
+    }
+
+    #[test]
+    fn cgroup_io_throughput_never_substitutes_zero_for_missing_counter() {
+        let mut capture = Capture::new(point(&[("io.write_bytes", 0)]), 1, 1_000_000);
+        capture.push(
+            1_000_000,
+            1_000_000,
+            point(&[("io.write_bytes", 1_024)]),
+            1,
+            Some(1_000_000),
+        );
+        let observed = io_throughput(&capture);
+        assert_eq!(observed.metrics["container.io.write_kib_per_s"], 1.0);
+        assert!(!observed.metrics.contains_key("container.io.read_kib_per_s"));
+        assert!(!observed.series.contains_key("container.io.read_kib_per_s"));
+        assert!(
+            !observed
+                .timestamps
+                .contains_key("container.io.read_kib_per_s")
+        );
+        assert_eq!(
+            observed.unavailable["container.io.read_kib_per_s"],
+            "counter is not exposed"
+        );
+    }
+
     #[test]
     fn reset_and_mid_capture_loss_invalidate_entire_metric_not_other_fields() {
         let mut capture = Capture::new(
@@ -817,6 +986,29 @@ mod tests {
         let capture = sampler.stop().unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(capture.points.len(), 2);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sampler_reads_persistent_cgroup_io_counters_at_execution_end() {
+        let path = crate::fixture_namespace::allocate(&std::env::temp_dir(), "asb-iostat-cgroup-")
+            .unwrap();
+        std::fs::write(
+            path.join("io.stat"),
+            "8:0 rbytes=1024 wbytes=2048 rios=1 wios=2\n",
+        )
+        .unwrap();
+        let sampler = Sampler::start(path.clone(), 60_000).unwrap();
+        std::fs::write(
+            path.join("io.stat"),
+            "8:0 rbytes=3072 wbytes=10240 rios=4 wios=6\n",
+        )
+        .unwrap();
+        let capture = sampler.stop().unwrap();
+        let observed = io_throughput(&capture);
+        assert!(observed.metrics["container.io.read_kib_per_s"] > 0.0);
+        assert!(observed.metrics["container.io.write_kib_per_s"] > 0.0);
+        assert!(observed.unavailable.is_empty());
         std::fs::remove_dir_all(path).unwrap();
     }
 }

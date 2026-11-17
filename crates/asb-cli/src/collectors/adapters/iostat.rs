@@ -9,8 +9,8 @@ pub(super) static ADAPTER: IostatCollector = IostatCollector;
 impl CollectorAdapter for IostatCollector {
     fn report_command(&self) -> ReportCommand {
         ReportCommand {
-            invocation: "read /proc/<agent-tree-pid>/io every <interval-ms>",
-            scope: "verified agent process tree",
+            invocation: "read <verified-cgroup>/io.stat every <interval-ms>, falling back to /proc/<agent-tree-pid>/io",
+            scope: "verified execution cgroup or verified agent process tree",
         }
     }
     fn description(&self) -> &'static str {
