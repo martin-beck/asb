@@ -16,6 +16,7 @@ pub(super) struct State {
     sampler: Option<SeriesSampler>,
     samples: Option<Vec<TimedSample>>,
     reason: Option<String>,
+    task_delayacct_enabled: bool,
 }
 
 pub(super) fn activate(session: &mut measurements::Session, pid: u32) {
@@ -30,6 +31,7 @@ pub(super) fn activate(session: &mut measurements::Session, pid: u32) {
     let root = session
         .measurement_target()
         .or_else(|| ProcessIdentity::read(pid));
+    state.task_delayacct_enabled = super::process_accounting::task_delayacct_enabled();
     state.sampler =
         root.and_then(|root| SeriesSampler::start(root, measurements::measurement_interval_ms()));
     if state.sampler.is_none() {
@@ -80,11 +82,26 @@ pub(super) fn write_io(session: &mut measurements::Session) -> Result<(), String
     if !state.io_enabled {
         return Ok(());
     }
-    let (metrics, series, timestamps) = state.samples.as_deref().map(io_values).unwrap_or_default();
+    let (metrics, series, timestamps) = state
+        .samples
+        .as_deref()
+        .map(|samples| io_values(samples, state.task_delayacct_enabled))
+        .unwrap_or_default();
+    let mut reason = state.reason.clone();
+    if !state.task_delayacct_enabled {
+        let delayacct_reason = "kernel.task_delayacct is disabled or unreadable; process.io.delay_ticks is unavailable. Run `asb init --configure-host` and approve kernel.task_delayacct=1 before the next benchmark.";
+        match &mut reason {
+            Some(reason) => {
+                reason.push(' ');
+                reason.push_str(delayacct_reason);
+            }
+            None => reason = Some(delayacct_reason.into()),
+        }
+    }
     write_result(
         session,
         "iostat",
-        state.reason.as_deref(),
+        reason.as_deref(),
         metrics,
         series,
         timestamps,
@@ -125,8 +142,8 @@ fn cpu_values(samples: &[TimedSample], ticks_per_second: u64) -> Values {
     })
 }
 
-fn io_values(samples: &[TimedSample]) -> Values {
-    values(samples, |sample, seconds| {
+fn io_values(samples: &[TimedSample], task_delayacct_enabled: bool) -> Values {
+    let mut result = values(samples, |sample, seconds| {
         [
             (
                 "process.io.read_kib_per_s",
@@ -140,9 +157,17 @@ fn io_values(samples: &[TimedSample]) -> Values {
                 "process.io.cancelled_write_kib_per_s",
                 sample.cancelled_write_bytes as f64 / 1024.0 / seconds,
             ),
-            ("process.io.delay_ticks", sample.io_delay_ticks as f64),
         ]
-    })
+    });
+    if task_delayacct_enabled {
+        let (metrics, series, timestamps) = values(samples, |sample, _| {
+            [("process.io.delay_ticks", sample.io_delay_ticks as f64)]
+        });
+        result.0.extend(metrics);
+        result.1.extend(series);
+        result.2.extend(timestamps);
+    }
+    result
 }
 
 fn values<const N: usize>(
@@ -240,22 +265,44 @@ mod tests {
 
     #[test]
     fn direct_proc_io_samples_publish_throughput_and_delay() {
-        let (metrics, series, timestamps) = io_values(&[sample(
-            2,
-            Sample {
-                read_bytes: 2_048,
-                write_bytes: 1_024,
-                cancelled_write_bytes: 512,
-                io_delay_ticks: 7,
-                ..Sample::default()
-            },
-        )]);
+        let (metrics, series, timestamps) = io_values(
+            &[sample(
+                2,
+                Sample {
+                    read_bytes: 2_048,
+                    write_bytes: 1_024,
+                    cancelled_write_bytes: 512,
+                    io_delay_ticks: 7,
+                    ..Sample::default()
+                },
+            )],
+            true,
+        );
         assert_eq!(metrics["process.io.read_kib_per_s"], 1.0);
         assert_eq!(metrics["process.io.write_kib_per_s"], 0.5);
         assert_eq!(metrics["process.io.cancelled_write_kib_per_s"], 0.25);
         assert_eq!(metrics["process.io.delay_ticks"], 7.0);
         assert_eq!(series["process.io.delay_ticks"], vec![7.0]);
         assert_eq!(timestamps["process.io.delay_ticks"], vec![2_000.0]);
+    }
+
+    #[test]
+    fn disabled_task_delayacct_omits_iostat_delay_ticks() {
+        let (metrics, series, timestamps) = io_values(
+            &[sample(
+                2,
+                Sample {
+                    read_bytes: 2_048,
+                    io_delay_ticks: 7,
+                    ..Sample::default()
+                },
+            )],
+            false,
+        );
+        assert_eq!(metrics["process.io.read_kib_per_s"], 1.0);
+        assert!(!metrics.contains_key("process.io.delay_ticks"));
+        assert!(!series.contains_key("process.io.delay_ticks"));
+        assert!(!timestamps.contains_key("process.io.delay_ticks"));
     }
 
     #[test]

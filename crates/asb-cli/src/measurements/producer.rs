@@ -444,6 +444,12 @@ fn capture(
             // outside that proven tree can keep the OS pipe open forever, so
             // require each pipe's currently buffered bytes to be drained, not
             // EOF from an unowned descriptor.
+            if drain.is_some() && exit.is_none() && drained.iter().all(|drained| *drained) {
+                return Err(
+                    "collector principal did not start before guardian exit; raw capture retained"
+                        .into(),
+                );
+            }
             if drain.is_some() && exit.is_some() && drained.iter().all(|drained| *drained) {
                 for file in &mut files {
                     file.flush()
@@ -965,7 +971,12 @@ mod tests {
             "no principal exit may be invented for failed exec"
         );
         assert_eq!(completion.guardian_cleanup_confirmed, Some(true));
-        assert!(completion.error.is_some());
+        assert!(
+            completion
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("principal did not start"))
+        );
         let diagnostic = std::fs::read_to_string(fixture.path.join("stderr")).unwrap();
         assert!(diagnostic.contains("No such file"), "{diagnostic}");
         assert!(

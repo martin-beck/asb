@@ -400,7 +400,11 @@ ASB is deliberately split into a small CLI and a file-backed workload directory:
   states (`dur=-1`) are counted as excluded, never guessed to last until the
   end marker. `Running` means on-CPU; `R` and `R+` mean runnable, as defined by
   [the pinned Perfetto tracker](https://github.com/google/perfetto/blob/v58.2/src/trace_processor/importers/common/thread_state_tracker.cc#L27-L55).
-  Missing blocked-reason I/O classification remains unknown (`io_wait_ms=null`)
+  Process-tree block-I/O delay requires Linux `kernel.task_delayacct=1`; ASB's
+  default `init` host-capability questionnaire offers that system-wide setting
+  with explicit consent. When it is disabled or unreadable, the CPU-accounting
+  fallback publishes `io_wait_ms=null`, never a fabricated zero. Missing
+  blocked-reason I/O classification likewise remains unknown (`io_wait_ms=null`)
   rather than becoming measured zero; any positively observed I/O wait retains
   its own metric. Unique thread IDs keep reused numeric TIDs in separate lanes.
   Neither observed totals nor the bounded view reconstruct unobserved states;

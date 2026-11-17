@@ -872,6 +872,11 @@ mod tests {
             settings,
             vec![
                 (
+                    "kernel.task_delayacct",
+                    "1",
+                    "process-tree block-I/O wait accounting"
+                ),
+                (
                     "kernel.perf_event_paranoid",
                     "-1",
                     "perf process-tree counters"
@@ -894,6 +899,10 @@ mod tests {
         assert_eq!(
             find("bpftrace").unwrap().host_settings()[0].0,
             "kernel.sched_schedstats"
+        );
+        assert_eq!(
+            find("cpu-accounting").unwrap().host_settings()[0].0,
+            "kernel.task_delayacct"
         );
     }
 
