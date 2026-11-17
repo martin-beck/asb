@@ -1882,7 +1882,7 @@ fn wrap_label(value: &str, max_chars: usize) -> Vec<String> {
 }
 
 /// Normalize finite observations without overflowing an opposite-sign domain.
-fn domain_fraction(value: f64, min: f64, max: f64) -> f64 {
+pub(crate) fn domain_fraction(value: f64, min: f64, max: f64) -> f64 {
     if (max - min).is_finite() {
         (value - min) / (max - min)
     } else {
@@ -1925,17 +1925,17 @@ pub(super) fn append_y_axis(
 /// A presentation-only numeric axis. Values remain stored and positioned in
 /// their original units; only limits, tick labels, and the printed unit change.
 #[derive(Clone, Debug)]
-pub(super) struct NumericAxis {
-    pub(super) min: f64,
-    pub(super) max: f64,
+pub(crate) struct NumericAxis {
+    pub(crate) min: f64,
+    pub(crate) max: f64,
     divisor: f64,
-    pub(super) unit: String,
-    pub(super) ticks: Vec<f64>,
+    pub(crate) unit: String,
+    pub(crate) ticks: Vec<f64>,
     decimals: usize,
 }
 
 impl NumericAxis {
-    pub(super) fn format(&self, value: f64) -> String {
+    pub(crate) fn format(&self, value: f64) -> String {
         let value = value / self.divisor;
         if self.decimals == 0 {
             format!("{value:.0}")
@@ -1945,7 +1945,7 @@ impl NumericAxis {
     }
 }
 
-pub(super) fn numeric_axis(domain: (f64, f64), title: &str) -> NumericAxis {
+pub(crate) fn numeric_axis(domain: (f64, f64), title: &str) -> NumericAxis {
     let (mut min, mut max) = domain;
     if !min.is_finite() || !max.is_finite() {
         min = 0.0;
@@ -2118,6 +2118,8 @@ fn metric_unit(title: &str) -> &'static str {
         "ms/s"
     } else if name.ends_with("_ops_per_s") {
         "ops/s"
+    } else if name.contains("completed_per_s") {
+        "completed/s"
     } else if name.ends_with("_per_s") {
         "/s"
     } else if name.ends_with("_kib") {
