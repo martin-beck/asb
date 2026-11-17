@@ -62,17 +62,6 @@ pub(crate) struct Policy {
     pub graceful: Option<Duration>,
 }
 
-/// Wait briefly for inherited writer descriptors after a verified guardian exit.
-///
-/// A collector can finish its principal while a descendant still owns one of
-/// the capture pipes.  The owner supplied a graceful duration because it has
-/// an ordered shutdown contract, so reuse that bounded budget. The policy is
-/// validated at construction, so a long perf flush remains bounded while it
-/// can still close inherited descriptors before capture is finalized.
-fn post_exit_drain(policy: Policy) -> Duration {
-    policy.graceful.unwrap_or(Duration::from_secs(5))
-}
-
 pub(crate) fn command(
     launch: &mut crate::launch::ProcessLaunch,
 ) -> Result<(Command, crate::launch::CommandRoute), String> {
@@ -207,9 +196,7 @@ impl Producer {
         match self.active.as_ref() {
             #[cfg(target_os = "linux")]
             Some(Active::Process(process)) => {
-                process.policy.graceful.unwrap_or_default()
-                    + post_exit_drain(process.policy)
-                    + Duration::from_secs(8)
+                process.policy.graceful.unwrap_or_default() + Duration::from_secs(8)
             }
             #[cfg(test)]
             Some(Active::Snapshot(_)) => ProcessTreeSnapshot::stop_budget(),
@@ -358,7 +345,7 @@ fn capture(
                 exit = gate.principal_exit().map(|principal| principal.status());
                 if observed.map_err(|error| error.to_string())?.is_some() {
                     cleanup_confirmed = true;
-                    drain = Some(Instant::now() + post_exit_drain(policy));
+                    drain = Some(Instant::now());
                 }
             }
             if drain.is_some() && exit.is_none() {
@@ -385,17 +372,18 @@ fn capture(
             if drain.is_none() && grace.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err("collector graceful flush deadline exceeded; forced cancellation cannot prove complete capture".into());
             }
+            let mut drained = [false; 2];
             for (index, pipe) in [
                 (0, &mut *out as &mut dyn Read),
                 (1, &mut *err as &mut dyn Read),
             ] {
-                pump(
+                drained[index] = pump(
                     pipe,
                     &mut files[index],
                     &mut lengths[index],
                     &mut eof[index],
                     policy.stream_bytes,
-                    drain.or(grace),
+                    grace,
                 )?;
             }
             #[cfg(test)]
@@ -410,17 +398,16 @@ fn capture(
                     _ => {}
                 }
             }
-            if drain.is_some() && eof.iter().all(|eof| *eof) {
+            // Guardian quiescence is the ownership proof. A duplicate writer
+            // outside that proven tree can keep the OS pipe open forever, so
+            // require each pipe's currently buffered bytes to be drained, not
+            // EOF from an unowned descriptor.
+            if drain.is_some() && exit.is_some() && drained.iter().all(|drained| *drained) {
                 for file in &mut files {
                     file.flush()
                         .map_err(|error| format!("cannot flush collector capture: {error}"))?;
                 }
-                if exit.is_some() {
-                    return Ok(());
-                }
-            }
-            if drain.is_some_and(|deadline| Instant::now() >= deadline) {
-                return Err("collector pipe remained open after confirmed guardian quiescence; raw capture retained".into());
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -494,7 +481,7 @@ fn pump(
     eof: &mut bool,
     limit: u64,
     deadline: Option<Instant>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     for _ in 0..16 {
         if *eof {
             break;
@@ -504,7 +491,10 @@ fn pump(
         }
         let mut buffer = [0; 4096];
         match reader.read(&mut buffer) {
-            Ok(0) => *eof = true,
+            Ok(0) => {
+                *eof = true;
+                return Ok(true);
+            }
             Ok(count) => {
                 *length = length
                     .checked_add(count as u64)
@@ -515,11 +505,11 @@ fn pump(
                     .map_err(|error| format!("cannot write collector capture: {error}"))?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(true),
             Err(error) => return Err(format!("cannot read collector capture: {error}")),
         }
     }
-    Ok(())
+    Ok(*eof)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -626,23 +616,11 @@ mod tests {
     }
 
     #[test]
-    fn post_exit_drain_is_bounded_and_included_in_settlement_budget() {
+    fn settlement_budget_includes_the_bounded_graceful_shutdown() {
         let long = Policy {
             stream_bytes: 1024,
             graceful: Some(Duration::from_secs(300)),
         };
-        let short = Policy {
-            stream_bytes: 1024,
-            graceful: Some(Duration::from_secs(2)),
-        };
-        let none = Policy {
-            stream_bytes: 1024,
-            graceful: None,
-        };
-        assert_eq!(post_exit_drain(long), Duration::from_secs(300));
-        assert_eq!(post_exit_drain(short), Duration::from_secs(2));
-        assert_eq!(post_exit_drain(none), Duration::from_secs(5));
-
         let process = Process {
             id: 1,
             stop: Arc::new(AtomicBool::new(false)),
@@ -653,7 +631,7 @@ mod tests {
             active: Some(Active::Process(process)),
             completion: None,
         };
-        assert_eq!(producer.stop_budget(), Duration::from_secs(608));
+        assert_eq!(producer.stop_budget(), Duration::from_secs(308));
     }
 
     #[test]
@@ -812,6 +790,12 @@ mod tests {
                 Ok(())
             }
         }
+        struct Empty;
+        impl Read for Empty {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            }
+        }
         let mut count = 0;
         let mut eof = false;
         assert!(
@@ -839,6 +823,17 @@ mod tests {
             .contains("cannot write collector capture")
         );
         assert!(!eof);
+        assert!(
+            pump(
+                &mut Empty,
+                &mut Vec::new(),
+                &mut count,
+                &mut eof,
+                4096,
+                None
+            )
+            .unwrap()
+        );
     }
 
     #[test]
