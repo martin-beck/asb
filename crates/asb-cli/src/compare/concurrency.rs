@@ -186,18 +186,25 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     if plans.is_empty() {
         html.push_str("<section><h2>No comparable concurrency observations</h2><p>ASB found no equivalent agent/trial group with measurements at two or more configured concurrency values. Run the same configuration at another concurrency, then rerun <code>asb compare</code>.</p></section>");
     } else {
-        html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
+        let mut picker = String::from(
+            "<div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>",
+        );
         for plan in &plans {
             let title = graph_presentation(stage, &plan.filename)?.title;
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
+            picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
         }
-        html.push_str("</tbody></table></div></section>");
+        picker.push_str("</tbody></table></div>");
+        html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div>");
+        html.push_str(&folded_table_html("Chart highlights", picker));
+        html.push_str("</section>");
         for (index, (group, group_plans)) in by_group.into_iter().enumerate() {
-            html.push_str(&format!("<section id=\"concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Comparable observations across configured concurrencies: {}.</p></div><div class=\"charts\">", escape(&group.display()), group_plans.iter().flat_map(|plan| plan.values.keys()).copied().collect::<BTreeSet<_>>().into_iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ")));
-            for plan in group_plans {
-                html.push_str(&chart_figure(stage, &plan.filename)?);
-            }
-            html.push_str("</div></section>");
+            let graphs = group_plans
+                .iter()
+                .map(|plan| plan.filename.clone())
+                .collect::<Vec<_>>();
+            html.push_str(&format!("<section id=\"concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Comparable observations across configured concurrencies: {}.</p></div>", escape(&group.display()), group_plans.iter().flat_map(|plan| plan.values.keys()).copied().collect::<BTreeSet<_>>().into_iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ")));
+            html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+            html.push_str("</section>");
         }
     }
     html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
@@ -377,12 +384,17 @@ fn render_agent_report(stage: &Path, rows: &[BenchmarkData]) -> Result<(), Error
     if plans.is_empty() {
         html.push_str("<section><h2>No cross-agent concurrency observations</h2><p>ASB found no equivalent trial/provider/model group with at least two agents and two configured concurrency values. Run matching configurations, then rerun <code>asb compare</code>.</p></section>");
     } else {
-        html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
+        let mut picker = String::from(
+            "<div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>",
+        );
         for plan in &plans {
             let title = graph_presentation(stage, &plan.filename)?.title;
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
+            picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
         }
-        html.push_str("</tbody></table></div></section>");
+        picker.push_str("</tbody></table></div>");
+        html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div>");
+        html.push_str(&folded_table_html("Chart highlights", picker));
+        html.push_str("</section>");
         for (index, (group, group_plans)) in by_group.into_iter().enumerate() {
             let agents = group_plans
                 .iter()
@@ -401,11 +413,13 @@ fn render_agent_report(stage: &Path, rows: &[BenchmarkData]) -> Result<(), Error
                 .map(|value| value.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            html.push_str(&format!("<section id=\"agent-concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Agents: {}. Comparable configured concurrencies: {}.</p></div><div class=\"charts\">", escape(&group.display()), escape(&agents), concurrencies));
-            for plan in group_plans {
-                html.push_str(&chart_figure(stage, &plan.filename)?);
-            }
-            html.push_str("</div></section>");
+            let graphs = group_plans
+                .iter()
+                .map(|plan| plan.filename.clone())
+                .collect::<Vec<_>>();
+            html.push_str(&format!("<section id=\"agent-concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Agents: {}. Comparable configured concurrencies: {}.</p></div>", escape(&group.display()), escape(&agents), concurrencies));
+            html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+            html.push_str("</section>");
         }
     }
     html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");

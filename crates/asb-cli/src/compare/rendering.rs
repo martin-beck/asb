@@ -446,23 +446,31 @@ fn write_agent_html_report(
         html.push_str(&format!("<label><input type=\"checkbox\" data-group=\"agent\" value=\"{}\" checked><span>{}</span></label>", escape(agent), escape(agent)));
     }
     html.push_str("</fieldset></div><p class=\"filter-count\" id=\"filter-count\"></p></section>");
-    html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
+    let mut picker = String::from(
+        "<div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>",
+    );
     for graph in &graphs {
         let title = graph_presentation(stage, graph)?.title;
-        html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&title), escape(graph)));
+        picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&title), escape(graph)));
     }
-    html.push_str("</tbody></table></div></section>");
-    html.push_str("<section><div class=\"section-title\"><h2>Agent observations</h2><p class=\"muted\">Per-agent count, mean, median, and p95 for every collected scalar.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Agent</th><th>Metric</th><th>Samples</th><th>Mean</th><th>Median</th><th>P95</th></tr></thead><tbody id=\"results\">");
+    picker.push_str("</tbody></table></div>");
+    html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar.</p></div>");
+    html.push_str(&folded_table_html("Chart highlights", picker));
+    html.push_str("</section>");
+    let mut observations = String::from(
+        "<div class=\"table-wrap\"><table><thead><tr><th>Agent</th><th>Metric</th><th>Samples</th><th>Mean</th><th>Median</th><th>P95</th></tr></thead><tbody id=\"results\">",
+    );
     for (metric, by_agent) in values {
         for (agent, samples) in by_agent {
-            html.push_str(&format!("<tr data-dimension-benchmark=\"{}\" data-dimension-agent=\"{}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", escape(agent), escape(agent), escape(agent), escape(metric), samples.len(), summary_value("mean", samples).map_or_else(|| "—".into(), format_tick), summary_value("median", samples).map_or_else(|| "—".into(), format_tick), summary_value("p95", samples).map_or_else(|| "—".into(), format_tick)));
+            observations.push_str(&format!("<tr data-dimension-benchmark=\"{}\" data-dimension-agent=\"{}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", escape(agent), escape(agent), escape(agent), escape(metric), samples.len(), summary_value("mean", samples).map_or_else(|| "—".into(), format_tick), summary_value("median", samples).map_or_else(|| "—".into(), format_tick), summary_value("p95", samples).map_or_else(|| "—".into(), format_tick)));
         }
     }
-    html.push_str("</tbody></table></div></section><section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">Hover values, zoom with the wheel, drag to pan, or enlarge a graph.</p></div><div class=\"charts\">");
-    for graph in &graphs {
-        html.push_str(&chart_figure(stage, graph)?);
-    }
-    html.push_str("</div></section><footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
+    observations.push_str("</tbody></table></div>");
+    html.push_str("<section><div class=\"section-title\"><h2>Agent observations</h2><p class=\"muted\">Per-agent count, mean, median, and p95 for every collected scalar.</p></div>");
+    html.push_str(&folded_table_html("Agent observations", observations));
+    html.push_str("</section><section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">Hover values, zoom with the wheel, drag to pan, or enlarge a graph.</p></div>");
+    html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+    html.push_str("</section><footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
     html.push_str(INTERACTIVE_SCRIPT);
     html.push_str(HTML_SCRIPT);
     fs::write(stage.join(&plan.report_file), html).map_err(|error| {
@@ -593,6 +601,11 @@ mod tests {
             assert!(html.contains("AgentSysPerf bottleneck diagnostic"));
             assert!(html.contains("agentsysperf-scaling-fixture.svg"));
             assert!(html.contains("AgentSysPerf scaling diagnostic"));
+            assert!(html.contains("<details class=\"folded-table\"><summary>Chart highlights"));
+            assert!(html.contains("<details class=\"folded-table\"><summary>Agent observations"));
+            assert!(html.contains(
+                "<details class=\"collector-graph-group\"><summary>AgentSysPerf (2 graphs)"
+            ));
         }
         fs::remove_dir_all(root).unwrap();
     }

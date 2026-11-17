@@ -981,7 +981,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
     )
 }
 
-fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String, Error> {
+pub(super) fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String, Error> {
     let svg = fs::read_to_string(comparison_dir.join(graph))
         .map_err(|error| Error::Run(format!("cannot read generated chart {}: {error}", graph)))?;
     let presentation = chart_presentation(&svg, graph);
@@ -1101,6 +1101,47 @@ fn graph_presentation(comparison_dir: &Path, graph: &str) -> Result<ChartPresent
     Ok(chart_presentation(&svg, graph))
 }
 
+/// Render a report table closed by default.  This is emitted directly by every
+/// report writer so report readability does not depend on JavaScript running.
+pub(super) fn folded_table_html(summary: &str, contents: impl AsRef<str>) -> String {
+    format!(
+        "<details class=\"folded-table\"><summary>{}</summary>{}</details>",
+        escape(summary),
+        contents.as_ref()
+    )
+}
+
+/// Render already-generated charts under stable collector headings.  Every
+/// report writer uses this rather than each maintaining its own grouping.
+pub(super) fn collector_chart_groups_html(
+    comparison_dir: &Path,
+    graphs: &[String],
+) -> Result<String, Error> {
+    let mut groups = BTreeMap::<&'static str, Vec<&String>>::new();
+    for graph in graphs {
+        let presentation = graph_presentation(comparison_dir, graph)?;
+        groups
+            .entry(presentation.collector)
+            .or_default()
+            .push(graph);
+    }
+
+    let mut html = String::new();
+    for (collector, entries) in groups {
+        html.push_str(&format!(
+            "<details class=\"collector-graph-group\"><summary>{} ({} graph{})</summary><div class=\"charts collector-charts\">",
+            escape(collector),
+            entries.len(),
+            if entries.len() == 1 { "" } else { "s" },
+        ));
+        for graph in entries {
+            html.push_str(&chart_figure(comparison_dir, graph)?);
+        }
+        html.push_str("</div></details>");
+    }
+    Ok(html)
+}
+
 fn observed_collectors(rows: &[BenchmarkData]) -> BTreeSet<&'static str> {
     let mut observed = BTreeSet::new();
     for row in rows {
@@ -1145,18 +1186,18 @@ fn observed_collectors(rows: &[BenchmarkData]) -> BTreeSet<&'static str> {
 
 pub(super) fn collector_commands_html(rows: &[BenchmarkData]) -> String {
     let observed = observed_collectors(rows);
-    let mut body = String::from(
-        "<section class=\"collection-commands\"><div class=\"section-title\"><h2>Measurement collection commands</h2><p class=\"muted\">Collector-owned templates for measurements included in this report.</p></div><p>Placeholders are substituted at execution time with the verified target, selected profile, interval, and project-local output. Raw values are not retained in report evidence so paths and runtime identifiers stay private.</p><div class=\"table-wrap\"><table><thead><tr><th>Collector</th><th>Command or operation</th><th>Scope</th></tr></thead><tbody>",
+    let mut table = String::from(
+        "<div class=\"table-wrap\"><table><thead><tr><th>Collector</th><th>Command or operation</th><th>Scope</th></tr></thead><tbody>",
     );
     if observed.is_empty() {
-        body.push_str("<tr><td colspan=\"3\">No collector measurement documents were available in these records.</td></tr>");
+        table.push_str("<tr><td colspan=\"3\">No collector measurement documents were available in these records.</td></tr>");
     } else {
         for id in observed {
             let Some(collector) = crate::collectors::find(id) else {
                 continue;
             };
             let command = collector.report_command();
-            body.push_str(&format!(
+            table.push_str(&format!(
                 "<tr><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
                 escape(collector.id()),
                 escape(command.invocation),
@@ -1164,8 +1205,11 @@ pub(super) fn collector_commands_html(rows: &[BenchmarkData]) -> String {
             ));
         }
     }
-    body.push_str("</tbody></table></div></section>");
-    body
+    table.push_str("</tbody></table></div>");
+    format!(
+        "<section class=\"collection-commands\"><div class=\"section-title\"><h2>Measurement collection commands</h2><p class=\"muted\">Collector-owned templates for measurements included in this report.</p></div><p>Placeholders are substituted at execution time with the verified target, selected profile, interval, and project-local output. Raw values are not retained in report evidence so paths and runtime identifiers stay private.</p>{}</section>",
+        folded_table_html("Collector command table", table)
+    )
 }
 
 const HTML_HEAD: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ASB sweep report</title><style>

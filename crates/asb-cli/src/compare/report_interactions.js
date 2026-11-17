@@ -17,6 +17,7 @@ function foldReportTables(){
 }
 function groupReportCharts(){
   for(const grid of [...(document.querySelectorAll('.charts')||[])]){
+    if(grid.classList&&grid.classList.contains('collector-charts'))continue;
     if(grid.dataset&&grid.dataset.collectorGrouped==='true')continue;
     const figures=[...(grid.children||[])].filter(node=>node.classList&&(
       node.classList.contains('interactive-chart')||node.classList.contains('flamegraph-chart')));
