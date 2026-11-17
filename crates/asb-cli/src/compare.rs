@@ -506,6 +506,12 @@ fn collect_artifacts(path: &Path, depth: usize, output: &mut Vec<PathBuf>) {
 
 fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Error> {
     let benchmarks = &prepared.data.rows;
+    let report_agents = benchmarks
+        .iter()
+        .map(|benchmark| benchmark.agent.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let graphs = prepared.graph_names();
     let aggregate = benchmarks.iter().any(|row| row.configured_concurrency > 1);
     let selection_mode = prepared
@@ -592,7 +598,7 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a chart here or from its own toolbar to keep it visually marked while comparing results.</p></div><div class=\"table-wrap\"><table><thead><tr><th>Chart</th><th>Highlight</th></tr></thead><tbody>");
         for graph in &graphs {
             let label = graph_presentation(stage, graph)?.title;
-            html.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(graph), escape(&label), escape(graph)));
+            html.push_str(&chart_picker_row(graph, &label));
         }
         html.push_str("</tbody></table></div></section>");
     }
@@ -883,7 +889,11 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 escape(title),
                 escape(description)
             ));
-            html.push_str(&collector_chart_groups_html(stage, &section_graphs)?);
+            html.push_str(&collector_chart_groups_html(
+                stage,
+                &section_graphs,
+                &report_agents,
+            )?);
             html.push_str("</section>");
         }
         let remaining_graphs = graphs
@@ -892,7 +902,11 @@ fn write_html_report(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
             .cloned()
             .collect::<Vec<_>>();
         html.push_str("<section><div class=\"section-title\"><h2>Charts</h2><p class=\"muted\">SVG files are linked below and remain available for download.</p></div>");
-        html.push_str(&collector_chart_groups_html(stage, &remaining_graphs)?);
+        html.push_str(&collector_chart_groups_html(
+            stage,
+            &remaining_graphs,
+            &report_agents,
+        )?);
         html.push_str("</section>");
     }
     html.push_str("<footer>Generated locally by <code>asb compare</code>. No provider or agent was contacted.</footer></main>");
@@ -993,7 +1007,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         ));
     }
     format!(
-        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\" data-collector=\"Flamegraph\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}</figure>",
+        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\" data-collector=\"Flamegraph\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Sampled process-tree call-stack time for this recorded attempt. Frame width represents sampled time, not an exact wall-time breakdown.</p></details>{body}</figure>",
         escape(&benchmark.label),
         escape(&benchmark.agent),
         escape(&benchmark.workload),
@@ -1007,14 +1021,26 @@ pub(super) fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String,
         .map_err(|error| Error::Run(format!("cannot read generated chart {}: {error}", graph)))?;
     let presentation = chart_presentation(&svg, graph);
     Ok(format!(
-        "<figure class=\"interactive-chart\" data-graph=\"{}\" data-chart-title=\"{}\" data-collector=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption></figure>",
+        "<figure id=\"chart-{}\" class=\"interactive-chart\" data-graph=\"{}\" data-chart-title=\"{}\" data-collector=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><details class=\"chart-description\"><summary>What this measures</summary><p>{}</p></details><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption></figure>",
+        escape(graph),
         escape(graph),
         escape(&presentation.title),
         escape(presentation.collector),
         escape(&presentation.title),
         escape(graph),
+        escape(&presentation.description),
         escape(graph),
     ))
+}
+
+pub(super) fn chart_picker_row(graph: &str, title: &str) -> String {
+    format!(
+        "<tr data-highlight-row=\"{}\"><td><a href=\"#chart-{}\">{}</a></td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>",
+        escape(graph),
+        escape(graph),
+        escape(title),
+        escape(graph),
+    )
 }
 
 #[cfg(test)]
@@ -1041,13 +1067,14 @@ fn title_case(value: &str) -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ChartPresentation {
-    title: String,
-    collector: &'static str,
+pub(super) struct ChartPresentation {
+    pub(super) title: String,
+    pub(super) collector: &'static str,
+    pub(super) description: String,
 }
 
-fn chart_presentation(svg: &str, fallback: &str) -> ChartPresentation {
-    let title = svg
+pub(super) fn chart_presentation(svg: &str, fallback: &str) -> ChartPresentation {
+    let raw_title = svg
         .split_once("<title>")
         .and_then(|(_, rest)| rest.split_once("</title>"))
         .map(|(title, _)| {
@@ -1060,60 +1087,126 @@ fn chart_presentation(svg: &str, fallback: &str) -> ChartPresentation {
         })
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| fallback.strip_suffix(".svg").unwrap_or(fallback).to_owned());
-    let collector = if title.starts_with("analysis.pressure.")
-        || title.starts_with("kernel-pressure.")
+    let title = display_metric_title(&raw_title);
+    let collector = if raw_title.starts_with("analysis.pressure.")
+        || raw_title.starts_with("kernel-pressure.")
         || fallback.starts_with("metric-kernel-pressure-")
         || fallback.starts_with("series-kernel-pressure-")
     {
         "Kernel pressure"
-    } else if title.starts_with("arm-spe.")
-        || title.starts_with("analysis.arm_spe.")
+    } else if raw_title.starts_with("arm-spe.")
+        || raw_title.starts_with("analysis.arm_spe.")
         || fallback.starts_with("metric-arm-spe-")
         || fallback.starts_with("series-arm-spe-")
     {
         "Arm SPE"
-    } else if title.starts_with("arm-pmu.") || fallback.starts_with("metric-arm-pmu-") {
+    } else if raw_title.starts_with("arm-pmu.") || fallback.starts_with("metric-arm-pmu-") {
         "Arm PMU"
-    } else if title.starts_with("bpftrace.")
+    } else if raw_title.starts_with("bpftrace.")
         || fallback.starts_with("metric-bpftrace-")
         || fallback.starts_with("series-bpftrace-")
     {
         "bpftrace"
-    } else if title.starts_with("perfetto.") || fallback.starts_with("perfetto-") {
+    } else if raw_title.starts_with("perfetto.") || fallback.starts_with("perfetto-") {
         "Perfetto"
-    } else if title.starts_with("perf.")
+    } else if raw_title.starts_with("perf.")
         || fallback.starts_with("metric-perf-")
         || fallback.starts_with("series-perf-")
     {
         "perf"
-    } else if title.starts_with("process.cpu.")
+    } else if raw_title.starts_with("process.cpu.")
         || fallback.starts_with("metric-mpstat-")
         || fallback.starts_with("series-mpstat-")
     {
         "mpstat"
-    } else if title.starts_with("process.io.")
+    } else if raw_title.starts_with("process.io.")
         || fallback.starts_with("metric-iostat-")
         || fallback.starts_with("series-iostat-")
     {
         "iostat"
-    } else if title.starts_with("agent.")
+    } else if raw_title.starts_with("agent.")
         || fallback.starts_with("metric-agent-")
         || fallback.starts_with("series-agent-")
     {
         "Agent process observation"
-    } else if title.starts_with("tool_calls.")
-        || title.starts_with("LLM tool-call")
+    } else if raw_title.starts_with("tool_calls.")
+        || raw_title.starts_with("LLM tool-call")
         || fallback.starts_with("tool-call-")
     {
         "Tool calls"
-    } else if title.starts_with("AgentSysPerf") || fallback.starts_with("agentsysperf-") {
+    } else if raw_title.starts_with("AgentSysPerf") || fallback.starts_with("agentsysperf-") {
         "AgentSysPerf"
-    } else if title.starts_with("component.") {
+    } else if raw_title.starts_with("component.") {
         "Component timings"
     } else {
         "ASB derived metrics"
     };
-    ChartPresentation { title, collector }
+    let description = chart_description(&title, collector);
+    ChartPresentation {
+        title,
+        collector,
+        description,
+    }
+}
+
+/// Metric identities escape separators to remain lossless.  Presentation does
+/// not use those identities as keys, so component timing titles can use the
+/// human-readable component name without changing the underlying metric.
+fn display_metric_title(title: &str) -> String {
+    if title.starts_with("component.") {
+        title
+            .replace("\\\\", "\\")
+            .replace("\\.", ".")
+            .replace("\\[", "[")
+            .replace("\\]", "]")
+    } else {
+        title.into()
+    }
+}
+
+fn chart_description(title: &str, collector: &str) -> String {
+    let metric = title
+        .split(" (per-replica series mean)")
+        .next()
+        .unwrap_or(title);
+    if let Some(component) = metric.strip_prefix("component.") {
+        let measure = if metric.ends_with(".wall_ms") {
+            "Elapsed wall-clock duration"
+        } else if metric.ends_with(".cpu_user_ms") {
+            "Process-tree CPU time spent in user mode"
+        } else if metric.ends_with(".cpu_system_ms") {
+            "Process-tree CPU time spent in kernel mode"
+        } else if metric.ends_with(".io_wait_ms") {
+            "Observed block-I/O delay for the process tree"
+        } else if metric.ends_with(".scheduler_wait_ms") {
+            "Observed time runnable but waiting for CPU"
+        } else if metric.ends_with(".network_wait_ms") {
+            "Directly observed network wait time"
+        } else {
+            "Recorded timing observation"
+        };
+        return format!(
+            "{measure} for `{component}`. Component facets are not additive wall-time stages."
+        );
+    }
+    match metric {
+        "elapsed_ms" => "Elapsed wall-clock time for the benchmark attempt.".into(),
+        "success_rate" => {
+            "Recorded workload evaluation result; unavailable is never treated as zero.".into()
+        }
+        "tool_call_count" => "Number of recorded agent tool calls for the attempt.".into(),
+        _ if metric.starts_with("token_usage.") => {
+            "Provider- or agent-reported token usage; unavailable means the adapter did not report it."
+                .into()
+        }
+        _ if metric.starts_with("host.") => {
+            "Captured execution-host fact, shown for comparison rather than attributed as benchmark consumption."
+                .into()
+        }
+        _ => format!(
+            "Observed `{metric}` reported by {collector}; unavailable observations are not zero-filled."
+        ),
+    }
 }
 
 fn graph_presentation(comparison_dir: &Path, graph: &str) -> Result<ChartPresentation, Error> {
@@ -1142,22 +1235,32 @@ pub(super) fn folded_table_html(summary: &str, contents: impl AsRef<str>) -> Str
 pub(super) fn collector_chart_groups_html(
     comparison_dir: &Path,
     graphs: &[String],
+    agents: &[String],
 ) -> Result<String, Error> {
-    let mut groups = BTreeMap::<&'static str, Vec<&String>>::new();
+    let mut groups = BTreeMap::<&'static str, Vec<(&String, ChartPresentation)>>::new();
     for graph in graphs {
         let presentation = graph_presentation(comparison_dir, graph)?;
         groups
             .entry(presentation.collector)
             .or_default()
-            .push(graph);
+            .push((graph, presentation));
     }
 
     let mut html = String::new();
     for (collector, entries) in groups {
-        let charts = entries
-            .iter()
-            .map(|graph| chart_figure(comparison_dir, graph))
-            .collect::<Result<String, Error>>()?;
+        let charts = chart_subgroups_html(
+            entries
+                .iter()
+                .map(|(graph, presentation)| {
+                    Ok((presentation.clone(), chart_figure(comparison_dir, graph)?))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        );
+        let flow = if collector == "Component timings" {
+            component_timing_flow_html(agents)
+        } else {
+            String::new()
+        };
         html.push_str(&folded_section_html(
             "collector-graph-group",
             &format!(
@@ -1165,10 +1268,85 @@ pub(super) fn collector_chart_groups_html(
                 entries.len(),
                 if entries.len() == 1 { "" } else { "s" },
             ),
-            format!("<div class=\"charts collector-charts\">{charts}</div>"),
+            format!("{flow}<div class=\"charts collector-charts\">{charts}</div>"),
         ));
     }
     Ok(html)
+}
+
+/// Group only related dotted metrics.  A graph joins its deepest prefix with
+/// at least two members; singleton graphs remain directly in the parent grid.
+pub(super) fn chart_subgroups_html(entries: Vec<(ChartPresentation, String)>) -> String {
+    let mut prefix_counts = BTreeMap::<String, usize>::new();
+    for (presentation, _) in &entries {
+        for prefix in dotted_prefixes(&presentation.title) {
+            *prefix_counts.entry(prefix).or_default() += 1;
+        }
+    }
+    let mut grouped = BTreeMap::<String, Vec<String>>::new();
+    let mut direct = Vec::new();
+    for (presentation, figure) in entries {
+        let subgroup = dotted_prefixes(&presentation.title)
+            .into_iter()
+            .rev()
+            .find(|prefix| prefix_counts.get(prefix).copied().unwrap_or_default() >= 2);
+        if let Some(prefix) = subgroup {
+            grouped.entry(prefix).or_default().push(figure);
+        } else {
+            direct.push(figure);
+        }
+    }
+    let mut html = direct.concat();
+    for (prefix, figures) in grouped {
+        html.push_str(&folded_section_html(
+            "metric-graph-subgroup",
+            &format!("{} ({} graphs)", subgroup_label(&prefix), figures.len()),
+            format!(
+                "<div class=\"charts metric-subgroup-charts\">{}</div>",
+                figures.concat()
+            ),
+        ));
+    }
+    html
+}
+
+fn dotted_prefixes(title: &str) -> Vec<String> {
+    let metric = title
+        .split(" (per-replica series mean)")
+        .next()
+        .unwrap_or(title);
+    let parts = metric.split('.').collect::<Vec<_>>();
+    (1..parts.len())
+        .map(|length| parts[..length].join("."))
+        .collect()
+}
+
+fn subgroup_label(prefix: &str) -> String {
+    match prefix {
+        "component" => "CPU accounting".into(),
+        "host" => "Host".into(),
+        "token_usage" => "Token usage".into(),
+        _ => prefix.into(),
+    }
+}
+
+pub(super) fn component_timing_flow_html(agents: &[String]) -> String {
+    let agents = if agents.is_empty() {
+        "<span class=\"component-flow-agent\">Recorded agent</span>".into()
+    } else {
+        agents
+            .iter()
+            .map(|agent| {
+                format!(
+                    "<span class=\"component-flow-agent\">{}</span>",
+                    escape(agent)
+                )
+            })
+            .collect::<String>()
+    };
+    format!(
+        "<div class=\"component-flow\" role=\"img\" aria-label=\"Component timing flow\"><div class=\"component-flow-row\"><span class=\"component-flow-node\">Collector attachment gate</span><span class=\"component-flow-arrow\">→</span><span class=\"component-flow-node component-flow-agents\">{agents}</span><span class=\"component-flow-arrow\">→</span><span class=\"component-flow-node\">agent.execute</span><span class=\"component-flow-arrow\">→</span><span class=\"component-flow-node\">Exit, collector settlement, evaluation</span></div><p>Agent branches begin after collector attachment. <code>agent.execute</code> exposes wall time and process-tree CPU, I/O, scheduler, and network-wait facets when observed; those facets are not additive stages. Cohort synchronization is recorded at admission and settlement boundaries.</p></div>"
+    )
 }
 
 fn observed_collectors(rows: &[BenchmarkData]) -> BTreeSet<&'static str> {
@@ -1245,7 +1423,7 @@ const HTML_HEAD: &str = r#"<!doctype html><html lang="en"><head><meta charset="u
 :root{color-scheme:light;--ink:#18212b;--muted:#61707f;--line:#dce4ec;--panel:#fff;--accent:#1769aa;--accent-soft:#e8f2fa;--bg:#f4f7fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1500px;margin:auto;padding:36px 28px 56px}.hero{background:linear-gradient(135deg,#12344d,#1769aa);color:#fff;border-radius:18px;padding:42px 46px;box-shadow:0 14px 32px #12344d33}.hero h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.05;margin:4px 0 14px;letter-spacing:-.04em}.hero p{max-width:760px;margin:0;color:#e5f2fb;font-size:16px}.eyebrow{font-size:11px!important;letter-spacing:.16em;font-weight:700}.explain,.filters,section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:20px;padding:24px;box-shadow:0 4px 14px #17324d0b}.explain{border-left:4px solid var(--accent)}h2{font-size:19px;margin:0}.section-title{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}legend{font-weight:700;color:var(--accent);padding:0 5px}label{display:flex;gap:8px;align-items:flex-start;margin:6px 0;color:var(--muted);overflow-wrap:anywhere}input{accent-color:var(--accent);margin-top:4px}.filter-count,.muted{color:var(--muted);margin:14px 0 0}.text-link,a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button{background:#fff;border:1px solid #b9c9d8;border-radius:7px;color:var(--accent);cursor:pointer;padding:7px 11px;margin-left:6px}button:hover{background:var(--accent-soft)}.table-wrap{overflow:auto}table{border-collapse:collapse;min-width:100%;white-space:nowrap}th{text-align:left;background:#eef4f8;color:#405466;font-size:12px;letter-spacing:.04em;text-transform:uppercase}th,td{border-bottom:1px solid var(--line);padding:12px 10px;vertical-align:top}.links{white-space:normal;min-width:170px}.links a{display:inline-block;margin:0 8px 5px 0;font-size:12px}.artifact-list{padding-left:18px;margin:8px 0;white-space:normal}.perfetto-metric{display:block;width:min(760px,100%);height:180px;border:0;margin:8px 0}.status{display:block;color:#9a4b00;background:#fff4e5;border-radius:5px;font-size:11px;padding:3px 6px;margin-top:4px;max-width:260px;white-space:normal}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.charts figure{margin:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfdff}.charts img{width:100%;height:auto;display:block}.charts figcaption{padding:8px 2px 2px;font-size:12px;overflow-wrap:anywhere}footer{color:var(--muted);text-align:center;padding:28px 0 0}code{background:#e9eef3;border-radius:4px;padding:2px 5px}@media(max-width:700px){.shell{padding:18px 12px}.hero{padding:30px 24px}.section-title{align-items:flex-start;flex-direction:column}.section-title button{margin:0 6px 0 0}}
 </style></head><body>"#;
 
-const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-stage .series-hidden{display:none}.chart-stage .legend-item{cursor:pointer;user-select:none}.chart-stage .legend-hidden{opacity:.35;text-decoration:line-through}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan · click a legend item to hide or show its series';color:var(--muted);font-size:11px}.collector-graph-group,.report-graph-group,.folded-filter-pane,.folded-artifact-section{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group{grid-column:1/-1}.collector-graph-group>summary,.report-graph-group>summary,.folded-filter-pane>summary,.folded-artifact-section>summary,.folded-table>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.report-graph-group[open]>summary,.folded-filter-pane[open]>summary,.folded-artifact-section[open]>summary,.folded-table[open]>summary{margin-bottom:12px}.collector-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
+const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-description{margin:0 0 8px;color:var(--muted);font-size:12px}.chart-description>summary{cursor:pointer;color:var(--accent);font-weight:700}.chart-description[open]>summary{margin-bottom:4px}.chart-description p{margin:0}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-stage .series-hidden{display:none}.chart-stage .legend-item{cursor:pointer;user-select:none}.chart-stage .legend-hidden{opacity:.35;text-decoration:line-through}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan · click a legend item to hide or show its series';color:var(--muted);font-size:11px}.collector-graph-group,.report-graph-group,.folded-filter-pane,.folded-artifact-section,.metric-graph-subgroup{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group{grid-column:1/-1}.metric-graph-subgroup{grid-column:1/-1}.collector-graph-group>summary,.report-graph-group>summary,.folded-filter-pane>summary,.folded-artifact-section>summary,.folded-table>summary,.metric-graph-subgroup>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.report-graph-group[open]>summary,.folded-filter-pane[open]>summary,.folded-artifact-section[open]>summary,.folded-table[open]>summary,.metric-graph-subgroup[open]>summary{margin-bottom:12px}.collector-charts,.metric-subgroup-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.component-flow{grid-column:1/-1;border:1px solid #b9d5e9;border-radius:8px;background:#f4f9fd;padding:12px;margin-bottom:2px}.component-flow-row{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap}.component-flow-node{flex:1 1 150px;display:flex;align-items:center;justify-content:center;border:1px solid #83afd0;border-radius:6px;background:#fff;padding:8px;text-align:center;font-size:12px;font-weight:700}.component-flow-agents{gap:5px;flex-wrap:wrap}.component-flow-agent{border-radius:4px;background:#e8f2fa;padding:3px 6px}.component-flow-arrow{align-self:center;color:var(--accent);font-size:20px;font-weight:700}.component-flow p{margin:9px 0 0;color:var(--muted);font-size:12px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
 
 const HIGHLIGHT_STYLE: &str = r#".interactive-chart.highlighted{outline:5px solid #d81b60;outline-offset:3px;box-shadow:0 0 0 9px #d81b6033}.highlight-toggle{display:inline-flex;align-items:center;gap:5px;margin:0 6px 0 0;color:#8d1748;font-weight:700}.highlight-toggle input{accent-color:#d81b60;margin:0}.chart-picker tr.highlighted{background:#fff0f5;box-shadow:inset 5px 0 #d81b60}"#;
 
@@ -1273,6 +1451,7 @@ fn write_bar_svg(
     values: &[(String, Option<f64>)],
     labels: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
+    let display_title = display_metric_title(title);
     let min = values
         .iter()
         .filter_map(|(_, value)| *value)
@@ -1287,7 +1466,7 @@ fn write_bar_svg(
     let left = 70.0;
     let bottom = PLOT_BOTTOM;
     let bar_width = (width - left - 20.0) / values.len().max(1) as f64;
-    let mut svg = svg_header(width, height, title);
+    let mut svg = svg_header(width, height, &display_title);
     append_y_axis(
         &mut svg,
         left,
@@ -1295,7 +1474,7 @@ fn write_bar_svg(
         bottom,
         PLOT_RIGHT,
         (min, max),
-        title,
+        &display_title,
     );
     let baseline = bottom - domain_fraction(0.0, min, max) * (bottom - PLOT_TOP);
     if min < 0.0 {
@@ -1377,6 +1556,7 @@ fn write_series_svg_with_labels(
     values: &[(String, Option<&TimeSeries>)],
     labels: &BTreeMap<String, String>,
 ) -> Result<(), Error> {
+    let display_title = display_metric_title(title);
     const WIDTH: f64 = 1_200.0;
     const LEFT: f64 = 100.0;
     const RIGHT: f64 = 1_160.0;
@@ -1452,14 +1632,22 @@ fn write_series_svg_with_labels(
     let plot_top = LEGEND_TOP + legend_height + 18.0;
     let bottom = plot_top + PLOT_HEIGHT;
     let height = bottom + 72.0;
-    let mut svg = svg_header(WIDTH, height, title);
+    let mut svg = svg_header(WIDTH, height, &display_title);
     svg.push_str("<text x=\"24\" y=\"44\" font-size=\"11\">Bounded display: at most 2048 original observations per series, preserving endpoints/extrema and null gaps. Full aligned observations: comparison.json.</text>");
     svg.push_str(&format!(
         "<rect class=\"legend-panel\" x=\"{LEFT:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{legend_height:.1}\" rx=\"8\" fill=\"#f4f8fb\" stroke=\"#dce4ec\"/>",
         LEGEND_TOP - 12.0,
         RIGHT - LEFT
     ));
-    append_y_axis(&mut svg, LEFT, plot_top, bottom, RIGHT, (min, max), title);
+    append_y_axis(
+        &mut svg,
+        LEFT,
+        plot_top,
+        bottom,
+        RIGHT,
+        (min, max),
+        &display_title,
+    );
     append_series_x_axis(
         &mut svg,
         timestamp_bounds,
@@ -1824,9 +2012,7 @@ mod pipeline_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::GraphNames;
-    use super::chart_presentation;
-    use super::run;
+    use super::{ChartPresentation, GraphNames, chart_presentation, chart_subgroups_html, run};
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2265,6 +2451,11 @@ mod tests {
                 )
                 .is_file()
         );
+        let component_svg = std::fs::read_to_string(root.join("results/sweep-comparison").join(
+            GraphNames::default().allocate("metric", "component.agent\\.execute.cpu_user_ms"),
+        ))
+        .unwrap();
+        assert!(component_svg.contains("<title>component.agent.execute.cpu_user_ms</title>"));
         let timeline = root.join("results/sweep-comparison/perfetto-execution-composition.svg");
         assert!(timeline.is_file());
         let timeline_svg = std::fs::read_to_string(timeline).unwrap();
@@ -2346,6 +2537,13 @@ mod tests {
         assert!(report.contains("All metrics"));
         assert!(report.contains("metric-tool_call_count.svg"));
         assert!(report.contains("<details class=\"collector-graph-group\"><summary>"));
+        assert!(
+            report.contains(
+                "<details class=\"metric-graph-subgroup\"><summary>component.agent.execute"
+            )
+        );
+        assert!(report.contains("Component timing flow"));
+        assert!(report.contains("class=\"chart-description\""));
         assert!(report.contains("Host metadata"));
         assert!(report.contains("Neoverse-N1"));
         assert!(report.contains("Component timings"));
@@ -2943,5 +3141,46 @@ mod tests {
         let fallback = chart_presentation("<svg></svg>", "opaque-name.svg");
         assert_eq!(fallback.title, "opaque-name");
         assert_eq!(fallback.collector, "ASB derived metrics");
+
+        let component = chart_presentation(
+            "<svg><title>component.agent\\.execute.cpu_user_ms</title></svg>",
+            "metric-component.svg",
+        );
+        assert_eq!(component.title, "component.agent.execute.cpu_user_ms");
+        assert_eq!(component.collector, "Component timings");
+        assert!(component.description.contains("user mode"));
+    }
+
+    #[test]
+    fn chart_subgroups_fold_only_related_dotted_metric_sets() {
+        let presentation = |title: &str| ChartPresentation {
+            title: title.into(),
+            collector: "ASB derived metrics",
+            description: "fixture".into(),
+        };
+        let html = chart_subgroups_html(vec![
+            (
+                presentation("component.agent.execute.cpu_user_ms"),
+                "<figure>user</figure>".into(),
+            ),
+            (
+                presentation("component.agent.execute.cpu_system_ms"),
+                "<figure>system</figure>".into(),
+            ),
+            (
+                presentation("host.logical_cpus"),
+                "<figure>host</figure>".into(),
+            ),
+            (
+                presentation("elapsed_ms"),
+                "<figure>elapsed</figure>".into(),
+            ),
+        ]);
+        assert!(html.contains(
+            "<details class=\"metric-graph-subgroup\"><summary>component.agent.execute (2 graphs)</summary>"
+        ));
+        assert_eq!(html.matches("metric-graph-subgroup").count(), 1);
+        assert!(html.contains("<figure>host</figure>"));
+        assert!(html.contains("<figure>elapsed</figure>"));
     }
 }

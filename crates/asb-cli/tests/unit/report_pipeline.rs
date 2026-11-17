@@ -1671,6 +1671,7 @@ fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
     assert!(original.contains("Chart highlights"));
     assert!(original.contains("data-highlight-graph"));
     assert!(original.contains("agent-summary-report.html"));
+    assert!(original.contains("href=\"#chart-"));
     let comparison: Value =
         serde_json::from_slice(&fs::read(report.with_file_name("comparison.json")).unwrap())
             .unwrap();
@@ -1725,6 +1726,10 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
                 .to_string(),
             );
             fixture.write(
+                &format!("sweep-results/{index:03}-{index}/{measurements}/components.json"),
+                json!({"components":{"agent.execute":{"wall_ms":10.0 * concurrency as f64,"cpu_user_ms":2.0 * concurrency as f64}}}).to_string(),
+            );
+            fixture.write(
                 &format!("sweep-results/{index:03}-{index}/{measurements}/flamegraph.folded"),
                 format!("root;{agent};sample {concurrency}\n"),
             );
@@ -1748,6 +1753,10 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(concurrency_report.contains("groupReportCharts"));
     assert!(concurrency_report.contains("Aggregate flamegraphs"));
     assert!(concurrency_report.contains("setSeriesVisible"));
+    assert!(concurrency_report.contains("metric-graph-subgroup"));
+    assert!(concurrency_report.contains("component.agent.execute"));
+    assert!(concurrency_report.contains("chart-description"));
+    assert!(concurrency_report.contains("Component timing flow"));
     let graphs = fs::read_dir(directory)
         .unwrap()
         .flatten()
@@ -1798,6 +1807,8 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(agent_report.contains("groupReportCharts"));
     assert!(agent_report.contains("Aggregate flamegraphs"));
     assert!(agent_report.contains("setSeriesVisible"));
+    assert!(agent_report.contains("metric-graph-subgroup"));
+    assert!(agent_report.contains("Component timing flow"));
     for file in [
         "report.html",
         "agent-summary-report.html",
@@ -1808,6 +1819,11 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
         assert!(html.contains("Measurement collection commands"), "{file}");
         assert!(html.contains("collector-graph-group"), "{file}");
         assert!(html.contains("foldReportTables"), "{file}");
+        assert!(html.contains("chart-description"), "{file}");
+        assert!(html.contains("metric-graph-subgroup"), "{file}");
+        if file == "report.html" {
+            assert!(html.contains("Component timing flow"), "{file}");
+        }
     }
     let agent_graphs = fs::read_dir(directory)
         .unwrap()

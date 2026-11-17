@@ -263,7 +263,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
         );
         for plan in &plans {
             let title = graph_presentation(stage, &plan.filename)?.title;
-            picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
+            picker.push_str(&chart_picker_row(&plan.filename, &title));
         }
         picker.push_str("</tbody></table></div>");
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div>");
@@ -275,7 +275,11 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
                 .map(|plan| plan.filename.clone())
                 .collect::<Vec<_>>();
             html.push_str(&format!("<section id=\"concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Comparable observations across configured concurrencies: {}.</p></div>", escape(&group.display()), group_plans.iter().flat_map(|plan| plan.values.keys()).copied().collect::<BTreeSet<_>>().into_iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ")));
-            html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+            html.push_str(&collector_chart_groups_html(
+                stage,
+                &graphs,
+                std::slice::from_ref(&group.agent),
+            )?);
             html.push_str("</section>");
         }
     }
@@ -466,7 +470,7 @@ fn render_agent_report(
         );
         for plan in &plans {
             let title = graph_presentation(stage, &plan.filename)?.title;
-            picker.push_str(&format!("<tr data-highlight-row=\"{}\"><td>{}</td><td><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight chart</span></label></td></tr>", escape(&plan.filename), escape(&title), escape(&plan.filename)));
+            picker.push_str(&chart_picker_row(&plan.filename, &title));
         }
         picker.push_str("</tbody></table></div>");
         html.push_str("<section class=\"chart-picker\"><div class=\"section-title\"><h2>Chart highlights</h2><p class=\"muted\">Highlight a graph here or from its own toolbar.</p></div>");
@@ -495,7 +499,16 @@ fn render_agent_report(
                 .map(|plan| plan.filename.clone())
                 .collect::<Vec<_>>();
             html.push_str(&format!("<section id=\"agent-concurrency-group-{index}\"><div class=\"section-title\"><h2>{}</h2><p class=\"muted\">Agents: {}. Comparable configured concurrencies: {}.</p></div>", escape(&group.display()), escape(&agents), concurrencies));
-            html.push_str(&collector_chart_groups_html(stage, &graphs)?);
+            html.push_str(&collector_chart_groups_html(
+                stage,
+                &graphs,
+                &group_plans
+                    .iter()
+                    .flat_map(|plan| plan.values.keys().cloned())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            )?);
             html.push_str("</section>");
         }
     }
@@ -512,17 +525,23 @@ fn render_agent_report(
 
 fn agent_metric_display(plan: &AgentGraphPlan) -> String {
     if plan.is_series_mean {
-        format!("{} (per-replica series mean)", plan.metric)
+        format!(
+            "{} (per-replica series mean)",
+            display_metric_title(&plan.metric)
+        )
     } else {
-        plan.metric.clone()
+        display_metric_title(&plan.metric)
     }
 }
 
 fn metric_display(plan: &GraphPlan) -> String {
     if plan.is_series_mean {
-        format!("{} (per-replica series mean)", plan.metric)
+        format!(
+            "{} (per-replica series mean)",
+            display_metric_title(&plan.metric)
+        )
     } else {
-        plan.metric.clone()
+        display_metric_title(&plan.metric)
     }
 }
 
@@ -1088,7 +1107,7 @@ fn derived_flamegraph_figure(
 ) -> Result<String, Error> {
     let document = source::read_svg(&stage.join(svg), svg)?;
     Ok(format!(
-        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><iframe title=\"{}\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a></figure>",
+        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details><iframe title=\"{}\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a></figure>",
         escape(title),
         escape(title),
         escape(&document),
