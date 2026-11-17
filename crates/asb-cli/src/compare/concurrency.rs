@@ -253,7 +253,7 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     );
     html.push_str("<main class=\"shell\">");
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB CONCURRENCY REPORT</p><h1>Concurrency scaling comparison</h1><p>Compare the same agent, trial, provider, model, workload module, and dataset across configured replica counts without rerunning a benchmark.</p></header>");
-    html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Every graph has configured concurrency on the x-axis and the original metric unit on the y-axis. Each faint point is an individual replica; the connected marker is that concurrency's median. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean, the same summary used by the existing replica-distribution view. Missing values are not zero-filled.</p></section>");
+    html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Every graph has configured concurrency on the x-axis and a human-scaled metric unit on the y-axis. Each faint point is an individual replica; the connected marker is that concurrency's median. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean, the same summary used by the existing replica-distribution view. Missing values are not zero-filled.</p></section>");
     html.push_str(&collector_commands_html(&prepared.data.rows));
     if plans.is_empty() {
         html.push_str("<section><h2>No comparable concurrency observations</h2><p>ASB found no equivalent agent/trial group with measurements at two or more configured concurrency values. Run the same configuration at another concurrency, then rerun <code>asb compare</code>.</p></section>");
@@ -460,7 +460,7 @@ fn render_agent_report(
     );
     html.push_str("<main class=\"shell\">");
     html.push_str("<header class=\"hero\"><p class=\"eyebrow\">ASB AGENT CONCURRENCY REPORT</p><h1>Agent concurrency comparison</h1><p>Compare agents on the identical trial, provider, model, workload module, and dataset across configured replica counts without rerunning a benchmark.</p></header>");
-    html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Each color is one agent. The x-axis is configured concurrency and the y-axis retains the original metric unit. Faint points are individual replicas; connected markers are per-agent medians at each configured concurrency. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean. Missing values are not zero-filled.</p></section>");
+    html.push_str("<section class=\"explain\"><strong>How to read this report</strong><p>Each color is one agent. The x-axis is configured concurrency and the y-axis uses a human-scaled metric unit. Faint points are individual replicas; connected markers are per-agent medians at each configured concurrency. Scalar measurements retain their observed value. Timestamped collector series contribute one per-replica mean. Missing values are not zero-filled.</p></section>");
     html.push_str(&collector_commands_html(rows));
     if plans.is_empty() {
         html.push_str("<section><h2>No cross-agent concurrency observations</h2><p>ASB found no equivalent trial/provider/model group with at least two agents and two configured concurrency values. Run matching configurations, then rerun <code>asb compare</code>.</p></section>");
@@ -574,11 +574,12 @@ fn write_concurrency_svg(path: &Path, plan: &GraphPlan) -> Result<(), Error> {
         LEFT + fraction * (RIGHT - LEFT)
     };
     let title = metric_display(plan);
+    let axis = numeric_axis((min, max), &plan.metric);
     let mut svg = svg_header(WIDTH, 470.0, &title);
     svg.push_str("<text x=\"22\" y=\"48\" font-size=\"11\">Faint points are individual replicas; the connected dark line is the median at each configured concurrency.</text>");
-    append_y_axis(&mut svg, LEFT, TOP, BOTTOM, RIGHT, (min, max), &plan.metric);
-    let baseline = BOTTOM - domain_fraction(0.0, min, max) * (BOTTOM - TOP);
-    if min < 0.0 {
+    append_y_axis(&mut svg, LEFT, TOP, BOTTOM, RIGHT, &axis);
+    let baseline = BOTTOM - domain_fraction(0.0, axis.min, axis.max) * (BOTTOM - TOP);
+    if axis.min < 0.0 {
         svg.push_str(&format!("<line class=\"zero-baseline\" x1=\"{LEFT}\" y1=\"{baseline:.1}\" x2=\"{RIGHT}\" y2=\"{baseline:.1}\" stroke=\"black\"/>"));
     }
     for concurrency in &concurrencies {
@@ -597,12 +598,13 @@ fn write_concurrency_svg(path: &Path, plan: &GraphPlan) -> Result<(), Error> {
             } else {
                 (index as f64 / (count - 1) as f64 - 0.5) * 12.0
             };
-            let y = BOTTOM - domain_fraction(observation.value, min, max) * (BOTTOM - TOP);
+            let y =
+                BOTTOM - domain_fraction(observation.value, axis.min, axis.max) * (BOTTOM - TOP);
             let label = format!("concurrency {concurrency} · {}", observation.label);
             svg.push_str(&format!("<circle class=\"series-point concurrency-observation\" data-series-index=\"0\" data-label=\"{}\" data-value=\"{}\" data-concurrency=\"{}\" cx=\"{:.1}\" cy=\"{y:.1}\" r=\"4\" fill=\"#7aa6d8\" fill-opacity=\"0.72\" stroke=\"#2d5f91\"><title>{}: {} {}</title></circle>", escape(&label), observation.value, concurrency, x + offset, escape(&label), format_tick(observation.value), escape(metric_unit(&plan.metric))));
         }
         let median = median(observations.iter().map(|observation| observation.value));
-        let y = BOTTOM - domain_fraction(median, min, max) * (BOTTOM - TOP);
+        let y = BOTTOM - domain_fraction(median, axis.min, axis.max) * (BOTTOM - TOP);
         medians.push((x, y, *concurrency, observations.len(), median));
     }
     svg.push_str(&format!("<polyline class=\"series concurrency-median\" data-series-index=\"0\" data-label=\"median\" points=\"{}\" fill=\"none\" stroke=\"#12344d\" stroke-width=\"3\"/>", medians.iter().map(|(x, y, _, _, _)| format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ")));
@@ -657,11 +659,12 @@ fn write_agent_concurrency_svg(path: &Path, plan: &AgentGraphPlan) -> Result<(),
         LEFT + fraction * (RIGHT - LEFT)
     };
     let title = agent_metric_display(plan);
+    let axis = numeric_axis((min, max), &plan.metric);
     let mut svg = svg_header(WIDTH, 502.0, &title);
     svg.push_str("<text x=\"22\" y=\"48\" font-size=\"11\">Each color is one agent. Faint points are individual replicas; connected markers are per-agent medians.</text>");
-    append_y_axis(&mut svg, LEFT, TOP, BOTTOM, RIGHT, (min, max), &plan.metric);
-    let baseline = BOTTOM - domain_fraction(0.0, min, max) * (BOTTOM - TOP);
-    if min < 0.0 {
+    append_y_axis(&mut svg, LEFT, TOP, BOTTOM, RIGHT, &axis);
+    let baseline = BOTTOM - domain_fraction(0.0, axis.min, axis.max) * (BOTTOM - TOP);
+    if axis.min < 0.0 {
         svg.push_str(&format!("<line class=\"zero-baseline\" x1=\"{LEFT}\" y1=\"{baseline:.1}\" x2=\"{RIGHT}\" y2=\"{baseline:.1}\" stroke=\"black\"/>"));
     }
     for concurrency in &concurrencies {
@@ -682,7 +685,8 @@ fn write_agent_concurrency_svg(path: &Path, plan: &AgentGraphPlan) -> Result<(),
                 } else {
                     (index as f64 / (count - 1) as f64 - 0.5) * 10.0
                 };
-                let y = BOTTOM - domain_fraction(observation.value, min, max) * (BOTTOM - TOP);
+                let y = BOTTOM
+                    - domain_fraction(observation.value, axis.min, axis.max) * (BOTTOM - TOP);
                 let label = format!(
                     "{agent} · concurrency {concurrency} · {}",
                     observation.label
@@ -690,7 +694,7 @@ fn write_agent_concurrency_svg(path: &Path, plan: &AgentGraphPlan) -> Result<(),
                 svg.push_str(&format!("<circle class=\"series-point concurrency-observation\" data-series-index=\"{series_index}\" data-label=\"{}\" data-value=\"{}\" data-concurrency=\"{}\" cx=\"{:.1}\" cy=\"{y:.1}\" r=\"4\" fill=\"{color}\" fill-opacity=\"0.42\" stroke=\"{color}\"><title>{}: {} {}</title></circle>", escape(&label), observation.value, concurrency, x + offset, escape(&label), format_tick(observation.value), escape(metric_unit(&plan.metric))));
             }
             let value = median(observations.iter().map(|observation| observation.value));
-            let y = BOTTOM - domain_fraction(value, min, max) * (BOTTOM - TOP);
+            let y = BOTTOM - domain_fraction(value, axis.min, axis.max) * (BOTTOM - TOP);
             medians.push((x, y, *concurrency, observations.len(), value));
         }
         svg.push_str(&format!("<polyline class=\"series concurrency-median\" data-series-index=\"{series_index}\" data-label=\"{}\" points=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"3\"/>", escape(agent), medians.iter().map(|(x, y, _, _, _)| format!("{x:.1},{y:.1}")).collect::<Vec<_>>().join(" ")));

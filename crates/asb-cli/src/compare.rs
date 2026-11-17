@@ -32,7 +32,6 @@ use source::read_json;
 const PLOT_TOP: f64 = 70.0;
 const PLOT_BOTTOM: f64 = 390.0;
 const PLOT_RIGHT: f64 = 880.0;
-const Y_TICKS: usize = 5;
 
 #[derive(Debug)]
 pub(super) struct BenchmarkData {
@@ -1044,6 +1043,25 @@ pub(super) fn chart_picker_row(graph: &str, title: &str) -> String {
 }
 
 #[cfg(test)]
+mod chart_picker_tests {
+    use super::*;
+
+    #[test]
+    fn highlight_chart_label_links_to_its_chart_anchor() {
+        let row = chart_picker_row("metric.elapsed_ms.svg", "Elapsed time");
+        assert!(row.contains("href=\"#chart-metric.elapsed_ms.svg\""));
+        assert!(row.contains(">Elapsed time</a>"));
+    }
+
+    #[test]
+    fn interaction_script_keeps_chart_picker_link_when_renaming() {
+        let script = include_str!("compare/report_interactions.js");
+        assert!(script.contains("const link=cell&&cell.querySelector('a[href]');"));
+        assert!(script.contains("if(link)link.textContent=title;"));
+    }
+}
+
+#[cfg(test)]
 fn inline_svg_artifact(
     comparison_dir: &Path,
     artifact: &str,
@@ -1465,18 +1483,11 @@ fn write_bar_svg(
     let height = 460.0;
     let left = 70.0;
     let bottom = PLOT_BOTTOM;
+    let axis = numeric_axis((min, max), &display_title);
     let bar_width = (width - left - 20.0) / values.len().max(1) as f64;
     let mut svg = svg_header(width, height, &display_title);
-    append_y_axis(
-        &mut svg,
-        left,
-        PLOT_TOP,
-        bottom,
-        PLOT_RIGHT,
-        (min, max),
-        &display_title,
-    );
-    let baseline = bottom - domain_fraction(0.0, min, max) * (bottom - PLOT_TOP);
+    append_y_axis(&mut svg, left, PLOT_TOP, bottom, PLOT_RIGHT, &axis);
+    let baseline = bottom - domain_fraction(0.0, axis.min, axis.max) * (bottom - PLOT_TOP);
     if min < 0.0 {
         svg.push_str(&format!("<line class=\"zero-baseline\" x1=\"{left}\" y1=\"{baseline:.1}\" x2=\"{PLOT_RIGHT}\" y2=\"{baseline:.1}\" stroke=\"black\"/>"));
     }
@@ -1496,9 +1507,19 @@ fn write_bar_svg(
             continue;
         }
         let value = value.expect("unavailable values are handled above");
-        let endpoint = bottom - domain_fraction(value, min, max) * (bottom - PLOT_TOP);
-        let bar_height = (endpoint - baseline).abs();
-        let y = endpoint.min(baseline);
+        let endpoint = bottom - domain_fraction(value, axis.min, axis.max) * (bottom - PLOT_TOP);
+        let raw_height = (endpoint - baseline).abs();
+        // A finite non-zero subnormal can be smaller than one display pixel
+        // beside ordinary values. Keep it visible without changing evidence.
+        let (y, bar_height) = if value != 0.0 && raw_height < 0.5 {
+            if value < 0.0 {
+                (baseline, 0.5)
+            } else {
+                (baseline - 0.5, 0.5)
+            }
+        } else {
+            (endpoint.min(baseline), raw_height)
+        };
         svg.push_str(&format!(
             "<rect class=\"bar\" data-label=\"{}\" data-value=\"{value}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{bar_height:.1}\" fill=\"#4472c4\"><title>{} [{}]: {value}</title></rect>",
             escape(display),
@@ -1632,6 +1653,12 @@ fn write_series_svg_with_labels(
     let plot_top = LEGEND_TOP + legend_height + 18.0;
     let bottom = plot_top + PLOT_HEIGHT;
     let height = bottom + 72.0;
+    let axis = numeric_axis((min, max), &display_title);
+    let x_axis = timestamp_bounds
+        .map(|bounds| numeric_axis(bounds, "time_ms"))
+        .unwrap_or_else(|| {
+            numeric_axis((0.0, index_length.saturating_sub(1) as f64), "sample_index")
+        });
     let mut svg = svg_header(WIDTH, height, &display_title);
     svg.push_str("<text x=\"24\" y=\"44\" font-size=\"11\">Bounded display: at most 2048 original observations per series, preserving endpoints/extrema and null gaps. Full aligned observations: comparison.json.</text>");
     svg.push_str(&format!(
@@ -1639,19 +1666,11 @@ fn write_series_svg_with_labels(
         LEGEND_TOP - 12.0,
         RIGHT - LEFT
     ));
-    append_y_axis(
-        &mut svg,
-        LEFT,
-        plot_top,
-        bottom,
-        RIGHT,
-        (min, max),
-        &display_title,
-    );
+    append_y_axis(&mut svg, LEFT, plot_top, bottom, RIGHT, &axis);
     append_series_x_axis(
         &mut svg,
-        timestamp_bounds,
-        index_length,
+        &x_axis,
+        timestamp_bounds.is_some(),
         LEFT,
         bottom,
         RIGHT,
@@ -1687,15 +1706,8 @@ fn write_series_svg_with_labels(
                     append_polyline(&mut svg, &segment, series_index, display, color);
                     segment.clear();
                 }
-                let x = line_x(
-                    index,
-                    points.timestamps_ms.as_deref(),
-                    timestamp_bounds,
-                    index_length,
-                    LEFT,
-                    RIGHT,
-                );
-                let fraction = domain_fraction(value, min, max);
+                let x = line_x(index, points.timestamps_ms.as_deref(), &x_axis, LEFT, RIGHT);
+                let fraction = domain_fraction(value, axis.min, axis.max);
                 let y = bottom - fraction * (bottom - plot_top);
                 segment.push(format!("{x:.1},{y:.1}"));
                 let timestamp = points
@@ -1800,51 +1812,39 @@ fn write_line_svg(path: &Path, title: &str, values: &[(String, TimeSeries)]) -> 
 fn line_x(
     index: usize,
     timestamps: Option<&[f64]>,
-    bounds: Option<(f64, f64)>,
-    length: usize,
+    axis: &NumericAxis,
     left: f64,
     right: f64,
 ) -> f64 {
-    let fraction = timestamps
+    let value = timestamps
         .and_then(|timestamps| timestamps.get(index))
-        .zip(bounds)
-        .map_or_else(
-            || index as f64 / length.saturating_sub(1).max(1) as f64,
-            |(timestamp, (min, max))| {
-                if max > min {
-                    (*timestamp - min) / (max - min)
-                } else {
-                    0.0
-                }
-            },
-        );
+        .copied()
+        .unwrap_or(index as f64);
+    let fraction = domain_fraction(value, axis.min, axis.max);
     left + fraction.clamp(0.0, 1.0) * (right - left)
 }
 
 fn append_series_x_axis(
     svg: &mut String,
-    timestamp_bounds: Option<(f64, f64)>,
-    length: usize,
+    axis: &NumericAxis,
+    timed: bool,
     left: f64,
     bottom: f64,
     right: f64,
 ) {
-    let (label, unit) = if timestamp_bounds.is_some() {
-        ("time", "ms")
+    let (label, unit) = if timed {
+        ("time", axis.unit.as_str())
     } else {
         ("sample", "index")
     };
-    for tick in 0..=Y_TICKS {
-        let fraction = tick as f64 / Y_TICKS as f64;
+    for value in &axis.ticks {
+        let fraction = domain_fraction(*value, axis.min, axis.max);
         let x = left + fraction * (right - left);
-        let value = timestamp_bounds
-            .map(|(min, max)| min + fraction * (max - min))
-            .unwrap_or_else(|| fraction * length.saturating_sub(1) as f64);
         svg.push_str(&format!(
             "<line class=\"x-axis-tick\" x1=\"{x:.1}\" y1=\"{bottom:.1}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#18212b\"/><text class=\"x-axis-value\" x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"11\">{}</text>",
             bottom + 6.0,
             bottom + 22.0,
-            format_args!("{} {}", format_tick(value), unit)
+            axis.format(*value)
         ));
     }
     svg.push_str(&format!(
@@ -1886,38 +1886,202 @@ fn domain_fraction(value: f64, min: f64, max: f64) -> f64 {
     if (max - min).is_finite() {
         (value - min) / (max - min)
     } else {
-        (value * 0.5 - min * 0.5) / (max * 0.5 - min * 0.5)
+        let scale = value.abs().max(min.abs()).max(max.abs());
+        if scale.is_finite() && scale > 0.0 {
+            (value / scale - min / scale) / (max / scale - min / scale)
+        } else {
+            0.0
+        }
     }
 }
 
-fn append_y_axis(
+pub(super) fn append_y_axis(
     svg: &mut String,
     left: f64,
     top: f64,
     bottom: f64,
     right: f64,
-    domain: (f64, f64),
-    title: &str,
+    axis: &NumericAxis,
 ) {
     svg.push_str(&format!(
         "<line x1=\"{left}\" y1=\"{top}\" x2=\"{left}\" y2=\"{bottom}\" stroke=\"black\"/><line x1=\"{left}\" y1=\"{bottom}\" x2=\"{right}\" y2=\"{bottom}\" stroke=\"black\"/>"
     ));
-    for tick in 0..=Y_TICKS {
-        let fraction = tick as f64 / Y_TICKS as f64;
+    for value in &axis.ticks {
+        let fraction = domain_fraction(*value, axis.min, axis.max);
         let y = bottom - fraction * (bottom - top);
-        let value = domain.0 * (1.0 - fraction) + domain.1 * fraction;
         svg.push_str(&format!(
             "<line x1=\"{left}\" y1=\"{y:.1}\" x2=\"{right}\" y2=\"{y:.1}\" stroke=\"#dddddd\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" font-size=\"11\">{}</text>",
             left - 6.0,
             y + 4.0,
-            format_tick(value)
+            axis.format(*value)
         ));
     }
-    let unit = metric_unit(title);
     svg.push_str(&format!(
         "<text x=\"15\" y=\"230\" text-anchor=\"middle\" transform=\"rotate(-90 15 230)\" font-size=\"12\">unit: {}</text>",
-        escape(unit)
+        escape(&axis.unit)
     ));
+}
+
+/// A presentation-only numeric axis. Values remain stored and positioned in
+/// their original units; only limits, tick labels, and the printed unit change.
+#[derive(Clone, Debug)]
+pub(super) struct NumericAxis {
+    pub(super) min: f64,
+    pub(super) max: f64,
+    divisor: f64,
+    pub(super) unit: String,
+    pub(super) ticks: Vec<f64>,
+    decimals: usize,
+}
+
+impl NumericAxis {
+    pub(super) fn format(&self, value: f64) -> String {
+        let value = value / self.divisor;
+        if self.decimals == 0 {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.precision$}", precision = self.decimals)
+        }
+    }
+}
+
+pub(super) fn numeric_axis(domain: (f64, f64), title: &str) -> NumericAxis {
+    let (mut min, mut max) = domain;
+    if !min.is_finite() || !max.is_finite() {
+        min = 0.0;
+        max = 1.0;
+    }
+    if max < min {
+        std::mem::swap(&mut min, &mut max);
+    }
+    if min == max {
+        let padding = min.abs().max(1.0) * 0.1;
+        min -= padding;
+        max += padding;
+    }
+    let (divisor, unit) = scaled_unit(title, min.abs().max(max.abs()));
+    let scaled_min = min / divisor;
+    let scaled_max = max / divisor;
+    let difference = scaled_max - scaled_min;
+    if !difference.is_finite() {
+        let bound = scaled_min.abs().max(scaled_max.abs());
+        let (lower, upper, ticks) = if scaled_min < 0.0 && scaled_max > 0.0 {
+            (-bound, bound, vec![-bound, 0.0, bound])
+        } else if scaled_min >= 0.0 {
+            (0.0, bound, vec![0.0, bound])
+        } else {
+            (-bound, 0.0, vec![-bound, 0.0])
+        };
+        return NumericAxis {
+            min: lower * divisor,
+            max: upper * divisor,
+            divisor,
+            unit,
+            ticks: ticks.into_iter().map(|value| value * divisor).collect(),
+            decimals: 0,
+        };
+    }
+    let range = difference.abs().max(f64::MIN_POSITIVE);
+    let mut step = nice_step(range / 4.0);
+    let mut lower = (scaled_min / step).floor() * step;
+    let mut upper = (scaled_max / step).ceil() * step;
+    if lower == upper {
+        lower -= step;
+        upper += step;
+    }
+    while ((upper - lower) / step).round() as usize > 7 {
+        step = nice_step(step * 1.5);
+        lower = (scaled_min / step).floor() * step;
+        upper = (scaled_max / step).ceil() * step;
+    }
+    let count = ((upper - lower) / step).round() as usize;
+    let decimals = axis_decimals(step);
+    let ticks = (0..=count)
+        .map(|index| (lower + index as f64 * step) * divisor)
+        .collect();
+    NumericAxis {
+        min: lower * divisor,
+        max: upper * divisor,
+        divisor,
+        unit,
+        ticks,
+        decimals,
+    }
+}
+
+fn nice_step(rough: f64) -> f64 {
+    let exponent = rough.abs().max(f64::MIN_POSITIVE).log10().floor();
+    let base = 10_f64.powf(exponent);
+    let normalized = rough / base;
+    let factor = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    factor * base
+}
+
+fn axis_decimals(step: f64) -> usize {
+    if step >= 1.0 {
+        0
+    } else {
+        (-step.log10().floor() as i32).max(0) as usize
+    }
+}
+
+fn scaled_unit(title: &str, largest: f64) -> (f64, String) {
+    let unit = metric_unit(title);
+    let names = match unit {
+        "ms" => Some(["ms", "s", "ks", "Ms"]),
+        "ms/s" => Some(["ms/s", "s/s", "ks/s", "Ms/s"]),
+        "bytes" => Some(["bytes", "kB", "MB", "GB"]),
+        "bytes/s" => Some(["bytes/s", "kB/s", "MB/s", "GB/s"]),
+        _ => None,
+    };
+    let Some(names) = names else {
+        return (1.0, unit.into());
+    };
+    let mut divisor = 1.0;
+    let mut index = 0usize;
+    while largest / divisor > 10_000.0 && index + 1 < names.len() {
+        divisor *= 1_000.0;
+        index += 1;
+    }
+    (divisor, names[index].into())
+}
+
+#[cfg(test)]
+mod axis_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_axis_rounds_to_human_friendly_ticks() {
+        let axis = numeric_axis((0.4982, 1.49831), "ratio");
+        assert_eq!(axis.min, 0.0);
+        assert_eq!(axis.max, 1.5);
+        assert_eq!(axis.ticks, vec![0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(axis.format(1.0), "1.0");
+    }
+
+    #[test]
+    fn numeric_axis_scales_large_time_values_by_thousands() {
+        let axis = numeric_axis((0.0, 10_001.0), "elapsed_ms");
+        assert_eq!(axis.unit, "s");
+        assert_eq!(axis.divisor, 1_000.0);
+        assert!(axis.max >= 10_001.0);
+        assert!(axis.max / axis.divisor <= 20.0);
+    }
+
+    #[test]
+    fn numeric_axis_keeps_smaller_time_values_in_milliseconds() {
+        let axis = numeric_axis((0.0, 9_999.0), "elapsed_ms");
+        assert_eq!(axis.unit, "ms");
+        assert_eq!(axis.divisor, 1.0);
+    }
 }
 
 fn format_tick(value: f64) -> String {
@@ -2655,8 +2819,6 @@ mod tests {
         assert!(svg.contains("class=\"x-axis-value\""));
         assert!(svg.contains("class=\"x-axis-label\""));
         assert!(svg.contains(">time (ms)</text>"));
-        assert!(svg.contains("10 ms"));
-        assert!(svg.contains("20 ms"));
         assert!(svg.contains("class=\"legend-item\""));
         assert!(svg.contains("role=\"button\" tabindex=\"0\""));
         assert!(svg.contains("class=\"legend-panel\""));
@@ -2691,8 +2853,8 @@ mod tests {
         super::write_line_svg(&root.join("samples.svg"), "cpu.user_pct", &series).unwrap();
         let svg = std::fs::read_to_string(root.join("samples.svg")).unwrap();
         assert!(svg.contains(">sample (index)</text>"));
-        assert!(svg.contains("0 index"));
-        assert!(svg.contains("2 index"));
+        assert!(svg.contains(">0</text>"));
+        assert!(svg.contains(">2</text>"));
         assert!(svg.contains("class=\"legend-panel\""));
         assert!(svg.matches("class=\"legend-item\"").count() == 8);
         let height = svg
