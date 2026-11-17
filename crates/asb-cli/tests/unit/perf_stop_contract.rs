@@ -126,6 +126,10 @@ fn perf_record_allows_delayed_flush_without_accepting_incomplete_capture() {
     let policy = ADAPTER.producer_policy("perf");
     assert_eq!(policy.graceful, Some(Duration::from_secs(300)));
     assert_eq!(
+        ADAPTER.producer_policy("perf-stat").graceful,
+        Some(Duration::from_secs(300))
+    );
+    assert_eq!(
         ADAPTER.producer_policy("perf-symbol-custody").graceful,
         Some(Duration::from_secs(300))
     );
