@@ -71,6 +71,21 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
   let drag=null;
   const interactive=[...svg.querySelectorAll('.bar,.series,.series-point')];
   const clearHover=()=>interactive.forEach(item=>item.classList.remove('hovered'));
+  const setSeriesVisible=(seriesIndex,visible)=>{
+    for(const item of svg.querySelectorAll('.bar,.series,.series-point')){
+      if(item.dataset.seriesIndex===seriesIndex)item.classList.toggle('series-hidden',!visible);
+    }
+    for(const item of svg.querySelectorAll('.legend-item')){
+      if(item.dataset.seriesIndex===seriesIndex)item.classList.toggle('legend-hidden',!visible);
+    }
+  };
+  for(const legend of svg.querySelectorAll('.legend-item')){
+    const toggle=()=>setSeriesVisible(legend.dataset.seriesIndex,legend.classList.contains('legend-hidden'));
+    legend.addEventListener('click',event=>{event.stopPropagation();toggle();});
+    legend.addEventListener('keydown',event=>{
+      if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle();}
+    });
+  }
   const positionTooltip=(event)=>{
     const bounds=stage.getBoundingClientRect();
     const left=Math.min(Math.max(8,event.clientX-bounds.left+12),Math.max(8,bounds.width-tooltip.offsetWidth-8));
@@ -111,7 +126,7 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
     tooltip.classList.add('visible');
     positionTooltip(event);
   };
-  interactive.forEach(item=>{item.addEventListener('pointerenter',event=>show(item,event));if(item.classList.contains('series'))item.addEventListener('pointermove',event=>{if(!drag)show(item,event)});});
+  interactive.forEach(item=>{item.addEventListener('pointerenter',event=>{if(!item.classList.contains('series-hidden'))show(item,event)});if(item.classList.contains('series'))item.addEventListener('pointermove',event=>{if(!drag&&!item.classList.contains('series-hidden'))show(item,event)});});
   stage.addEventListener('pointermove',event=>{if(!drag)positionTooltip(event)});
   stage.addEventListener('pointerleave',()=>{clearHover();tooltip.classList.remove('visible')});
   const applyView=()=>svg.setAttribute('viewBox',`${view.x} ${view.y} ${view.w} ${view.h}`);
