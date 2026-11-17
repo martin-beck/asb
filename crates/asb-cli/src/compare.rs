@@ -960,17 +960,18 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
     if let Some(artifact) =
         graph.filter(|_| benchmark.result_source != ResultSource::RecoveredOfficialGrade)
     {
-        if let Some(svg) = previews.get(artifact) {
-            // An opaque-origin sandbox prevents the SVG's scripts and IDs from
-            // affecting the report or other graphs. CSP restricts subresources;
-            // it is not a general network isolation boundary.
-            // FlameGraph persists zoom in its URL, which opaque srcdoc frames
-            // cannot replace with the inherited parent URL. Preserve zoom and
-            // ignore only that specific browser security error.
+        if previews.contains_key(artifact) {
+            // Keep the complete collector SVG outside report HTML. The small
+            // srcdoc wrapper has an enforced CSP and displays the artifact as
+            // an image, where SVG scripts do not execute. It keeps the report
+            // origin solely so CSP 'self' resolves the report-relative image;
+            // scripts remain disabled by the sandbox and CSP. This is
+            // deliberately separate from opening the original SVG in a tab.
             let document = format!(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><style>body{{margin:0}}svg{{min-width:900px;width:100%;height:auto}}</style><script>(()=>{{const replace=history.replaceState.bind(history);history.replaceState=(...args)=>{{try{{return replace(...args)}}catch(error){{if(error.name!=='SecurityError')throw error}}}}}})()</script>{svg}"
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Flamegraph\">",
+                escape(artifact)
             );
-            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-scripts allow-modals\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
+            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
         }
     } else {
         body.push_str("<p>Flamegraph unavailable or not recorded.</p>");
@@ -2469,6 +2470,17 @@ mod tests {
             "<details class=\"folded-artifact-section\"><summary>Other analysis artifacts</summary>"
         ));
         assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
+        assert_eq!(html.matches("<iframe title=\"Flamegraph\"").count(), 2);
+        assert!(html.contains("&lt;img src=&quot;"));
+        assert!(html.contains("flamegraph.svg&quot; alt=&quot;Flamegraph&quot;&gt;"));
+        assert!(html.contains("srcdoc="));
+        assert!(!html.contains("<title>flame</title>"));
+        assert_eq!(html.matches("sandbox=\"allow-same-origin\"").count(), 2);
+        assert_eq!(
+            html.matches("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'")
+                .count(),
+            2
+        );
         assert_eq!(html.matches("Download original SVG").count(), 2);
         assert_eq!(html.matches("Download folded stacks").count(), 2);
         assert_eq!(html.matches("Collector status: completed").count(), 2);
@@ -2761,7 +2773,7 @@ mod tests {
         assert!(report.contains("bpftrace profiles"));
         assert!(report.contains("class=\"flamegraph-chart\""));
         assert!(report.contains("flamegraph.svg"));
-        assert!(report.contains("sandbox=\"allow-scripts allow-modals\""));
+        assert!(report.contains("sandbox=\"allow-same-origin\""));
         assert!(report.contains("Collector status: completed"));
         assert!(!report.contains("class=\"embedded-svg flamegraph\""));
         assert!(!report.contains("<object class=\"flamegraph\""));
