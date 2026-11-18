@@ -4,7 +4,7 @@ use super::super::{ArtifactDisplay, ProcessContext, ProcessData, ReportCommand, 
 use crate::measurements;
 use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 mod kernel_symbols;
@@ -53,13 +53,63 @@ pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
 
 /// Linux perf opens a process-scoped event set through a shared kernel PMU
-/// control path.  Starting a dense cohort's record/stat pairs at the exact
+/// control path. Starting a dense cohort's record/stat pairs at the exact
 /// same instant can make the kernel report transient `ESRCH`/thread-map
-/// failures even though each target is valid and remains stopped.  Serialize
-/// only this short startup/activation section; once enabled, every collector
-/// samples independently and concurrently.
+/// failures even though each target is valid and remains stopped. A small
+/// bounded startup pool avoids that storm without making later stopped targets
+/// wait behind every earlier replica; once enabled, every collector samples
+/// independently and concurrently.
 #[cfg(target_os = "linux")]
-static STARTUP_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+static STARTUP_GATE: OnceLock<StartupGate> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+const PERF_STARTUP_CONCURRENCY: usize = 8;
+
+#[cfg(target_os = "linux")]
+struct StartupGate {
+    available: Mutex<usize>,
+    changed: Condvar,
+}
+
+#[cfg(target_os = "linux")]
+struct StartupPermit<'a> {
+    gate: &'a StartupGate,
+}
+
+#[cfg(target_os = "linux")]
+impl StartupGate {
+    fn new() -> Self {
+        Self {
+            available: Mutex::new(PERF_STARTUP_CONCURRENCY),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> Result<StartupPermit<'_>, String> {
+        let mut available = self
+            .available
+            .lock()
+            .map_err(|_| "perf startup coordination failed".to_owned())?;
+        while *available == 0 {
+            available = self
+                .changed
+                .wait(available)
+                .map_err(|_| "perf startup coordination failed".to_owned())?;
+        }
+        *available -= 1;
+        Ok(StartupPermit { gate: self })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for StartupPermit<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut available) = self.gate.available.lock() {
+            *available += 1;
+            self.gate.changed.notify_one();
+        }
+    }
+}
 
 /// A symbol tree is usable only with its completed, parseable custody marker.
 pub(super) fn symfs_options(cache: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
@@ -722,10 +772,7 @@ impl measurements::Session {
         }
         #[cfg(target_os = "linux")]
         {
-            let _startup = STARTUP_GATE
-                .get_or_init(|| Mutex::new(()))
-                .lock()
-                .map_err(|_| "perf startup coordination failed".to_owned())?;
+            let _startup = STARTUP_GATE.get_or_init(StartupGate::new).acquire()?;
             self.stage_isolated_perf(pid)?;
             self.activate_staged_perf(pid)
         }
