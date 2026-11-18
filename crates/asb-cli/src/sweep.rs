@@ -360,6 +360,7 @@ pub(crate) fn run_with_options(
                 invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                 allow_collector_teardown_repair: true,
                 prior_asb_executable: options.prior_asb_executable,
+                metadata_only_executable_drift: false,
             },
         )?;
         let report = checkpoint.recover_collector_teardown(parent, &results, &saved)?;
@@ -418,7 +419,8 @@ pub(crate) fn run_with_options(
                 replay_sources: &replay_sources,
                 invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                 allow_collector_teardown_repair: false,
-                prior_asb_executable: None,
+                prior_asb_executable: options.prior_asb_executable,
+                metadata_only_executable_drift: true,
             },
         )?;
         let report = checkpoint.recover_outcome_free_batch(parent, &results, &saved)?;

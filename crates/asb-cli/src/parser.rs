@@ -1546,11 +1546,7 @@ struct SweepArgs {
     #[arg(long, requires_all = ["resume", "replay-direction"])]
     allow_collector_teardown_repair: bool,
     /// ASB executable preserved before a collector-teardown repair; it must reproduce the original checkpoint input seal.
-    #[arg(
-        long,
-        value_name = "PATH",
-        requires = "allow_collector_teardown_repair"
-    )]
+    #[arg(long, value_name = "PATH")]
     prior_asb_executable: Option<String>,
     /// Continue an interrupted sweep. Optionally stop after this many failed benchmarks; without a value, continue after any number of failures.
     #[arg(long = "continue", num_args = 0..=1, value_name = "FAILED")]
@@ -1569,7 +1565,7 @@ struct SweepArgs {
     /// Archive exactly one stopped replay batch that has no completed outcome.
     /// This retains failed collector evidence and lets ordinary resume rebuild
     /// clean execution-private paths for the original population.
-    #[arg(long, requires_all = ["resume", "replay-direction", "cassette_root"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "recover_collector_teardown", "allow_collector_teardown_repair", "prior_asb_executable", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
+    #[arg(long, requires_all = ["resume", "replay-direction", "cassette_root", "prior_asb_executable"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "recover_collector_teardown", "allow_collector_teardown_repair", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
     recover_outcome_free_batch: bool,
     #[arg(
         long,
@@ -2116,12 +2112,33 @@ mod tests {
     }
 
     #[test]
-    fn outcome_free_batch_recovery_rejects_collector_repair_identity_overrides() {
-        for option in [
-            vec!["--allow-collector-teardown-repair"],
-            vec!["--prior-asb-executable", "prior-asb"],
-        ] {
-            let mut command = vec![
+    fn outcome_free_batch_recovery_requires_the_prior_sealed_executable() {
+        let command = [
+            "asb",
+            "sweep",
+            "suite.toml",
+            "--resume",
+            "--replay",
+            "--cassette-root",
+            "cassettes",
+            "--recover-outcome-free-batch",
+        ];
+        assert!(Cli::try_parse_from(command).is_err());
+        Cli::try_parse_from([
+            "asb",
+            "sweep",
+            "suite.toml",
+            "--resume",
+            "--replay",
+            "--cassette-root",
+            "cassettes",
+            "--recover-outcome-free-batch",
+            "--prior-asb-executable",
+            "prior-asb",
+        ])
+        .expect("metadata recovery validates the original executable");
+        assert!(
+            Cli::try_parse_from([
                 "asb",
                 "sweep",
                 "suite.toml",
@@ -2130,10 +2147,12 @@ mod tests {
                 "--cassette-root",
                 "cassettes",
                 "--recover-outcome-free-batch",
-            ];
-            command.extend(option);
-            assert!(Cli::try_parse_from(command).is_err());
-        }
+                "--prior-asb-executable",
+                "prior-asb",
+                "--allow-collector-teardown-repair",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
