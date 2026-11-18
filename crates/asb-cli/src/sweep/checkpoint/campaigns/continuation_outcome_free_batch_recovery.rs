@@ -32,12 +32,55 @@ fn archive_relative(batch: u64) -> PathBuf {
     PathBuf::from(format!(".asb-recovery/outcome-free-batch/{batch:06}"))
 }
 
+fn archive_relative_next(layout: &Layout, batch: u64) -> PathBuf {
+    let base = archive_relative(batch);
+    if !layout.root.join(&base).exists() {
+        return base;
+    }
+    for generation in 2..=u32::MAX {
+        let candidate = PathBuf::from(format!(
+            ".asb-recovery/outcome-free-batch/{batch:06}-{generation:06}"
+        ));
+        if !layout.root.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    PathBuf::from(format!(
+        ".asb-recovery/outcome-free-batch/{batch:06}-overflow"
+    ))
+}
+
+fn valid_archive_relative(path: &Path) -> bool {
+    path.is_relative()
+        && path.parent() == Some(Path::new(".asb-recovery/outcome-free-batch"))
+        && path.file_name().is_some_and(|name| !name.is_empty())
+}
+
 fn receipt_path(checkpoint: &Path, configuration: usize, batch: u64) -> PathBuf {
     checkpoint.join(receipt_relative(configuration, batch))
 }
 
-fn archive_root(layout: &Layout, batch: u64) -> PathBuf {
-    layout.root.join(archive_relative(batch))
+fn receipt_history_path(
+    checkpoint: &Path,
+    configuration: usize,
+    batch: u64,
+    archive: &Path,
+) -> Result<PathBuf, Error> {
+    let name = archive
+        .file_name()
+        .ok_or_else(|| recovery("outcome-free batch recovery archive has no name"))?;
+    Ok(checkpoint
+        .join(format!("outcome-free-batch-recovery/{configuration:06}"))
+        .join(format!("{batch:06}-{}.json", name.to_string_lossy())))
+}
+
+fn archive_root_from_receipt(layout: &Layout, archive: &Path) -> Result<PathBuf, Error> {
+    if !valid_archive_relative(archive) {
+        return Err(recovery(
+            "outcome-free batch recovery archive path is invalid",
+        ));
+    }
+    Ok(layout.root.join(archive))
 }
 
 fn context() -> Value {
@@ -63,7 +106,7 @@ fn read_receipt_value(
         || receipt.configuration != configuration
         || receipt.batch != batch
         || receipt.input_digest != input_digest
-        || receipt.archive != archive_relative(batch)
+        || !valid_archive_relative(&receipt.archive)
     {
         return Err(recovery(
             "outcome-free batch recovery receipt differs from its original batch",
@@ -104,7 +147,7 @@ pub(super) fn read_receipt(
             "outcome-free batch recovery receipt has an invalid archive fingerprint",
         ));
     }
-    let archive = archive_root(layout, batch);
+    let archive = archive_root_from_receipt(layout, &receipt.archive)?;
     let actual = snapshotter.fingerprint(
         &[Root::path("outcome-free-batch-archive", archive)],
         &context(),
@@ -116,7 +159,12 @@ pub(super) fn read_receipt(
             "outcome-free batch recovery archive differs from its receipt",
         ));
     }
-    Ok(true)
+    // A later failed generation may reuse the same logical batch number after
+    // an earlier outcome-free archive. Preserve that archive and let the new
+    // source batch be recovered under a distinct archive path.
+    Ok(!real_directory(
+        &layout.root.join(format!("batch-{batch}")),
+    )?)
 }
 
 fn write_receipt(path: &Path, receipt: &Receipt, replace: bool) -> Result<(), Error> {
@@ -275,7 +323,7 @@ impl Inputs {
         }
         if let Some((configuration, layout, batch, mut receipt)) = pending.pop() {
             let source = layout.root.join(format!("batch-{batch}"));
-            let archive = archive_root(layout, batch);
+            let archive = archive_root_from_receipt(layout, &receipt.archive)?;
             match (real_directory(&source)?, real_directory(&archive)?) {
                 (true, false) => {
                     fs::remove_file(receipt_path(&self.directory, configuration, batch))
@@ -356,9 +404,25 @@ impl Inputs {
             return Err(recovery("no eligible outcome-free failed batch was found"));
         };
         let path = receipt_path(&self.directory, configuration, batch);
-        let archive = archive_root(layout, batch);
+        let archive_relative = archive_relative_next(layout, batch);
+        let archive = layout.root.join(&archive_relative);
         if archive.exists() {
             return Err(recovery("outcome-free batch archive already exists"));
+        }
+        if read_receipt_value(&self.directory, configuration, batch, &self.initial.digest)?
+            .is_some()
+        {
+            let history =
+                receipt_history_path(&self.directory, configuration, batch, &archive_relative)?;
+            if !history.exists() {
+                fs::create_dir_all(
+                    history
+                        .parent()
+                        .ok_or_else(|| recovery("receipt history has no parent"))?,
+                )
+                .map_err(io_error)?;
+                fs::copy(&path, &history).map_err(io_error)?;
+            }
         }
         let mut receipt = Receipt {
             schema_version: 1,
@@ -367,10 +431,10 @@ impl Inputs {
             configuration,
             batch,
             input_digest: self.initial.digest.clone(),
-            archive: archive_relative(batch),
+            archive: archive_relative.clone(),
             fingerprint: None,
         };
-        write_receipt(&path, &receipt, false)?;
+        write_receipt(&path, &receipt, true)?;
         let batch_root = layout.root.join(format!("batch-{batch}"));
         fs::create_dir_all(
             archive
@@ -396,7 +460,7 @@ impl Inputs {
         self.seal_campaigns(parent, results, plan)?;
         let legacy_terminal = format!("batch-{batch}/finished.json");
         let terminal_record = if terminal == Path::new(&legacy_terminal) {
-            archive_relative(batch).join("finished.json")
+            archive_relative.join("finished.json")
         } else {
             terminal
         };
@@ -458,7 +522,13 @@ mod tests {
         assert_eq!(report["configuration"], 0);
         assert_eq!(report["batch"], 1);
         assert!(!layout.root.join("batch-1").exists());
-        assert!(archive_root(&layout, 1).join("finished.json").is_file());
+        assert!(
+            layout
+                .root
+                .join(archive_relative(1))
+                .join("finished.json")
+                .is_file()
+        );
         assert!(
             layout
                 .root
@@ -514,6 +584,31 @@ mod tests {
     }
 
     #[test]
+    fn repeated_outcome_free_recovery_uses_a_new_archive_path() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        assert_eq!(archive_relative_next(&layout, 1), archive_relative(1));
+        fs::create_dir_all(layout.root.join(archive_relative(1))).unwrap();
+        assert_eq!(
+            archive_relative_next(&layout, 1),
+            PathBuf::from(".asb-recovery/outcome-free-batch/000001-000002")
+        );
+        fs::create_dir_all(
+            layout
+                .root
+                .join(".asb-recovery/outcome-free-batch/000001-000002"),
+        )
+        .unwrap();
+        assert_eq!(
+            archive_relative_next(&layout, 1),
+            PathBuf::from(".asb-recovery/outcome-free-batch/000001-000003")
+        );
+        drop(fixture);
+        drop(inputs);
+    }
+
+    #[test]
     fn pending_recovery_before_the_archive_rename_restarts_the_transaction() {
         let (fixture, plan, results, inputs) =
             settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
@@ -559,7 +654,7 @@ mod tests {
             settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
         let layout = plan.read_campaigns(&results).unwrap().remove(0);
         make_outcome_free(&layout, false);
-        let archive = archive_root(&layout, 1);
+        let archive = layout.root.join(archive_relative(1));
         fs::create_dir_all(archive.parent().unwrap()).unwrap();
         fs::rename(layout.root.join("batch-1"), &archive).unwrap();
         write_receipt(
