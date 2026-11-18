@@ -113,7 +113,10 @@ pub(super) fn validate_svg(path: &Path, artifact: &str) -> Result<(), Error> {
 /// their regular-file shape and SVG prefix without retaining the whole document
 /// in memory.
 pub(super) fn validate_external_svg(path: &Path, artifact: &str) -> Result<(), Error> {
-    const MAX_EXTERNAL_SVG_BYTES: u64 = 256 * 1024 * 1024;
+    // Derived aggregate flamegraphs can legitimately exceed the former 256 MiB
+    // ceiling at high replay concurrency. Keep a finite bound while allowing
+    // the largest supported aggregate to remain an external, sandboxed asset.
+    const MAX_EXTERNAL_SVG_BYTES: u64 = 512 * 1024 * 1024;
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

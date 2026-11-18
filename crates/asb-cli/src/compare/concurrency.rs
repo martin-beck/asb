@@ -1386,7 +1386,9 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let svg = "aggregate.svg";
         let mut document = String::from("<svg>");
-        document.push_str(&" ".repeat(16 * 1024 * 1024));
+        // Keep this above the old external-SVG ceiling so a high-concurrency
+        // aggregate regression cannot reintroduce the rejected-output path.
+        document.push_str(&" ".repeat(256 * 1024 * 1024 + 1));
         document.push_str("</svg>");
         fs::write(root.join(svg), document).unwrap();
 
