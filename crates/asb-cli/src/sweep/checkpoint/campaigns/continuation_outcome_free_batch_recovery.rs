@@ -256,6 +256,28 @@ fn terminal_record_relative(
     ))
 }
 
+fn batch_root_from_terminal(
+    layout: &Layout,
+    terminal: &Path,
+    batch: u64,
+) -> Result<PathBuf, Error> {
+    let legacy = PathBuf::from(format!("batch-{batch}/finished.json"));
+    if terminal == legacy {
+        return Ok(layout.root.join(format!("batch-{batch}")));
+    }
+    let parent = terminal
+        .parent()
+        .ok_or_else(|| recovery("outcome-free batch terminal has no parent"))?;
+    if parent.file_name() != Some(std::ffi::OsStr::new(&format!("batch-{batch}")))
+        || !parent.starts_with(".asb-generations")
+    {
+        return Err(recovery(
+            "outcome-free batch terminal is outside an owned batch root",
+        ));
+    }
+    Ok(layout.root.join(parent))
+}
+
 fn eligible(
     layout: &Layout,
     configuration: usize,
@@ -299,7 +321,7 @@ fn eligible(
             "outcome-free batch recovery requires a stopped failed batch with zero completed executions",
         ));
     }
-    let root = layout.root.join(format!("batch-{batch}"));
+    let root = batch_root_from_terminal(layout, &terminal, batch)?;
     if !real_directory(&root)? {
         return Err(recovery("outcome-free batch root is not a real directory"));
     }
@@ -452,21 +474,7 @@ impl Inputs {
             fingerprint: None,
         };
         write_receipt(&path, &receipt, true)?;
-        let batch_root = if terminal == Path::new(&format!("batch-{batch}/finished.json")) {
-            layout.root.join(format!("batch-{batch}"))
-        } else {
-            let parent = terminal
-                .parent()
-                .ok_or_else(|| recovery("outcome-free batch terminal has no parent"))?;
-            if parent.file_name() != Some(std::ffi::OsStr::new(&format!("batch-{batch}")))
-                || !parent.starts_with(".asb-generations")
-            {
-                return Err(recovery(
-                    "outcome-free batch terminal is outside an owned batch root",
-                ));
-            }
-            layout.root.join(parent)
-        };
+        let batch_root = batch_root_from_terminal(layout, &terminal, batch)?;
         fs::create_dir_all(
             archive
                 .parent()
@@ -479,6 +487,25 @@ impl Inputs {
                 batch_root.display()
             ))
         })?;
+        // Failed retries can leave older generated batch roots behind. Keep
+        // them as evidence, but move them out of the runtime generation tree
+        // so continuation does not mistake them for live completion input.
+        for source in batch_roots(layout, batch)? {
+            if source == archive || !source.exists() {
+                continue;
+            }
+            let relative = source
+                .strip_prefix(&layout.root)
+                .map_err(|_| recovery("outcome-free batch source escaped campaign root"))?;
+            let preserved = archive.join("historical").join(relative);
+            fs::create_dir_all(
+                preserved
+                    .parent()
+                    .ok_or_else(|| recovery("historical batch evidence has no parent"))?,
+            )
+            .map_err(io_error)?;
+            fs::rename(source, preserved).map_err(io_error)?;
+        }
         let fingerprint = self.snapshotter.fingerprint(
             &[Root::path("outcome-free-batch-archive", archive)],
             &context(),
@@ -649,6 +676,22 @@ mod tests {
         let roots = batch_roots(&layout, 1).unwrap();
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&generated));
+        drop(fixture);
+        drop(inputs);
+    }
+
+    #[test]
+    fn generated_terminal_resolves_to_its_generated_batch_root() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let terminal = Path::new(".asb-generations/generation-a/batch-1/finished.json");
+        let expected = layout.root.join(".asb-generations/generation-a/batch-1");
+        fs::create_dir_all(&expected).unwrap();
+        assert_eq!(
+            batch_root_from_terminal(&layout, terminal, 1).unwrap(),
+            expected
+        );
         drop(fixture);
         drop(inputs);
     }
