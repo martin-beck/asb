@@ -111,6 +111,7 @@ impl ExecutionMode {
 pub(crate) struct BatchAdmissionPolicy {
     scope: &'static str,
     material_seconds: u64,
+    preparation_parallelism: usize,
     launch_seconds: u64,
     collector_seconds: u64,
     material_arming: &'static str,
@@ -135,21 +136,48 @@ impl<'de> Deserialize<'de> for BatchAdmissionPolicy {
 impl BatchAdmissionPolicy {
     pub(crate) const fn current() -> Self {
         Self {
-            scope: "verified-material-shared-launch-collector-ready-v3",
+            scope: "verified-material-shared-launch-collector-ready-v4",
             material_seconds: 7200,
+            // Material preparation may create containers, package-manager
+            // children, and agent helpers. Bound that fan-out independently
+            // of execution concurrency; prepared replicas still launch as a
+            // single shared cohort.
+            preparation_parallelism: 8,
             launch_seconds: 7200,
             // The collector boundary is still before effective resume. Large
             // Docker cohorts can legitimately queue bounded guest setup after
             // the first stopped target arms this barrier, so it needs the
             // same bounded preparation window as shared launch admission.
             collector_seconds: 7200,
-            material_arming: "batch-gate-construction",
+            material_arming: "batch-gate-construction-per-preparation-wave",
             launch_arming: "first-post-material-slot-registration",
             collector_arming: "verified-stopped-target-cohort",
         }
     }
     pub(crate) fn material_timeout(self) -> std::time::Duration {
         std::time::Duration::from_secs(self.material_seconds)
+    }
+    pub(crate) fn preparation_parallelism(self) -> usize {
+        self.preparation_parallelism
+    }
+    pub(crate) fn material_timeout_for(
+        self,
+        participants: usize,
+    ) -> Result<std::time::Duration, Error> {
+        if participants == 0 || self.preparation_parallelism == 0 {
+            return Err(Error::Input(
+                "batch preparation requires at least one admitted participant and preparation slot"
+                    .into(),
+            ));
+        }
+        let waves = participants.div_ceil(self.preparation_parallelism);
+        let seconds = self
+            .material_seconds
+            .checked_mul(u64::try_from(waves).map_err(|_| {
+                Error::Input("batch preparation wave count exceeds supported duration".into())
+            })?)
+            .ok_or_else(|| Error::Input("batch preparation deadline overflows".into()))?;
+        Ok(std::time::Duration::from_secs(seconds))
     }
     pub(crate) fn launch_timeout(self) -> std::time::Duration {
         std::time::Duration::from_secs(self.launch_seconds)
@@ -166,6 +194,8 @@ impl BatchAdmissionPolicy {
 struct RecordedAdmission {
     scope: String,
     material_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preparation_parallelism: Option<usize>,
     launch_seconds: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     collector_seconds: Option<u64>,
@@ -180,6 +210,8 @@ struct RecordedAdmission {
 struct RecordedAdmissionWire {
     scope: String,
     material_seconds: u64,
+    #[serde(default)]
+    preparation_parallelism: Option<usize>,
     launch_seconds: u64,
     #[serde(default)]
     collector_seconds: Option<u64>,
@@ -196,6 +228,9 @@ impl TryFrom<RecordedAdmissionWire> for RecordedAdmission {
             .into_iter()
             .any(|text| text.is_empty() || text.len() > 128 || text.chars().any(char::is_control))
             || !(1..=86400).contains(&value.material_seconds)
+            || value.preparation_parallelism.is_some_and(|parallelism| {
+                !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&parallelism)
+            })
             || !(1..=86400).contains(&value.launch_seconds)
             || value.collector_seconds.is_some() != value.collector_arming.is_some()
             || value
@@ -210,6 +245,7 @@ impl TryFrom<RecordedAdmissionWire> for RecordedAdmission {
         Ok(Self {
             scope: value.scope,
             material_seconds: value.material_seconds,
+            preparation_parallelism: value.preparation_parallelism,
             launch_seconds: value.launch_seconds,
             collector_seconds: value.collector_seconds,
             material_arming: value.material_arming,
@@ -224,6 +260,7 @@ impl From<BatchAdmissionPolicy> for RecordedAdmission {
         Self {
             scope: value.scope.into(),
             material_seconds: value.material_seconds,
+            preparation_parallelism: Some(value.preparation_parallelism),
             launch_seconds: value.launch_seconds,
             collector_seconds: Some(value.collector_seconds),
             material_arming: value.material_arming.into(),
@@ -1253,6 +1290,8 @@ mod tests {
         };
         let admission = BatchAdmissionPolicy::current();
         assert_eq!(admission.material_timeout().as_secs(), 7200);
+        assert_eq!(admission.preparation_parallelism(), 8);
+        assert_eq!(admission.material_timeout_for(9).unwrap().as_secs(), 14_400);
         assert_eq!(admission.launch_timeout().as_secs(), 7200);
         assert_eq!(admission.collector_timeout().as_secs(), 7200);
         let manual = protocol_fingerprint(&config, &resolve(&config).unwrap(), caps, 2).unwrap();
@@ -1292,6 +1331,21 @@ mod tests {
         config.planning.as_mut().unwrap().repetition.total = 3;
         let changed = BatchAdmissionPolicy {
             launch_seconds: 1801,
+            ..admission
+        };
+        assert_ne!(
+            first,
+            protocol_fingerprint_with_admission(
+                &config,
+                &resolve(&config).unwrap(),
+                caps,
+                2,
+                Some(changed)
+            )
+            .unwrap()
+        );
+        let changed = BatchAdmissionPolicy {
+            preparation_parallelism: 4,
             ..admission
         };
         assert_ne!(
