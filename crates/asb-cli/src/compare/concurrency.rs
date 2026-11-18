@@ -165,12 +165,31 @@ impl FlameStatistic {
         }
     }
 
-    fn value(self, values: &mut [f64]) -> f64 {
-        values.sort_by(f64::total_cmp);
+    /// Compute a statistic over observed values plus implicit zero samples.
+    ///
+    /// Folded stacks are sparse: a stack absent from a replica contributes a
+    /// zero, but retaining every one of those zeros for every stack makes a
+    /// large, heterogeneous sweep quadratic in memory.  Values are strictly
+    /// positive when parsed, so implicit zeros sort before all observations.
+    fn sparse_value(self, observed: &mut [f64], sample_count: usize) -> f64 {
+        debug_assert!(sample_count >= observed.len());
+        debug_assert!(sample_count > 0);
         match self {
-            Self::Mean => values.iter().sum::<f64>() / values.len() as f64,
-            Self::Median => values[(values.len() - 1) / 2],
-            Self::P95 => values[(values.len() * 95).div_ceil(100).saturating_sub(1)],
+            Self::Mean => observed.iter().sum::<f64>() / sample_count as f64,
+            Self::Median | Self::P95 => {
+                observed.sort_by(f64::total_cmp);
+                let rank = match self {
+                    Self::Median => (sample_count - 1) / 2,
+                    Self::P95 => (sample_count * 95).div_ceil(100).saturating_sub(1),
+                    Self::Mean => unreachable!("mean does not use a rank"),
+                };
+                let zero_count = sample_count - observed.len();
+                if rank < zero_count {
+                    0.0
+                } else {
+                    observed[rank - zero_count]
+                }
+            }
         }
     }
 }
@@ -884,18 +903,16 @@ fn aggregate_folded(
         .iter()
         .map(|path| parse_folded(path))
         .collect::<Result<Vec<_>, _>>()?;
-    let keys = profiles
-        .iter()
-        .flat_map(|profile| profile.keys().cloned())
-        .collect::<BTreeSet<_>>();
-    Ok(keys
+    let mut values = BTreeMap::<String, Vec<f64>>::new();
+    for profile in &profiles {
+        for (stack, value) in profile {
+            values.entry(stack.clone()).or_default().push(*value);
+        }
+    }
+    Ok(values
         .into_iter()
-        .filter_map(|stack| {
-            let mut values = profiles
-                .iter()
-                .map(|profile| profile.get(&stack).copied().unwrap_or(0.0))
-                .collect::<Vec<_>>();
-            let value = statistic.value(&mut values);
+        .filter_map(|(stack, mut values)| {
+            let value = statistic.sparse_value(&mut values, profiles.len());
             (value > 0.0).then_some((stack, value))
         })
         .collect())
@@ -1298,6 +1315,30 @@ mod tests {
         assert_eq!(
             aggregate_folded(&c2_p95.inputs, FlameStatistic::P95).unwrap(),
             BTreeMap::from([("root;other".into(), 16.0), ("root;single".into(), 10.0)])
+        );
+
+        let sparse_paths = [
+            sources.join("sparse-1.folded"),
+            sources.join("sparse-2.folded"),
+            sources.join("sparse-3.folded"),
+        ];
+        fs::write(&sparse_paths[0], "root;shared 7\nroot;only 9\n").unwrap();
+        fs::write(&sparse_paths[1], "root;shared 5\n").unwrap();
+        fs::write(&sparse_paths[2], "root;shared 1\n").unwrap();
+        assert_eq!(
+            aggregate_folded(&sparse_paths, FlameStatistic::Mean).unwrap(),
+            BTreeMap::from([
+                ("root;only".into(), 3.0),
+                ("root;shared".into(), 13.0 / 3.0)
+            ])
+        );
+        assert_eq!(
+            aggregate_folded(&sparse_paths, FlameStatistic::Median).unwrap(),
+            BTreeMap::from([("root;shared".into(), 5.0)])
+        );
+        assert_eq!(
+            aggregate_folded(&sparse_paths, FlameStatistic::P95).unwrap(),
+            BTreeMap::from([("root;only".into(), 9.0), ("root;shared".into(), 7.0)])
         );
 
         render_flamegraphs(&stage, &plans).unwrap();
