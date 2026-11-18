@@ -386,7 +386,6 @@ pub(crate) fn run_with_options(
             || options.recover_continuation
             || options.recover_collector_teardown
             || options.allow_collector_teardown_repair
-            || options.prior_asb_executable.is_some()
             || options.show_output
             || options.repeat.is_some()
             || options.max_steps.is_some()
@@ -396,7 +395,7 @@ pub(crate) fn run_with_options(
             || options.max_active_attempts.is_some()
             || options.jobs != 1
         {
-            return Err(Error::Input("--recover-outcome-free-batch requires --resume --replay and accepts no execution/selection options".into()));
+            return Err(Error::Input("--recover-outcome-free-batch requires --resume --replay, validates its required prior executable, and accepts no execution/selection options".into()));
         }
         let cassette_root = options.cassette_root.ok_or_else(|| Error::Input(
             "--recover-outcome-free-batch requires --cassette-root to revalidate the retained replay inputs".into(),
