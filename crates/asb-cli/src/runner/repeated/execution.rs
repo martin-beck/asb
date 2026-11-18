@@ -370,6 +370,11 @@ pub(crate) fn continue_campaign(
         recording,
     } = continued;
     plan.validate_layout()?;
+    if !plan.admission.is_current() {
+        return Err(Error::Input(
+            "campaign uses a historical batch admission policy; its evidence remains readable, but start a fresh campaign instead of resuming under the current policy".into(),
+        ));
+    }
     // A newly added matching policy also changes replay semantics. Resolve it
     // even when the original plan had no policy so continuation cannot
     // silently run under a different configuration.

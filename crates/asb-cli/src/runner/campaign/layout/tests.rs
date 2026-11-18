@@ -26,6 +26,14 @@ fn profile_on_unidentified_replay_requires_raw_requests() {
 }
 
 #[test]
+fn historical_admission_plan_remains_readable_without_authorizing_activation() {
+    let mut value = plan(ExecutionMode::Replay, 1, 1, false);
+    value.admission = crate::planning::BatchAdmissionPolicy::historical_v3();
+    value.validate_layout().unwrap();
+    assert!(!value.admission.is_current());
+}
+
+#[test]
 fn source_replay_identity_is_optional_historical_data_not_observed_material() {
     let mut value = selected(plan(ExecutionMode::Replay, 2, 2, false), true);
     let expected = crate::cassette::Compatibility {
