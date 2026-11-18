@@ -370,9 +370,14 @@ pub(crate) fn continue_campaign(
         recording,
     } = continued;
     plan.validate_layout()?;
-    if !plan.admission.is_current() {
+    let planned_slots = plan
+        .slots
+        .iter()
+        .map(|slot| (slot.batch, slot.replica))
+        .collect::<Vec<_>>();
+    if !admission_activation_allowed(plan.admission, &completed, &pending, &planned_slots) {
         return Err(Error::Input(
-            "campaign uses a historical batch admission policy; its evidence remains readable, but start a fresh campaign instead of resuming under the current policy".into(),
+            "campaign uses a historical batch admission policy after completed or partial slots; its evidence remains readable, but do not resume it under the current policy".into(),
         ));
     }
     // A newly added matching policy also changes replay semantics. Resolve it
@@ -566,10 +571,84 @@ pub(crate) fn continue_campaign(
     }
 }
 
+// A changed preparation-admission policy can only be applied to a campaign
+// that never produced an outcome and still owns its entire original population.
+// Anything partial remains read-only historical evidence.
+fn admission_activation_allowed(
+    admission: crate::planning::BatchAdmissionPolicy,
+    completed: &BTreeMap<u64, serde_json::Value>,
+    pending: &[Batch],
+    planned_slots: &[(u64, usize)],
+) -> bool {
+    if admission.is_current() {
+        return true;
+    }
+    if !completed.is_empty() || planned_slots.is_empty() {
+        return false;
+    }
+    let expected = planned_slots.iter().copied().collect::<BTreeSet<_>>();
+    if expected.len() != planned_slots.len() {
+        return false;
+    }
+    let declared = pending
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .cohort
+                .admitted_slots
+                .iter()
+                .copied()
+                .map(move |replica| (batch.batch, replica))
+        })
+        .collect::<Vec<_>>();
+    declared.len() == expected.len() && declared.into_iter().collect::<BTreeSet<_>>() == expected
+}
+
 #[cfg(test)]
 mod normalization_tests {
     use super::*;
     use crate::project::replay_normalization::{NormalizationSelection, ReplayConfig};
+
+    #[test]
+    fn historical_admission_activates_only_an_entirely_unstarted_population() {
+        let legacy = crate::planning::BatchAdmissionPolicy::historical_v3();
+        let planned = (1..=160).map(|replica| (1, replica)).collect::<Vec<_>>();
+        let pending = vec![Batch {
+            batch: 1,
+            cohort: crate::measurements::ExecutionCohort {
+                id: "a-160".into(),
+                selected_replicas: 160,
+                admitted_slots: (1..=160).collect(),
+                dispatch: None,
+            },
+        }];
+        assert!(admission_activation_allowed(
+            legacy,
+            &BTreeMap::new(),
+            &pending,
+            &planned
+        ));
+        assert!(!admission_activation_allowed(
+            legacy,
+            &BTreeMap::from([(1, serde_json::Value::Null)]),
+            &pending,
+            &planned
+        ));
+        let mut incomplete = pending.clone();
+        incomplete[0].cohort.admitted_slots.pop();
+        assert!(!admission_activation_allowed(
+            legacy,
+            &BTreeMap::new(),
+            &incomplete,
+            &planned
+        ));
+        assert!(admission_activation_allowed(
+            crate::planning::BatchAdmissionPolicy::current(),
+            &BTreeMap::from([(1, serde_json::Value::Null)]),
+            &incomplete,
+            &planned
+        ));
+    }
 
     #[test]
     fn continuation_requires_matching_local_policy_and_intact_saved_bytes() {
