@@ -71,12 +71,77 @@ enum GatePhase {
     Collector,
 }
 
+// Workload/session materialization can fan out into container, package-manager,
+// and agent helper processes. Keep it bounded independently from the configured
+// execution concurrency: prepared replicas still wait at the launch gate and
+// start their agent execution together.
+const DEFAULT_PREPARATION_PARALLELISM: usize = 8;
+
+struct PreparationSlots {
+    active: Mutex<usize>,
+    changed: Condvar,
+    limit: usize,
+}
+
+impl PreparationSlots {
+    fn new(total: usize, limit: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+            limit: total.min(limit),
+        }
+    }
+
+    fn acquire(&self, gate: &Gate) -> Result<PreparationPermit<'_>, Error> {
+        let mut active = self.active.lock().map_err(|_| unavailable())?;
+        loop {
+            if let Some(reason) = gate.abort_reason()? {
+                return Err(Error::Run(reason));
+            }
+            if *active < self.limit {
+                *active += 1;
+                return Ok(PreparationPermit { slots: self });
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(active, Duration::from_millis(100))
+                .map_err(|_| unavailable())?;
+            active = next;
+        }
+    }
+
+    fn release(&self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        drop(active);
+        self.changed.notify_one();
+    }
+
+    fn wake_all(&self) {
+        self.changed.notify_all();
+    }
+}
+
+struct PreparationPermit<'a> {
+    slots: &'a PreparationSlots,
+}
+
+impl Drop for PreparationPermit<'_> {
+    fn drop(&mut self) {
+        self.slots.release();
+    }
+}
+
 pub(crate) struct Gate {
     state: Mutex<State>,
     changed: Condvar,
     timeout: Duration,
     observer: Option<Arc<PreparationObserver>>,
     phase: GatePhase,
+    preparation_slots: Option<Arc<PreparationSlots>>,
 }
 
 type PreparationObserver = dyn Fn(&Compatibility) -> Result<(), Error> + Send + Sync;
@@ -110,10 +175,12 @@ impl Admission {
         expected: Option<Compatibility>,
         policy: crate::planning::BatchAdmissionPolicy,
     ) -> Result<Self, Error> {
+        let material_timeout = policy.material_timeout_for(cohort.admitted_slots.len())?;
         Self::with_deadlines(
             cohort,
             expected,
-            policy.material_timeout(),
+            material_timeout,
+            policy.preparation_parallelism(),
             policy.launch_timeout(),
             policy.collector_timeout(),
         )
@@ -129,6 +196,7 @@ impl Admission {
             Self::fresh_cohort(total, participants)?,
             None,
             timeout,
+            DEFAULT_PREPARATION_PARALLELISM,
             timeout,
             timeout,
         )
@@ -159,6 +227,7 @@ impl Admission {
         cohort: crate::measurements::ExecutionCohort,
         expected: Option<Compatibility>,
         material_timeout: Duration,
+        preparation_parallelism: usize,
         launch_timeout: Duration,
         collector_timeout: Duration,
     ) -> Result<Self, Error> {
@@ -173,7 +242,13 @@ impl Admission {
                 "batch admission requires its frozen validated dispatch cohort".into(),
             ));
         }
-        let material = Gate::selected(total, &cohort.admitted_slots, expected, material_timeout)?;
+        let material = Gate::selected_with_preparation_limit(
+            total,
+            &cohort.admitted_slots,
+            expected,
+            material_timeout,
+            preparation_parallelism,
+        )?;
         let launch = Gate::deferred_selected(total, &cohort.admitted_slots, launch_timeout)?;
         // A stopped target has joined `launch`; this second boundary admits
         // only replicas whose selected collectors have attached successfully.
@@ -461,9 +536,18 @@ pub(crate) struct Arrival<'a> {
     gate: &'a Gate,
     index: usize,
     settled: bool,
+    preparation_permit: Option<PreparationPermit<'a>>,
 }
 
 impl Gate {
+    fn abort_reason(&self) -> Result<Option<String>, Error> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| unavailable())?
+            .aborted
+            .clone())
+    }
     fn arm_deadline(&self) -> Result<(), Error> {
         if self.phase != GatePhase::Collector {
             return Err(Error::Run(
@@ -574,6 +658,22 @@ impl Gate {
         expected: Option<Compatibility>,
         timeout: Duration,
     ) -> Result<Self, Error> {
+        Self::selected_with_preparation_limit(
+            total,
+            admitted,
+            expected,
+            timeout,
+            DEFAULT_PREPARATION_PARALLELISM,
+        )
+    }
+
+    fn selected_with_preparation_limit(
+        total: usize,
+        admitted: &[usize],
+        expected: Option<Compatibility>,
+        timeout: Duration,
+        preparation_parallelism: usize,
+    ) -> Result<Self, Error> {
         if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&total) || timeout.is_zero() {
             return Err(Error::Input(
                 "invalid preparation gate population or timeout".into(),
@@ -584,6 +684,9 @@ impl Gate {
             return Err(Error::Input(
                 "invalid preparation participant population".into(),
             ));
+        }
+        if !(1..=crate::benchmark::MAX_CONCURRENCY).contains(&preparation_parallelism) {
+            return Err(Error::Input("invalid batch preparation parallelism".into()));
         }
         for slot in admitted {
             if !(1..=total).contains(slot) || participants[*slot - 1] {
@@ -616,6 +719,10 @@ impl Gate {
             timeout,
             observer: None,
             phase: GatePhase::Preparation,
+            preparation_slots: Some(Arc::new(PreparationSlots::new(
+                admitted.len(),
+                preparation_parallelism,
+            ))),
         })
     }
 
@@ -635,6 +742,7 @@ impl Gate {
     ) -> Result<Self, Error> {
         let mut gate = Self::selected(total, admitted, None, timeout)?;
         gate.state.get_mut().map_err(|_| unavailable())?.deadline = None;
+        gate.preparation_slots = None;
         Ok(gate)
     }
 
@@ -662,6 +770,11 @@ impl Gate {
     }
 
     pub(crate) fn register(&self, replica: Identity) -> Result<Arrival<'_>, Error> {
+        let preparation_permit = self
+            .preparation_slots
+            .as_deref()
+            .map(|slots| slots.acquire(self))
+            .transpose()?;
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         if let Some(reason) = &state.aborted {
             return Err(Error::Run(reason.clone()));
@@ -688,6 +801,7 @@ impl Gate {
             gate: self,
             index: replica.index - 1,
             settled: false,
+            preparation_permit,
         })
     }
 
@@ -700,6 +814,9 @@ impl Gate {
             state.aborted = Some(reason.into());
         }
         self.changed.notify_all();
+        if let Some(slots) = &self.preparation_slots {
+            slots.wake_all();
+        }
     }
 }
 
@@ -717,6 +834,9 @@ impl Arrival<'_> {
         mut identity: Compatibility,
         legacy_material: Option<String>,
     ) -> Result<(), Error> {
+        // Preparation is complete at the material rendezvous. Release the
+        // bounded setup slot before waiting for every peer at the launch gate.
+        self.preparation_permit.take();
         let mut state = self.gate.state.lock().map_err(|_| unavailable())?;
         if let (Some(expected), Some(legacy)) = (&state.identity, legacy_material)
             && expected != &identity
@@ -1024,6 +1144,80 @@ mod tests {
                     .is_err()
             );
         });
+    }
+
+    #[test]
+    fn material_preparation_is_throttled_before_the_shared_launch_gate() {
+        let gate = Gate::new(9, None, Duration::from_secs(5)).unwrap();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (ninth_tx, ninth_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let gate = &gate;
+            for index in 1..=DEFAULT_PREPARATION_PARALLELISM {
+                let release = Arc::clone(&release);
+                let entered_tx = entered_tx.clone();
+                scope.spawn(move || {
+                    let mut arrival = gate
+                        .register(Identity { index, total: 9 })
+                        .expect("initial preparation slot is admitted");
+                    entered_tx.send(()).unwrap();
+                    let (lock, changed) = &*release;
+                    let held = lock.lock().unwrap();
+                    drop(changed.wait_while(held, |released| !*released).unwrap());
+                    arrival.ready(material()).unwrap();
+                });
+            }
+            for _ in 0..DEFAULT_PREPARATION_PARALLELISM {
+                entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            scope.spawn(move || {
+                let mut arrival = gate
+                    .register(Identity { index: 9, total: 9 })
+                    .expect("released preparation slot is admitted");
+                ninth_tx.send(()).unwrap();
+                arrival.ready(material()).unwrap();
+            });
+            assert!(ninth_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            let (lock, changed) = &*release;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+            ninth_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+    }
+
+    #[test]
+    fn preparation_waiter_keeps_the_original_abort_reason() {
+        let gate = Gate::new(9, None, Duration::from_secs(5)).unwrap();
+        let mut held = Vec::new();
+        for index in 1..=DEFAULT_PREPARATION_PARALLELISM {
+            held.push(gate.register(Identity { index, total: 9 }).unwrap());
+        }
+        let (result_tx, result_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                result_tx
+                    .send(gate.register(Identity { index: 9, total: 9 }))
+                    .unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            held[0].abort("fixture preparation failure");
+            let error = match result_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                Ok(_) => panic!("aborted preparation queue must reject the waiter"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("fixture preparation failure"));
+        });
+    }
+
+    #[test]
+    fn deferred_launch_gate_has_no_preparation_throttle() {
+        let gate = Gate::deferred(9, Duration::from_secs(5)).unwrap();
+        let arrivals = (1..=9)
+            .map(|index| gate.register(Identity { index, total: 9 }))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all launch slots register without preparation queueing");
+        assert_eq!(arrivals.len(), 9);
     }
 
     #[test]
