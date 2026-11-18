@@ -123,6 +123,25 @@ fn real_directory(path: &Path) -> Result<bool, Error> {
     }
 }
 
+fn batch_roots(layout: &Layout, batch: u64) -> Result<Vec<PathBuf>, Error> {
+    let mut roots = Vec::new();
+    let legacy = layout.root.join(format!("batch-{batch}"));
+    if real_directory(&legacy)? {
+        roots.push(legacy);
+    }
+    let generations = Path::new(".asb-generations");
+    if reading::present_relative(&layout.root, generations)? {
+        for generation in reading::list_relative(&layout.root, generations, 65_533)? {
+            let relative = generations.join(generation).join(format!("batch-{batch}"));
+            let root = layout.root.join(relative);
+            if real_directory(&root)? {
+                roots.push(root);
+            }
+        }
+    }
+    Ok(roots)
+}
+
 pub(super) fn read_receipt(
     checkpoint: &Path,
     layout: &Layout,
@@ -162,9 +181,7 @@ pub(super) fn read_receipt(
     // A later failed generation may reuse the same logical batch number after
     // an earlier outcome-free archive. Preserve that archive and let the new
     // source batch be recovered under a distinct archive path.
-    Ok(!real_directory(
-        &layout.root.join(format!("batch-{batch}")),
-    )?)
+    Ok(batch_roots(layout, batch)?.is_empty())
 }
 
 fn write_receipt(path: &Path, receipt: &Receipt, replace: bool) -> Result<(), Error> {
@@ -322,14 +339,14 @@ impl Inputs {
             ));
         }
         if let Some((configuration, layout, batch, mut receipt)) = pending.pop() {
-            let source = layout.root.join(format!("batch-{batch}"));
+            let sources = batch_roots(layout, batch)?;
             let archive = archive_root_from_receipt(layout, &receipt.archive)?;
-            match (real_directory(&source)?, real_directory(&archive)?) {
-                (true, false) => {
+            match (sources.as_slice(), real_directory(&archive)?) {
+                ([_source], false) => {
                     fs::remove_file(receipt_path(&self.directory, configuration, batch))
                         .map_err(io_error)?;
                 }
-                (false, true) => {
+                ([], true) => {
                     let fingerprint = self.snapshotter.fingerprint(
                         &[Root::path("outcome-free-batch-archive", archive)],
                         &context(),
@@ -435,7 +452,21 @@ impl Inputs {
             fingerprint: None,
         };
         write_receipt(&path, &receipt, true)?;
-        let batch_root = layout.root.join(format!("batch-{batch}"));
+        let batch_root = if terminal == Path::new(&format!("batch-{batch}/finished.json")) {
+            layout.root.join(format!("batch-{batch}"))
+        } else {
+            let parent = terminal
+                .parent()
+                .ok_or_else(|| recovery("outcome-free batch terminal has no parent"))?;
+            if parent.file_name() != Some(std::ffi::OsStr::new(&format!("batch-{batch}")))
+                || !parent.starts_with(".asb-generations")
+            {
+                return Err(recovery(
+                    "outcome-free batch terminal is outside an owned batch root",
+                ));
+            }
+            layout.root.join(parent)
+        };
         fs::create_dir_all(
             archive
                 .parent()
@@ -604,6 +635,20 @@ mod tests {
             archive_relative_next(&layout, 1),
             PathBuf::from(".asb-recovery/outcome-free-batch/000001-000003")
         );
+        drop(fixture);
+        drop(inputs);
+    }
+
+    #[test]
+    fn generated_batch_roots_are_included_in_recovery_inventory() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let generated = layout.root.join(".asb-generations/test-generation/batch-1");
+        fs::create_dir_all(&generated).unwrap();
+        let roots = batch_roots(&layout, 1).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&generated));
         drop(fixture);
         drop(inputs);
     }
