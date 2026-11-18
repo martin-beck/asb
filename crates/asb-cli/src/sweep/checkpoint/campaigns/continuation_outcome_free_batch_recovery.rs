@@ -278,6 +278,31 @@ fn batch_root_from_terminal(
     Ok(layout.root.join(parent))
 }
 
+fn archive_generation_roots(layout: &Layout, archive: &Path) -> Result<(), Error> {
+    let generations = layout.root.join(".asb-generations");
+    if !real_directory(&generations)? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&generations).map_err(io_error)? {
+        let source = entry.map_err(io_error)?.path();
+        if !source.is_dir() {
+            continue;
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| recovery("outcome-free generation root has no name"))?;
+        let target = archive.join("historical/generations").join(name);
+        fs::create_dir_all(
+            target
+                .parent()
+                .ok_or_else(|| recovery("historical generation evidence has no parent"))?,
+        )
+        .map_err(io_error)?;
+        fs::rename(source, target).map_err(io_error)?;
+    }
+    Ok(())
+}
+
 fn eligible(
     layout: &Layout,
     configuration: usize,
@@ -506,6 +531,7 @@ impl Inputs {
             .map_err(io_error)?;
             fs::rename(source, preserved).map_err(io_error)?;
         }
+        archive_generation_roots(layout, &archive)?;
         let fingerprint = self.snapshotter.fingerprint(
             &[Root::path("outcome-free-batch-archive", archive)],
             &context(),
