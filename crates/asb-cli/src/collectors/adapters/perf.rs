@@ -64,6 +64,8 @@ static STARTUP_GATE: OnceLock<StartupGate> = OnceLock::new();
 
 #[cfg(target_os = "linux")]
 const PERF_STARTUP_CONCURRENCY: usize = 8;
+#[cfg(target_os = "linux")]
+const PERF_STARTUP_ATTEMPTS: usize = 3;
 
 #[cfg(target_os = "linux")]
 struct StartupGate {
@@ -773,11 +775,29 @@ impl measurements::Session {
         #[cfg(target_os = "linux")]
         {
             let _startup = STARTUP_GATE.get_or_init(StartupGate::new).acquire()?;
-            self.stage_isolated_perf(pid)?;
-            self.activate_staged_perf(pid)
+            for attempt in 0..PERF_STARTUP_ATTEMPTS {
+                match self.start_perf_once(pid) {
+                    Ok(()) => return Ok(()),
+                    Err(error)
+                        if attempt + 1 < PERF_STARTUP_ATTEMPTS
+                            && retryable_startup_failure(&error) =>
+                    {
+                        preserve_failed_startup_files(&self.dir, attempt + 1)?;
+                        std::thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("perf startup attempts are nonzero")
         }
         #[cfg(not(target_os = "linux"))]
         self.start_perf_unstaged(pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_perf_once(&mut self, pid: u32) -> Result<(), String> {
+        self.stage_isolated_perf(pid)?;
+        self.activate_staged_perf(pid)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1012,6 +1032,7 @@ impl measurements::Session {
             .record_ready
             .enable(record_timeout, || staged.record.startup_exit())
         {
+            let reason = startup_reason(&staged.record, reason);
             let detail = staged
                 .record
                 .startup_failure(reason, self._directory_owner.clone());
@@ -1027,6 +1048,7 @@ impl measurements::Session {
             .stat_ready
             .enable(Duration::from_secs(10), || staged.stat.startup_exit())
         {
+            let reason = startup_reason(&staged.stat, reason);
             let detail = staged
                 .stat
                 .startup_failure(reason, self._directory_owner.clone());
@@ -1056,6 +1078,59 @@ impl measurements::Session {
         self.start_perf_symbols(pid)
             .map_err(|error| measurements::configured_collector_start_error("perf", "perf", &error))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn startup_reason(collector: &Collector, reason: String) -> String {
+    match collector.startup_diagnostic(4096) {
+        Ok(diagnostic) if !diagnostic.is_empty() => format!("{reason}; perf stderr: {diagnostic}"),
+        _ => reason,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn retryable_startup_failure(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("no such process") || reason.contains("thread/cpu maps")
+}
+
+#[cfg(target_os = "linux")]
+fn preserve_failed_startup_files(
+    directory: &std::path::Path,
+    attempt: usize,
+) -> Result<(), String> {
+    for name in [
+        "perf.data",
+        "perf.stdout",
+        "perf.stderr",
+        "perf-stat.stdout",
+        "perf-stat.stderr",
+    ] {
+        let source = directory.join(name);
+        let metadata = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect failed perf startup capture: {error}"
+                ));
+            }
+        };
+        if !metadata.is_file() {
+            return Err(format!(
+                "failed perf startup capture is not a regular file: {}",
+                source.display()
+            ));
+        }
+        let destination = directory.join(format!("{name}.startup-attempt-{attempt}"));
+        std::fs::rename(&source, &destination).map_err(|error| {
+            format!(
+                "cannot preserve failed perf startup capture {}: {error}",
+                source.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1354,6 +1429,57 @@ mod tests {
             super::record_activation_timeout(true),
             std::time::Duration::from_secs(60)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dense_startup_retries_only_transient_thread_map_failures() {
+        assert!(super::retryable_startup_failure(
+            "collector principal exited: No such process; perf stderr: Couldn't create thread/CPU maps"
+        ));
+        assert!(super::retryable_startup_failure(
+            "Failure to open event 'cpu-clock': No such process"
+        ));
+        assert!(!super::retryable_startup_failure(
+            "Failure to open any events: Operation not permitted"
+        ));
+        assert!(!super::retryable_startup_failure(
+            "perf did not acknowledge event activation before the deadline"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_startup_captures_are_preserved_for_a_bounded_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-perf-startup-retry-{}",
+            crate::tools::runtime::unique_id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in [
+            "perf.data",
+            "perf.stdout",
+            "perf.stderr",
+            "perf-stat.stdout",
+            "perf-stat.stderr",
+        ] {
+            std::fs::write(root.join(name), b"failed startup").unwrap();
+        }
+        super::preserve_failed_startup_files(&root, 1).unwrap();
+        for name in [
+            "perf.data",
+            "perf.stdout",
+            "perf.stderr",
+            "perf-stat.stdout",
+            "perf-stat.stderr",
+        ] {
+            assert!(!root.join(name).exists());
+            assert!(root.join(format!("{name}.startup-attempt-1")).is_file());
+        }
+        std::fs::create_dir(root.join("perf.data")).unwrap();
+        let error = super::preserve_failed_startup_files(&root, 2).unwrap_err();
+        assert!(error.contains("not a regular file"));
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn symfs_marker_distinguishes_partial_complete_and_invalid_trees() {
