@@ -60,6 +60,20 @@ fn receipt_path(checkpoint: &Path, configuration: usize, batch: u64) -> PathBuf 
     checkpoint.join(receipt_relative(configuration, batch))
 }
 
+fn receipt_history_path(
+    checkpoint: &Path,
+    configuration: usize,
+    batch: u64,
+    archive: &Path,
+) -> Result<PathBuf, Error> {
+    let name = archive
+        .file_name()
+        .ok_or_else(|| recovery("outcome-free batch recovery archive has no name"))?;
+    Ok(checkpoint
+        .join(format!("outcome-free-batch-recovery/{configuration:06}"))
+        .join(format!("{batch:06}-{}.json", name.to_string_lossy())))
+}
+
 fn archive_root_from_receipt(layout: &Layout, archive: &Path) -> Result<PathBuf, Error> {
     if !valid_archive_relative(archive) {
         return Err(recovery(
@@ -395,6 +409,21 @@ impl Inputs {
         if archive.exists() {
             return Err(recovery("outcome-free batch archive already exists"));
         }
+        if read_receipt_value(&self.directory, configuration, batch, &self.initial.digest)?
+            .is_some()
+        {
+            let history =
+                receipt_history_path(&self.directory, configuration, batch, &archive_relative)?;
+            if !history.exists() {
+                fs::create_dir_all(
+                    history
+                        .parent()
+                        .ok_or_else(|| recovery("receipt history has no parent"))?,
+                )
+                .map_err(io_error)?;
+                fs::copy(&path, &history).map_err(io_error)?;
+            }
+        }
         let mut receipt = Receipt {
             schema_version: 1,
             scope: SCOPE.into(),
@@ -405,7 +434,7 @@ impl Inputs {
             archive: archive_relative.clone(),
             fingerprint: None,
         };
-        write_receipt(&path, &receipt, false)?;
+        write_receipt(&path, &receipt, true)?;
         let batch_root = layout.root.join(format!("batch-{batch}"));
         fs::create_dir_all(
             archive
