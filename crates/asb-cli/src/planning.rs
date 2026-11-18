@@ -1,7 +1,7 @@
 //! Provider-free execution policy resolution. Reservations are admission costs,
 //! never replacements for a harness's own environment limits.
 use crate::{Error, benchmark::BenchmarkConfig, collectors, workloads};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 
 pub(crate) const DEFAULT_NATIVE_EXECUTION_SECONDS: u64 = 900;
 pub(crate) const DEFAULT_ENVIRONMENT_PREPARATION_SECONDS: u64 = 900;
@@ -107,7 +107,7 @@ impl ExecutionMode {
 
 /// Fixed shared admission policy, not a configurable per-agent phase cap.
 /// Its typed constructor also supplies the actual gate deadlines.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BatchAdmissionPolicy {
     scope: &'static str,
     material_seconds: u64,
@@ -119,17 +119,39 @@ pub(crate) struct BatchAdmissionPolicy {
     collector_arming: &'static str,
 }
 
+impl Serialize for BatchAdmissionPolicy {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let historical = self.scope == "verified-material-shared-launch-collector-ready-v3";
+        let mut state =
+            serializer.serialize_struct("BatchAdmissionPolicy", if historical { 7 } else { 8 })?;
+        state.serialize_field("scope", self.scope)?;
+        state.serialize_field("material_seconds", &self.material_seconds)?;
+        if !historical {
+            state.serialize_field("preparation_parallelism", &self.preparation_parallelism)?;
+        }
+        state.serialize_field("launch_seconds", &self.launch_seconds)?;
+        state.serialize_field("collector_seconds", &self.collector_seconds)?;
+        state.serialize_field("material_arming", self.material_arming)?;
+        state.serialize_field("launch_arming", self.launch_arming)?;
+        state.serialize_field("collector_arming", self.collector_arming)?;
+        state.end()
+    }
+}
+
 impl<'de> Deserialize<'de> for BatchAdmissionPolicy {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let observed = serde_json::Value::deserialize(deserializer)?;
         let current = Self::current();
-        let expected = serde_json::to_value(current).map_err(serde::de::Error::custom)?;
-        if observed != expected {
-            return Err(serde::de::Error::custom(
-                "saved batch admission policy does not match the supported operational contract",
-            ));
+        let historical = Self::historical_v3();
+        for policy in [current, historical] {
+            let expected = serde_json::to_value(policy).map_err(serde::de::Error::custom)?;
+            if observed == expected {
+                return Ok(policy);
+            }
         }
-        Ok(current)
+        Err(serde::de::Error::custom(
+            "saved batch admission policy does not match a supported operational contract",
+        ))
     }
 }
 
@@ -153,6 +175,23 @@ impl BatchAdmissionPolicy {
             launch_arming: "first-post-material-slot-registration",
             collector_arming: "verified-stopped-target-cohort",
         }
+    }
+    /// Historical v3 remains readable for reports and sealed evidence only.
+    /// Activation must require `is_current()` and cannot silently adopt v4.
+    pub(crate) const fn historical_v3() -> Self {
+        Self {
+            scope: "verified-material-shared-launch-collector-ready-v3",
+            material_seconds: 7200,
+            preparation_parallelism: 8,
+            launch_seconds: 7200,
+            collector_seconds: 7200,
+            material_arming: "batch-gate-construction",
+            launch_arming: "first-post-material-slot-registration",
+            collector_arming: "verified-stopped-target-cohort",
+        }
+    }
+    pub(crate) fn is_current(self) -> bool {
+        self == Self::current()
     }
     pub(crate) fn material_timeout(self) -> std::time::Duration {
         std::time::Duration::from_secs(self.material_seconds)
@@ -1258,6 +1297,14 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<BatchAdmissionPolicy>(non_object).is_err());
         }
+        let historical = BatchAdmissionPolicy::historical_v3();
+        let historical_wire = serde_json::to_value(historical).unwrap();
+        assert!(historical_wire.get("preparation_parallelism").is_none());
+        assert_eq!(
+            serde_json::from_value::<BatchAdmissionPolicy>(historical_wire).unwrap(),
+            historical
+        );
+        assert!(!historical.is_current());
     }
 
     fn config(extra: &str) -> BenchmarkConfig {

@@ -95,7 +95,6 @@ impl Plan {
             || self.slots.len() != total
             || self.replay_inputs.len() > total
             || self.configuration.concurrency != self.concurrency
-            || self.admission != crate::planning::BatchAdmissionPolicy::current()
             || self.mode == ExecutionMode::Unknown
             || self
                 .max_steps
