@@ -292,6 +292,15 @@ impl Inputs {
             &self.initial.digest,
             &self.snapshotter,
         )?;
+        let mut archived = Vec::new();
+        for (configuration, layout) in owned.layouts.iter().enumerate() {
+            for slot in &layout.plan.slots {
+                if !inventory.recovered.contains(&(configuration, slot.id)) {
+                    continue;
+                }
+                archived.push((configuration, layout, slot));
+            }
+        }
         let mut candidate = None;
         for (configuration, layout) in owned.layouts.iter().enumerate() {
             for slot in &layout.plan.slots {
@@ -310,11 +319,50 @@ impl Inputs {
                 }
             }
         }
-        let (configuration, layout, slot, terminal_record) = candidate
-            .ok_or_else(|| recovery("no eligible collector-teardown-only slot was found"))?;
+        let Some((configuration, layout, slot, terminal_record)) = candidate else {
+            if archived.is_empty() {
+                return Err(recovery(
+                    "no eligible collector-teardown-only slot was found",
+                ));
+            }
+            // Reopening a completed explicit recovery is limited to sealing
+            // sibling receipts. A fresh candidate is always considered first
+            // so multiple supported teardown faults can be recovered one at a
+            // time without discarding either archive.
+            self.seal_campaigns(parent, results, plan)?;
+            return Ok(serde_json::json!({
+                "type":"collector-teardown-recovery",
+                "recovered_slots":archived.iter().map(|(configuration, _, slot)| {
+                    serde_json::json!({"configuration":configuration,"slot":slot.id})
+                }).collect::<Vec<_>>(),
+                "agent_executions":0,
+                "evaluations":0,
+            }));
+        };
         let receipt_path = receipt_path(&self.directory, configuration, slot.id);
         let archive = archive_root(layout, slot);
         if archive.exists() {
+            if read_receipt(
+                &self.directory,
+                layout,
+                configuration,
+                slot,
+                &self.initial.digest,
+                &self.snapshotter,
+            )? {
+                // A prior recovery may have completed before sibling receipts
+                // were sealed (for example if the coordinator was interrupted).
+                // Revalidate the archived slot, then seal only the independently
+                // verified completed siblings.
+                self.seal_campaigns(parent, results, plan)?;
+                return Ok(serde_json::json!({
+                    "type":"collector-teardown-recovery",
+                    "configuration":configuration,
+                    "slot":slot.id,
+                    "agent_executions":0,
+                    "evaluations":0,
+                }));
+            }
             return Err(recovery("collector-teardown archive already exists"));
         }
         let mut receipt = Receipt {
@@ -413,6 +461,11 @@ impl Inputs {
         receipt.status = "complete".into();
         receipt.fingerprint = Some(fingerprint);
         write_receipt(&receipt_path, &receipt, true)?;
+        // The recovered slot is now explicitly pending, while every sibling
+        // outcome remains immutable. Seal those verified siblings immediately:
+        // otherwise a batch that failed only during collector teardown has no
+        // completion receipts and ordinary continuation cannot reuse it.
+        self.seal_campaigns(parent, results, plan)?;
         Ok(serde_json::json!({
             "type":"collector-teardown-recovery",
             "configuration":configuration,
@@ -488,8 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn recovered_slot_with_a_verified_replacement_completion_is_reusable() {
-        let (_fixture, plan, results, inputs) =
+    fn recovered_slot_with_a_verified_replacement_completion_seals_campaign_siblings() {
+        let (fixture, plan, results, inputs) =
             settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
         let layout = plan.read_campaigns(&results).unwrap().remove(0);
         let slot = &layout.plan.slots[0];
@@ -530,6 +583,72 @@ mod tests {
         )
         .unwrap();
         assert!(inventory.actual.contains_key(&(0, slot_id)));
+
+        let recovery = inputs
+            .recover_collector_teardown_slot(&fixture.0, &results, &plan)
+            .unwrap();
+        assert_eq!(recovery["agent_executions"], 0);
+        assert_eq!(recovery["evaluations"], 0);
+        for configuration in 0..2 {
+            for slot in 1..=1 {
+                assert!(
+                    results
+                        .join(format!(
+                            ".checkpoint/campaign-completed/{configuration:06}/{slot:06}.json"
+                        ))
+                        .is_file()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_slot_does_not_skip_a_fresh_observed_slot() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 2);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        let recovered = &layout.plan.slots[0];
+        let fresh = &layout.plan.slots[1];
+        let archive = archive_root(&layout, recovered);
+        fs::create_dir_all(&archive).unwrap();
+        fs::write(archive.join("retained.txt"), b"original evidence").unwrap();
+        let fingerprint = inputs
+            .snapshotter
+            .fingerprint(
+                &[Root::path("collector-teardown-archive", archive)],
+                &context(),
+                false,
+                &[],
+            )
+            .unwrap();
+        write_receipt(
+            &receipt_path(&inputs.directory, 0, recovered.id),
+            &Receipt {
+                schema_version: 1,
+                scope: SCOPE.into(),
+                status: "complete".into(),
+                configuration: 0,
+                slot: recovered.id,
+                input_digest: inputs.initial.digest.clone(),
+                archive: archive_relative(recovered),
+                fingerprint: Some(fingerprint),
+            },
+            false,
+        )
+        .unwrap();
+        let batch = layout.root.join(format!("batch-{}", fresh.batch));
+        fs::remove_file(batch.join(format!("outcomes/{}.json", fresh.replica))).unwrap();
+        fs::remove_file(batch.join(format!(".asb-completions/fixture-{}.json", fresh.replica)))
+            .unwrap();
+
+        let error = inputs
+            .recover_collector_teardown_slot(&fixture.0, &results, &plan)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collector-teardown recovery requires retained measurements")
+        );
     }
 
     #[test]
