@@ -301,6 +301,7 @@ impl<'a> PreparedSweep<'a> {
                     invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     allow_collector_teardown_repair: options.allow_collector_teardown_repair,
                     prior_asb_executable: options.prior_asb_executable,
+                    metadata_only_executable_drift: false,
                 },
             )?;
             if options.reconcile_completed {

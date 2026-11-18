@@ -363,6 +363,10 @@ pub(super) struct ResumeRequest<'a> {
     pub invocation_dir: &'a Path,
     pub allow_collector_teardown_repair: bool,
     pub prior_asb_executable: Option<&'a Path>,
+    /// Permit only a non-executing recovery operation to inspect a campaign
+    /// after an ASB executable update. All non-executable sealed roots must
+    /// remain identical.
+    pub metadata_only_executable_drift: bool,
 }
 
 #[derive(Deserialize)]
@@ -486,7 +490,18 @@ impl Inputs {
                 request.allow_collector_teardown_repair,
                 request.prior_asb_executable,
             );
-        if current.initial != saved.initial && !collector_teardown_repair {
+        let metadata_only_executable_drift = current.initial != saved.initial
+            && current.allows_metadata_only_executable_drift(
+                &saved,
+                plan.execution.is_some(),
+                request.mode,
+                request.metadata_only_executable_drift,
+                request.prior_asb_executable,
+            );
+        if current.initial != saved.initial
+            && !collector_teardown_repair
+            && !metadata_only_executable_drift
+        {
             return Err(resume_error(
                 "the executable, configuration, runtime, environment or replay inputs changed; a collector teardown repair requires --allow-collector-teardown-repair plus --prior-asb-executable that reproduces the original input seal",
             ));
@@ -499,6 +514,8 @@ impl Inputs {
             let repaired_stability = current.initial.clone();
             current.initial = saved.initial.clone();
             current.stability = Some(repaired_stability);
+        } else if metadata_only_executable_drift {
+            current.initial = saved.initial.clone();
         }
         if plan.execution.is_some() {
             current.verify_campaign_reservations(results, plan)?;
@@ -808,6 +825,65 @@ impl Inputs {
 /// identical. It never enables a fresh run, live/record mode, or a pending
 /// input seal.
 impl Inputs {
+    fn allows_metadata_only_executable_drift(
+        &self,
+        saved: &SavedInputSeal,
+        campaign: bool,
+        mode: Option<crate::tape::Mode>,
+        requested: bool,
+        prior_asb_executable: Option<&Path>,
+    ) -> bool {
+        if !requested
+            || !campaign
+            || mode != Some(crate::tape::Mode::Replay)
+            || saved.status != "stable"
+        {
+            return false;
+        }
+        let Some(prior_asb_executable) = prior_asb_executable else {
+            return false;
+        };
+        let mut historical_roots = saved.roots.clone();
+        let mut saved_executables: Vec<_> = historical_roots
+            .iter_mut()
+            .filter(|root| root.name == "asb-executable")
+            .collect();
+        let current_executables: Vec<_> = self
+            .roots
+            .iter()
+            .filter(|root| root.name == "asb-executable")
+            .collect();
+        if saved_executables.len() != 1
+            || current_executables.len() != 1
+            || saved_executables[0].bind_location
+            || !saved_executables[0].direct_file
+        {
+            return false;
+        }
+        saved_executables[0].path = match std::path::absolute(prior_asb_executable) {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
+        saved_executables.len() == 1
+            && current_executables.len() == 1
+            && !saved_executables[0].bind_location
+            && saved_executables[0].direct_file
+            && current_executables[0].bind_location == saved_executables[0].bind_location
+            && current_executables[0].direct_file == saved_executables[0].direct_file
+            && saved
+                .roots
+                .iter()
+                .filter(|root| root.name != "asb-executable")
+                .eq(self
+                    .roots
+                    .iter()
+                    .filter(|root| root.name != "asb-executable"))
+            && self
+                .snapshotter
+                .fingerprint(&historical_roots, &self.context, false, &[])
+                .is_ok_and(|fingerprint| fingerprint == saved.initial)
+    }
+
     fn allows_collector_teardown_repair(
         &self,
         saved: &SavedInputSeal,
@@ -972,6 +1048,78 @@ mod tests {
         ));
         std::fs::write(&configuration_path, "changed configuration").unwrap();
         assert!(!inputs.allows_collector_teardown_repair(
+            &saved,
+            true,
+            Some(crate::tape::Mode::Replay),
+            true,
+            Some(&prior_executable),
+        ));
+    }
+
+    #[test]
+    fn metadata_only_executable_drift_requires_unchanged_non_executable_inputs() {
+        let directory = Directory::new();
+        let executable = directory.0.join("asb");
+        let prior_executable = directory.0.join("asb-before-repair");
+        let configuration_path = directory.0.join("benchmark.toml");
+        std::fs::write(&executable, "original executable").unwrap();
+        std::fs::write(&prior_executable, "original executable").unwrap();
+        std::fs::write(&configuration_path, "original configuration").unwrap();
+        let state = directory.0.join("state");
+        let snapshotter = Snapshotter::open(&state, "python3".into()).unwrap();
+        let roots = vec![
+            Root {
+                name: "asb-executable".into(),
+                path: executable.clone(),
+                bind_location: false,
+                direct_file: true,
+            },
+            Root::path("configuration", configuration_path.clone()),
+        ];
+        let context = json!({"protocol":"fixture"});
+        let fingerprint = snapshotter
+            .fingerprint(&roots, &context, false, &[])
+            .unwrap();
+        let saved = SavedInputSeal {
+            schema_version: 1,
+            status: "stable".into(),
+            scope: "input-stability-only-not-a-resume-receipt".into(),
+            roots: roots.clone(),
+            initial: fingerprint.clone(),
+            stability: None,
+            r#final: Some(fingerprint),
+        };
+        let inputs = Inputs {
+            directory: state,
+            snapshotter,
+            roots,
+            context,
+            initial: saved.initial.clone(),
+            stability: None,
+            runtime: None,
+        };
+        std::fs::write(&executable, "repaired executable").unwrap();
+        assert!(inputs.allows_metadata_only_executable_drift(
+            &saved,
+            true,
+            Some(crate::tape::Mode::Replay),
+            true,
+            Some(&prior_executable),
+        ));
+        std::fs::write(&configuration_path, "changed configuration").unwrap();
+        let changed = Inputs {
+            roots: vec![
+                Root {
+                    name: "asb-executable".into(),
+                    path: executable,
+                    bind_location: false,
+                    direct_file: true,
+                },
+                Root::path("configuration", configuration_path),
+            ],
+            ..inputs
+        };
+        assert!(!changed.allows_metadata_only_executable_drift(
             &saved,
             true,
             Some(crate::tape::Mode::Replay),
