@@ -3,6 +3,8 @@ use super::super::PreflightContext;
 use super::super::{ArtifactDisplay, ProcessContext, ProcessData, ReportCommand, SharedArtifact};
 use crate::measurements;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 mod kernel_symbols;
@@ -49,6 +51,15 @@ fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<Stri
 
 pub(super) struct PerfCollector;
 pub(super) static ADAPTER: PerfCollector = PerfCollector;
+
+/// Linux perf opens a process-scoped event set through a shared kernel PMU
+/// control path.  Starting a dense cohort's record/stat pairs at the exact
+/// same instant can make the kernel report transient `ESRCH`/thread-map
+/// failures even though each target is valid and remains stopped.  Serialize
+/// only this short startup/activation section; once enabled, every collector
+/// samples independently and concurrently.
+#[cfg(target_os = "linux")]
+static STARTUP_GATE: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// A symbol tree is usable only with its completed, parseable custody marker.
 pub(super) fn symfs_options(cache: &std::path::Path) -> Option<(std::path::PathBuf, bool)> {
@@ -711,6 +722,10 @@ impl measurements::Session {
         }
         #[cfg(target_os = "linux")]
         {
+            let _startup = STARTUP_GATE
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .map_err(|_| "perf startup coordination failed".to_owned())?;
             self.stage_isolated_perf(pid)?;
             self.activate_staged_perf(pid)
         }
