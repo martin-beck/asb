@@ -386,6 +386,9 @@ impl Collector {
             })
         })
     }
+    pub(crate) fn startup_diagnostic(&self, limit: usize) -> Result<String, String> {
+        self.captures[1].startup_diagnostic(limit)
+    }
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn fixture(
         name: &str,
