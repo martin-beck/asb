@@ -303,6 +303,42 @@ fn archive_generation_roots(layout: &Layout, archive: &Path) -> Result<(), Error
     Ok(())
 }
 
+fn repair_completed_generation_roots(
+    checkpoint: &Path,
+    layout: &Layout,
+    configuration: usize,
+    batch: u64,
+    input_digest: &str,
+    snapshotter: &Snapshotter,
+) -> Result<bool, Error> {
+    let Some(mut receipt) = read_receipt_value(checkpoint, configuration, batch, input_digest)?
+    else {
+        return Ok(false);
+    };
+    if receipt.status != "complete" || !batch_roots(layout, batch)?.is_empty() {
+        return Ok(false);
+    }
+    let archive = archive_root_from_receipt(layout, &receipt.archive)?;
+    let generations = layout.root.join(".asb-generations");
+    if !real_directory(&generations)? {
+        return Ok(false);
+    }
+    archive_generation_roots(layout, &archive)?;
+    let fingerprint = snapshotter.fingerprint(
+        &[Root::path("outcome-free-batch-archive", archive.clone())],
+        &context(),
+        false,
+        &[],
+    )?;
+    receipt.fingerprint = Some(fingerprint);
+    write_receipt(
+        &receipt_path(checkpoint, configuration, batch),
+        &receipt,
+        true,
+    )?;
+    Ok(true)
+}
+
 fn eligible(
     layout: &Layout,
     configuration: usize,
@@ -423,6 +459,22 @@ impl Inputs {
                     ));
                 }
             }
+        }
+        let mut repaired_completed = false;
+        for (configuration, layout) in owned.layouts.iter().enumerate() {
+            for batch in 1..=layout.plan.repeat {
+                repaired_completed |= repair_completed_generation_roots(
+                    &self.directory,
+                    layout,
+                    configuration,
+                    batch,
+                    &self.initial.digest,
+                    &self.snapshotter,
+                )?;
+            }
+        }
+        if repaired_completed {
+            self.seal_campaigns(parent, results, plan)?;
         }
         let inventory = Inventory::read(
             &owned.layouts,
