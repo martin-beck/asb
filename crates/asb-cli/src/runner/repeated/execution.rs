@@ -375,7 +375,7 @@ pub(crate) fn continue_campaign(
         .iter()
         .map(|slot| (slot.batch, slot.replica))
         .collect::<Vec<_>>();
-    if !admission_activation_allowed(plan.admission, &completed, &pending, &planned_slots) {
+    if !continuation_admission_allowed(plan.admission, &completed, &pending, &planned_slots) {
         return Err(Error::Input(
             "campaign uses a historical batch admission policy after completed or partial slots; its evidence remains readable, but do not resume it under the current policy".into(),
         ));
@@ -604,6 +604,19 @@ fn admission_activation_allowed(
     declared.len() == expected.len() && declared.into_iter().collect::<BTreeSet<_>>() == expected
 }
 
+// A completed-only continuation only renders the retained ancestor; it does
+// not activate any new batch under the current admission policy.  Historical
+// admission metadata is therefore safe to reuse in that case.  Any pending
+// slots still require the strict policy transition checks above.
+fn continuation_admission_allowed(
+    admission: crate::planning::BatchAdmissionPolicy,
+    completed: &BTreeMap<u64, serde_json::Value>,
+    pending: &[Batch],
+    planned_slots: &[(u64, usize)],
+) -> bool {
+    pending.is_empty() || admission_activation_allowed(admission, completed, pending, planned_slots)
+}
+
 #[cfg(test)]
 mod normalization_tests {
     use super::*;
@@ -646,6 +659,18 @@ mod normalization_tests {
             crate::planning::BatchAdmissionPolicy::current(),
             &BTreeMap::from([(1, serde_json::Value::Null)]),
             &incomplete,
+            &planned
+        ));
+        assert!(continuation_admission_allowed(
+            legacy,
+            &BTreeMap::from([(1, serde_json::Value::Null)]),
+            &[],
+            &planned
+        ));
+        assert!(!continuation_admission_allowed(
+            legacy,
+            &BTreeMap::from([(1, serde_json::Value::Null)]),
+            &pending,
             &planned
         ));
     }
