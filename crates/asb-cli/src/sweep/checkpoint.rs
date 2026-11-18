@@ -538,6 +538,17 @@ impl Inputs {
         self.recover_collector_teardown_slot(parent, results, plan)
     }
 
+    /// Explicitly preserve a stopped failed batch with no completed outcome.
+    /// Ordinary resume later rebuilds its execution-private directories.
+    pub(super) fn recover_outcome_free_batch(
+        &self,
+        parent: &Path,
+        results: &Path,
+        plan: &super::plan::SweepPlan,
+    ) -> Result<Value, Error> {
+        self.recover_outcome_free_batch_inner(parent, results, plan)
+    }
+
     fn recovery_inputs(
         _parent: &Path,
         results: &Path,

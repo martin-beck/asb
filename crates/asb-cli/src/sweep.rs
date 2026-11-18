@@ -138,6 +138,10 @@ pub(crate) struct Options<'a> {
     /// Archive one proven collector-teardown-only slot so a later ordinary
     /// resume can rerun it with the repaired collector implementation.
     pub recover_collector_teardown: bool,
+    /// Archive one stopped batch with no completed outcome so a later ordinary
+    /// resume can rebuild its execution-private paths without overwriting
+    /// failed collector evidence.
+    pub recover_outcome_free_batch: bool,
 }
 
 impl Default for Options<'_> {
@@ -180,6 +184,7 @@ impl Default for Options<'_> {
             recover_recording: false,
             recover_continuation: false,
             recover_collector_teardown: false,
+            recover_outcome_free_batch: false,
         }
     }
 }
@@ -366,6 +371,65 @@ pub(crate) fn run_with_options(
                 "Recovered collector teardown evidence for configuration {} slot {}; rerun the same command without --recover-collector-teardown to resume.",
                 report["configuration"].as_u64().unwrap_or_default(),
                 report["slot"].as_u64().unwrap_or_default(),
+            )
+            .map_err(crate::io_error)?;
+        }
+        return Ok(());
+    }
+    if options.recover_outcome_free_batch {
+        if !options.resume
+            || mode != Some(crate::tape::Mode::Replay)
+            || options.import_grades
+            || options.reconcile_completed
+            || options.recover_recording
+            || options.recover_continuation
+            || options.recover_collector_teardown
+            || options.allow_collector_teardown_repair
+            || options.prior_asb_executable.is_some()
+            || options.show_output
+            || options.repeat.is_some()
+            || options.max_steps.is_some()
+            || options.track.is_some()
+            || options.seed.is_some()
+            || options.respect_record_timings
+            || options.max_active_attempts.is_some()
+            || options.jobs != 1
+        {
+            return Err(Error::Input("--recover-outcome-free-batch requires --resume --replay and accepts no execution/selection options".into()));
+        }
+        let cassette_root = options.cassette_root.ok_or_else(|| Error::Input(
+            "--recover-outcome-free-batch requires --cassette-root to revalidate the retained replay inputs".into(),
+        ))?;
+        let results = output_parent.join(format!("{stem}-results"));
+        let saved = plan::SweepPlan::load(&results, parent, &sweep)?
+            .ok_or_else(|| Error::Input("no retained sweep to recover".into()))?;
+        if saved.execution.is_none() || saved.execution_mode != plan::SavedExecutionMode::Replay {
+            return Err(Error::Input(
+                "retained sweep is not a replay campaign".into(),
+            ));
+        }
+        let replay_sources = execution::replay_sources(&saved, cassette_root);
+        let checkpoint = checkpoint::Inputs::resume(
+            parent,
+            &results,
+            &saved,
+            checkpoint::ResumeRequest {
+                mode,
+                replay_sources: &replay_sources,
+                invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
+                allow_collector_teardown_repair: false,
+                prior_asb_executable: None,
+            },
+        )?;
+        let report = checkpoint.recover_outcome_free_batch(parent, &results, &saved)?;
+        if options.json {
+            writeln!(output, "{report}").map_err(crate::io_error)?;
+        } else {
+            writeln!(
+                output,
+                "Archived outcome-free failed batch {} for configuration {}; rerun the same command without --recover-outcome-free-batch to resume.",
+                report["batch"].as_u64().unwrap_or_default(),
+                report["configuration"].as_u64().unwrap_or_default(),
             )
             .map_err(crate::io_error)?;
         }

@@ -1,0 +1,598 @@
+//! Explicit recovery for a fully failed batch that produced no actual outcome.
+//! The complete failed batch is archived before ordinary continuation creates a
+//! new batch directory, so no failed collector artifact is overwritten.
+use super::*;
+use crate::sweep::checkpoint::Snapshotter;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+
+const SCOPE: &str = "outcome-free-batch-recovery-v1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Receipt {
+    schema_version: u32,
+    scope: String,
+    status: String,
+    configuration: usize,
+    batch: u64,
+    input_digest: String,
+    archive: PathBuf,
+    fingerprint: Option<Fingerprint>,
+}
+
+fn receipt_relative(configuration: usize, batch: u64) -> PathBuf {
+    PathBuf::from(format!(
+        "outcome-free-batch-recovery/{configuration:06}/{batch:06}.json"
+    ))
+}
+
+fn archive_relative(batch: u64) -> PathBuf {
+    PathBuf::from(format!(".asb-recovery/outcome-free-batch/{batch:06}"))
+}
+
+fn receipt_path(checkpoint: &Path, configuration: usize, batch: u64) -> PathBuf {
+    checkpoint.join(receipt_relative(configuration, batch))
+}
+
+fn archive_root(layout: &Layout, batch: u64) -> PathBuf {
+    layout.root.join(archive_relative(batch))
+}
+
+fn context() -> Value {
+    serde_json::json!({"scope": SCOPE})
+}
+
+fn read_receipt_value(
+    checkpoint: &Path,
+    configuration: usize,
+    batch: u64,
+    input_digest: &str,
+) -> Result<Option<Receipt>, Error> {
+    let relative = receipt_relative(configuration, batch);
+    if !reading::present_relative(checkpoint, &relative)? {
+        return Ok(None);
+    }
+    let bytes = reading::bounded_relative(checkpoint, &relative, 64 * 1024)?;
+    let receipt: Receipt = serde_json::from_slice(&bytes)
+        .map_err(|_| recovery("outcome-free batch recovery receipt is malformed"))?;
+    if receipt.schema_version != 1
+        || receipt.scope != SCOPE
+        || !matches!(receipt.status.as_str(), "pending" | "complete")
+        || receipt.configuration != configuration
+        || receipt.batch != batch
+        || receipt.input_digest != input_digest
+        || receipt.archive != archive_relative(batch)
+    {
+        return Err(recovery(
+            "outcome-free batch recovery receipt differs from its original batch",
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+fn real_directory(path: &Path) -> Result<bool, Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_dir()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+pub(super) fn read_receipt(
+    checkpoint: &Path,
+    layout: &Layout,
+    configuration: usize,
+    batch: u64,
+    input_digest: &str,
+    snapshotter: &Snapshotter,
+) -> Result<bool, Error> {
+    let Some(receipt) = read_receipt_value(checkpoint, configuration, batch, input_digest)? else {
+        return Ok(false);
+    };
+    if receipt.status == "pending" {
+        return Err(recovery(
+            "outcome-free batch recovery is incomplete; rerun --recover-outcome-free-batch",
+        ));
+    }
+    let fingerprint = receipt.fingerprint.ok_or_else(|| {
+        recovery("outcome-free batch recovery receipt has no archive fingerprint")
+    })?;
+    if !fingerprint.valid() {
+        return Err(recovery(
+            "outcome-free batch recovery receipt has an invalid archive fingerprint",
+        ));
+    }
+    let archive = archive_root(layout, batch);
+    let actual = snapshotter.fingerprint(
+        &[Root::path("outcome-free-batch-archive", archive)],
+        &context(),
+        false,
+        &[],
+    )?;
+    if actual != fingerprint {
+        return Err(recovery(
+            "outcome-free batch recovery archive differs from its receipt",
+        ));
+    }
+    Ok(true)
+}
+
+fn write_receipt(path: &Path, receipt: &Receipt, replace: bool) -> Result<(), Error> {
+    let bytes = serde_json::to_vec_pretty(receipt)
+        .map_err(|_| recovery("cannot encode outcome-free batch recovery receipt"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| recovery("outcome-free batch recovery receipt has no parent"))?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let temporary = path.with_extension("tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&temporary) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(&temporary).map_err(io_error)?;
+            options.open(&temporary).map_err(io_error)?
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(io_error)?;
+    if replace {
+        fs::rename(&temporary, path).map_err(io_error)?;
+    } else {
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => fs::remove_file(&temporary).map_err(io_error)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temporary);
+                return Err(recovery(
+                    "outcome-free batch recovery receipt already exists",
+                ));
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(io_error(error));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn terminal_record_relative(
+    layout: &Layout,
+    batch: u64,
+    generation: Option<&str>,
+) -> Result<PathBuf, Error> {
+    let legacy = PathBuf::from(format!("batch-{batch}/finished.json"));
+    if let Some(generation) = generation {
+        let generated = PathBuf::from(".asb-generations")
+            .join(generation)
+            .join(format!("batch-{batch}"))
+            .join("finished.json");
+        if reading::present_relative(&layout.root, &generated)? {
+            return Ok(generated);
+        }
+        return Err(recovery(
+            "outcome-free batch recovery has no catalog-authorized terminal record",
+        ));
+    }
+    if reading::present_relative(&layout.root, &legacy)? {
+        return Ok(legacy);
+    }
+    Err(recovery(
+        "outcome-free batch recovery has no terminal record",
+    ))
+}
+
+fn eligible(
+    layout: &Layout,
+    configuration: usize,
+    batch: u64,
+    generation: Option<&str>,
+    inventory: &Inventory,
+) -> Result<PathBuf, Error> {
+    let slots = layout
+        .plan
+        .slots
+        .iter()
+        .filter(|slot| slot.batch == batch)
+        .collect::<Vec<_>>();
+    if slots.is_empty() {
+        return Err(recovery("outcome-free batch has no planned slots"));
+    }
+    for slot in slots {
+        let key = (configuration, slot.id);
+        if layout.outcome(slot)?.is_some()
+            || inventory.actual.contains_key(&key)
+            || inventory.unsettled.contains(&key)
+        {
+            return Err(recovery(
+                "outcome-free batch recovery requires no completed or unsettled slot",
+            ));
+        }
+    }
+    let terminal = terminal_record_relative(layout, batch, generation)?;
+    let finished: Value = serde_json::from_slice(&reading::bounded_relative(
+        &layout.root,
+        &terminal,
+        64 * 1024,
+    )?)
+    .map_err(|_| recovery("outcome-free batch terminal record is malformed"))?;
+    if finished["schema_version"] != 1
+        || finished["failed"] != true
+        || finished["stopped"] != true
+        || finished["completed_executions"] != 0
+    {
+        return Err(recovery(
+            "outcome-free batch recovery requires a stopped failed batch with zero completed executions",
+        ));
+    }
+    let root = layout.root.join(format!("batch-{batch}"));
+    if !real_directory(&root)? {
+        return Err(recovery("outcome-free batch root is not a real directory"));
+    }
+    Ok(terminal)
+}
+
+impl Inputs {
+    pub(in crate::sweep) fn recover_outcome_free_batch_inner(
+        &self,
+        parent: &Path,
+        results: &Path,
+        plan: &SweepPlan,
+    ) -> Result<Value, Error> {
+        let owned = self.own_campaigns(parent, results, plan)?;
+        let generation = self
+            .read_generation_catalog(results, plan, &owned.layouts)?
+            .map(|catalog| {
+                catalog
+                    .head_snapshot()
+                    .map(|snapshot| snapshot.admission.generation)
+            })
+            .transpose()?;
+        let mut pending = Vec::new();
+        for (configuration, layout) in owned.layouts.iter().enumerate() {
+            for batch in 1..=layout.plan.repeat {
+                if let Some(receipt) =
+                    read_receipt_value(&self.directory, configuration, batch, &self.initial.digest)?
+                    && receipt.status == "pending"
+                {
+                    pending.push((configuration, layout, batch, receipt));
+                }
+            }
+        }
+        if pending.len() > 1 {
+            return Err(recovery(
+                "multiple outcome-free batch recoveries are incomplete",
+            ));
+        }
+        if let Some((configuration, layout, batch, mut receipt)) = pending.pop() {
+            let source = layout.root.join(format!("batch-{batch}"));
+            let archive = archive_root(layout, batch);
+            match (real_directory(&source)?, real_directory(&archive)?) {
+                (true, false) => {
+                    fs::remove_file(receipt_path(&self.directory, configuration, batch))
+                        .map_err(io_error)?;
+                }
+                (false, true) => {
+                    let fingerprint = self.snapshotter.fingerprint(
+                        &[Root::path("outcome-free-batch-archive", archive)],
+                        &context(),
+                        false,
+                        &[],
+                    )?;
+                    receipt.status = "complete".into();
+                    receipt.fingerprint = Some(fingerprint);
+                    write_receipt(
+                        &receipt_path(&self.directory, configuration, batch),
+                        &receipt,
+                        true,
+                    )?;
+                    self.seal_campaigns(parent, results, plan)?;
+                    return Ok(serde_json::json!({
+                        "type":"outcome-free-batch-recovery",
+                        "configuration":configuration,
+                        "batch":batch,
+                        "archive":archive_relative(batch),
+                        "agent_executions":0,
+                        "evaluations":0,
+                    }));
+                }
+                _ => {
+                    return Err(recovery(
+                        "outcome-free batch recovery pending state has unsafe source/archive roots",
+                    ));
+                }
+            }
+        }
+        let inventory = Inventory::read(
+            &owned.layouts,
+            &self.directory,
+            &self.initial.digest,
+            &self.snapshotter,
+        )?;
+        let mut candidate = None;
+        for (configuration, layout) in owned.layouts.iter().enumerate() {
+            for batch in 1..=layout.plan.repeat {
+                if read_receipt(
+                    &self.directory,
+                    layout,
+                    configuration,
+                    batch,
+                    &self.initial.digest,
+                    &self.snapshotter,
+                )? {
+                    continue;
+                }
+                let terminal = match eligible(
+                    layout,
+                    configuration,
+                    batch,
+                    generation.as_deref(),
+                    &inventory,
+                ) {
+                    Ok(terminal) => terminal,
+                    Err(Error::Input(_)) => continue,
+                    Err(error) => return Err(error),
+                };
+                if candidate
+                    .replace((configuration, layout, batch, terminal))
+                    .is_some()
+                {
+                    return Err(recovery(
+                        "outcome-free batch recovery requires exactly one eligible batch",
+                    ));
+                }
+            }
+        }
+        let Some((configuration, layout, batch, terminal)) = candidate else {
+            return Err(recovery("no eligible outcome-free failed batch was found"));
+        };
+        let path = receipt_path(&self.directory, configuration, batch);
+        let archive = archive_root(layout, batch);
+        if archive.exists() {
+            return Err(recovery("outcome-free batch archive already exists"));
+        }
+        let mut receipt = Receipt {
+            schema_version: 1,
+            scope: SCOPE.into(),
+            status: "pending".into(),
+            configuration,
+            batch,
+            input_digest: self.initial.digest.clone(),
+            archive: archive_relative(batch),
+            fingerprint: None,
+        };
+        write_receipt(&path, &receipt, false)?;
+        let batch_root = layout.root.join(format!("batch-{batch}"));
+        fs::create_dir_all(
+            archive
+                .parent()
+                .ok_or_else(|| recovery("outcome-free batch archive has no parent"))?,
+        )
+        .map_err(io_error)?;
+        fs::rename(&batch_root, &archive).map_err(|error| {
+            Error::Input(format!(
+                "cannot atomically archive outcome-free batch evidence {}: {error}; preserve the original campaign and use one filesystem for campaign data",
+                batch_root.display()
+            ))
+        })?;
+        let fingerprint = self.snapshotter.fingerprint(
+            &[Root::path("outcome-free-batch-archive", archive)],
+            &context(),
+            false,
+            &[],
+        )?;
+        receipt.status = "complete".into();
+        receipt.fingerprint = Some(fingerprint);
+        write_receipt(&path, &receipt, true)?;
+        self.seal_campaigns(parent, results, plan)?;
+        let legacy_terminal = format!("batch-{batch}/finished.json");
+        let terminal_record = if terminal == Path::new(&legacy_terminal) {
+            archive_relative(batch).join("finished.json")
+        } else {
+            terminal
+        };
+        Ok(serde_json::json!({
+            "type":"outcome-free-batch-recovery",
+            "configuration":configuration,
+            "batch":batch,
+            "terminal_record":terminal_record,
+            "agent_executions":0,
+            "evaluations":0,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sweep::checkpoint::campaigns::tests::settlement_tests;
+
+    fn make_outcome_free(layout: &Layout, keep_first_completion: bool) {
+        let batch = layout.root.join("batch-1");
+        for directory in [batch.join("outcomes"), batch.join(".asb-completions")] {
+            let mut entries = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for (index, path) in entries.into_iter().enumerate() {
+                if keep_first_completion && index == 0 {
+                    continue;
+                }
+                fs::remove_file(path).unwrap();
+            }
+        }
+        fs::write(
+            batch.join("finished.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "completed_executions": 0,
+                "failed": true,
+                "stopped": true,
+                "failure_reason": "collector startup failed before agent execution"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn outcome_free_batch_recovery_archives_every_failed_batch_artifact() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 2);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        make_outcome_free(&layout, false);
+
+        let report = inputs
+            .recover_outcome_free_batch_inner(&fixture.0, &results, &plan)
+            .unwrap();
+        assert_eq!(report["configuration"], 0);
+        assert_eq!(report["batch"], 1);
+        assert!(!layout.root.join("batch-1").exists());
+        assert!(archive_root(&layout, 1).join("finished.json").is_file());
+        assert!(
+            layout
+                .root
+                .join(report["terminal_record"].as_str().unwrap())
+                .is_file()
+        );
+        assert!(
+            read_receipt(
+                &inputs.directory,
+                &layout,
+                0,
+                1,
+                &inputs.initial.digest,
+                &inputs.snapshotter,
+            )
+            .unwrap()
+        );
+        let inventory = Inventory::read(
+            &[layout],
+            &inputs.directory,
+            &inputs.initial.digest,
+            &inputs.snapshotter,
+        )
+        .unwrap();
+        for slot in inventory
+            .actual
+            .keys()
+            .filter(|(configuration, _)| *configuration == 0)
+        {
+            assert_ne!(*slot, (0, 1));
+            assert_ne!(*slot, (0, 2));
+        }
+        assert!(!inventory.observed.contains(&(0, 1)));
+        assert!(!inventory.observed.contains(&(0, 2)));
+    }
+
+    #[test]
+    fn outcome_free_batch_recovery_rejects_any_completed_slot() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 2);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        make_outcome_free(&layout, true);
+
+        let error = inputs
+            .recover_outcome_free_batch_inner(&fixture.0, &results, &plan)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no eligible outcome-free failed batch")
+        );
+        assert!(layout.root.join("batch-1").is_dir());
+    }
+
+    #[test]
+    fn pending_recovery_before_the_archive_rename_restarts_the_transaction() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        make_outcome_free(&layout, false);
+        let path = receipt_path(&inputs.directory, 0, 1);
+        write_receipt(
+            &path,
+            &Receipt {
+                schema_version: 1,
+                scope: SCOPE.into(),
+                status: "pending".into(),
+                configuration: 0,
+                batch: 1,
+                input_digest: inputs.initial.digest.clone(),
+                archive: archive_relative(1),
+                fingerprint: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        inputs
+            .recover_outcome_free_batch_inner(&fixture.0, &results, &plan)
+            .unwrap();
+        assert!(!layout.root.join("batch-1").exists());
+        assert!(
+            read_receipt(
+                &inputs.directory,
+                &layout,
+                0,
+                1,
+                &inputs.initial.digest,
+                &inputs.snapshotter,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn pending_recovery_after_the_archive_rename_completes_without_execution() {
+        let (fixture, plan, results, inputs) =
+            settlement_tests::fixture_concurrency(crate::tape::Mode::Replay, false, false, 1);
+        let layout = plan.read_campaigns(&results).unwrap().remove(0);
+        make_outcome_free(&layout, false);
+        let archive = archive_root(&layout, 1);
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::rename(layout.root.join("batch-1"), &archive).unwrap();
+        write_receipt(
+            &receipt_path(&inputs.directory, 0, 1),
+            &Receipt {
+                schema_version: 1,
+                scope: SCOPE.into(),
+                status: "pending".into(),
+                configuration: 0,
+                batch: 1,
+                input_digest: inputs.initial.digest.clone(),
+                archive: archive_relative(1),
+                fingerprint: None,
+            },
+            false,
+        )
+        .unwrap();
+
+        let report = inputs
+            .recover_outcome_free_batch_inner(&fixture.0, &results, &plan)
+            .unwrap();
+        assert_eq!(report["agent_executions"], 0);
+        assert_eq!(report["archive"].as_str(), archive_relative(1).to_str());
+        assert!(
+            read_receipt(
+                &inputs.directory,
+                &layout,
+                0,
+                1,
+                &inputs.initial.digest,
+                &inputs.snapshotter,
+            )
+            .unwrap()
+        );
+    }
+}

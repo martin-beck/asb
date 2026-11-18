@@ -18,6 +18,9 @@ mod link_recovery;
 #[path = "continuation_collector_teardown_recovery.rs"]
 mod collector_teardown_recovery;
 
+#[path = "continuation_outcome_free_batch_recovery.rs"]
+mod outcome_free_batch_recovery;
+
 struct OwnedCampaigns {
     origin: Origin,
     layouts: Vec<Layout>,
@@ -154,8 +157,27 @@ impl Inventory {
         // Admit metadata for every configuration before reading any actual
         // completion or proving a recording payload. Never recursively search.
         for (configuration, layout) in layouts.iter().enumerate() {
+            let recovered_batches = (1..=layout.plan.repeat)
+                .map(|batch| {
+                    outcome_free_batch_recovery::read_receipt(
+                        checkpoint,
+                        layout,
+                        configuration,
+                        batch,
+                        input_digest,
+                        snapshotter,
+                    )
+                    .map(|recovered| recovered.then_some(batch))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<BTreeSet<_>>();
             for slot in &layout.plan.slots {
                 let key = (configuration, slot.id);
+                if recovered_batches.contains(&slot.batch) {
+                    continue;
+                }
                 let recovered_slot = collector_teardown_recovery::read_receipt(
                     checkpoint,
                     layout,

@@ -480,6 +480,7 @@ pub(crate) fn run_with_interactive(
                     recover_recording: options.recover_recording,
                     recover_continuation: options.recover_continuation,
                     recover_collector_teardown: options.recover_collector_teardown,
+                    recover_outcome_free_batch: options.recover_outcome_free_batch,
                     prepare_replay: options.prepare_replay,
                 },
                 stdout,
@@ -1521,7 +1522,7 @@ struct SweepArgs {
     #[arg(long, value_name = "PRESET.toml", group = "sweep-input")]
     preset: Option<String>,
     /// Record and verify sweep trials, replacing failed sampled trials before publication.
-    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "recover_collector_teardown", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings", "concurrency"])]
+    #[arg(long, conflicts_with_all = ["preset", "record", "replay", "llm_record", "llm_replay", "tool_record", "tool_replay", "mcp_record", "mcp_replay", "resume", "continue_after_failures", "recover_recording", "recover_continuation", "recover_collector_teardown", "recover_outcome_free_batch", "reconcile_completed", "import_grades", "track", "seed", "cassette_root", "respect_record_timings", "concurrency"])]
     prepare_replay: bool,
     /// Sequential fresh batches per configuration, at its configured concurrency.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=65533))]
@@ -1563,8 +1564,13 @@ struct SweepArgs {
     /// Archive exactly one successful replay slot whose retained batch failure
     /// proves a supported post-evaluation perf-stat producer defect. This
     /// never starts an agent or evaluator; rerun with ordinary --resume afterwards.
-    #[arg(long, requires_all = ["resume", "replay-direction", "allow_collector_teardown_repair", "prior_asb_executable", "cassette_root"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
+    #[arg(long, requires_all = ["resume", "replay-direction", "allow_collector_teardown_repair", "prior_asb_executable", "cassette_root"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "recover_outcome_free_batch", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
     recover_collector_teardown: bool,
+    /// Archive exactly one stopped replay batch that has no completed outcome.
+    /// This retains failed collector evidence and lets ordinary resume rebuild
+    /// clean execution-private paths for the original population.
+    #[arg(long, requires_all = ["resume", "replay-direction", "cassette_root"], conflicts_with_all = ["record", "recover_recording", "recover_continuation", "recover_collector_teardown", "allow_collector_teardown_repair", "prior_asb_executable", "import_grades", "reconcile_completed", "continue_after_failures", "repeat", "max_steps", "track", "seed", "show_output", "respect_record_timings", "max_active_attempts", "jobs"])]
+    recover_outcome_free_batch: bool,
     #[arg(
         long,
         requires = "resume",
@@ -2106,6 +2112,27 @@ mod tests {
                 Cli::try_parse_from(["asb", "sweep", "suite.toml", option, "513"]).is_err(),
                 "{option} must still reject values above the shared cap"
             );
+        }
+    }
+
+    #[test]
+    fn outcome_free_batch_recovery_rejects_collector_repair_identity_overrides() {
+        for option in [
+            vec!["--allow-collector-teardown-repair"],
+            vec!["--prior-asb-executable", "prior-asb"],
+        ] {
+            let mut command = vec![
+                "asb",
+                "sweep",
+                "suite.toml",
+                "--resume",
+                "--replay",
+                "--cassette-root",
+                "cassettes",
+                "--recover-outcome-free-batch",
+            ];
+            command.extend(option);
+            assert!(Cli::try_parse_from(command).is_err());
         }
     }
 
