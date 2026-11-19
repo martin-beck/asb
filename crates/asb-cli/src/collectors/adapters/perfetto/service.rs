@@ -11,6 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static SERVICES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Service>>>> = OnceLock::new();
 
+// Dense cohorts serialize tracefs service admission. This remains bounded but
+// leaves enough time for all selected replicas to acquire isolated instances.
+const DENSE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 #[cfg(test)]
 #[path = "probe_tests.rs"]
 mod probe_tests;
@@ -59,7 +63,7 @@ impl Service {
     ) -> Result<Arc<Self>, String> {
         let root = project_root.canonicalize().map_err(|e| e.to_string())?;
         before_admission();
-        let _admission = super::project::lock_admission_for(&root, Duration::from_secs(15))
+        let _admission = super::project::lock_admission_for(&root, DENSE_ADMISSION_TIMEOUT)
             .map_err(|e| e.to_string())?;
         let mut services = registry
             .lock()
@@ -607,7 +611,17 @@ mod tests {
                 .all(|path| super::try_lease(path).unwrap().is_none())
         );
         drop(leases.remove(2));
-        let replacement = super::try_lease(&paths[2]).unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let replacement = loop {
+            if let Some(lease) = super::try_lease(&paths[2]).unwrap() {
+                break lease;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "released lease remained unavailable"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert!(super::try_lease(&paths[2]).unwrap().is_none());
         drop(replacement);
         drop(leases);

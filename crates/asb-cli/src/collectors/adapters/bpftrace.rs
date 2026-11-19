@@ -7,6 +7,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Instant;
+
+// Kernel program loading is serialized by the kernel under dense pressure.
+// Keep readiness finite while allowing a full selected cohort to queue.
+const DENSE_PROFILE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 mod custom_scope;
 mod snapshots;
 #[cfg(test)]
@@ -272,7 +277,6 @@ fn preflight(context: &mut PreflightContext<'_>) -> Result<(), String> {
 
 use crate::measurements::{Collector, escape_svg, parse_float};
 use std::collections::BTreeMap;
-use std::time::Instant;
 
 #[derive(Clone, Default)]
 struct BpftraceState {
@@ -371,7 +375,7 @@ impl measurements::Session {
                 || collector.producer.poll(),
                 &collector.captures[0],
                 &collector.captures[1],
-                std::time::Duration::from_secs(30),
+                DENSE_PROFILE_READY_TIMEOUT,
             ) {
                 return Err(collector.startup_failure(
                     format!(
@@ -414,7 +418,7 @@ impl measurements::Session {
                         || collector.producer.poll(),
                         &collector.captures[0],
                         &collector.captures[1],
-                        std::time::Duration::from_secs(30),
+                        DENSE_PROFILE_READY_TIMEOUT,
                     ) {
                         return Err(collector.startup_failure(
                             format!(

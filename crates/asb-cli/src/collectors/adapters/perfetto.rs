@@ -11,6 +11,11 @@ mod service;
 mod state_summary;
 use service::Service;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+// Tracefs service startup is serialized for a project. A dense cohort needs a
+// longer but still finite wait before the shared launch gate admits execution.
+const DENSE_CAPTURE_READY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub(super) struct PerfettoCollector;
 pub(super) static ADAPTER: PerfettoCollector = PerfettoCollector;
 
@@ -430,7 +435,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// Perfetto's scheduler-state composition is specific to its trace schema.
 /// Comparison merely publishes this adapter-owned SVG alongside other graphs.
@@ -828,7 +832,8 @@ impl measurements::Session {
             "perfetto", &ADAPTER, command, route, captures, dependency,
         ) {
             Ok(mut collector) => {
-                if let Err(error) = wait_for_capture_ready(&mut collector, Duration::from_secs(35))
+                if let Err(error) =
+                    wait_for_capture_ready(&mut collector, DENSE_CAPTURE_READY_TIMEOUT)
                 {
                     return Err(collector.startup_failure(
                         format!("Perfetto did not report that tracing is ready: {error}"),
