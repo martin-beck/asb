@@ -7,6 +7,7 @@ running until the normal benchmark deadline.
 """
 import base64
 import json
+import os
 import queue
 import sys
 import threading
@@ -26,6 +27,7 @@ REQUEST_POLL_INTERVAL = 0.05
 REQUEST_QUEUE_TIMEOUT = 1
 DEFAULT_EXECUTION_TIMEOUT = 900
 DEFAULT_EVALUATION_TIMEOUT = 1800
+INITIAL_IDLE_TIMEOUT_ENV = "ASB_TASK_SERVER_INITIAL_IDLE_TIMEOUT_SECONDS"
 
 
 class Operation(str, Enum):
@@ -66,7 +68,22 @@ def idle_timeout_seconds(request, fallback):
     return value
 
 
-def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
+def initial_idle_timeout_seconds():
+    """Read the bounded pre-request wait supplied by the workload controller."""
+    value = os.environ.get(INITIAL_IDLE_TIMEOUT_ENV)
+    if value is None:
+        return DEFAULT_IDLE_TIMEOUT
+    if not value.isdecimal():
+        raise ExecutionError("workload controller supplied an invalid initial idle timeout")
+    seconds = int(value)
+    if seconds < DEFAULT_IDLE_TIMEOUT or seconds > MAX_IDLE_TIMEOUT:
+        raise ExecutionError("workload controller supplied an out-of-range initial idle timeout")
+    return seconds
+
+
+def serve(task, source, destination, idle_timeout=None):
+    if idle_timeout is None:
+        idle_timeout = initial_idle_timeout_seconds()
     requests = queue.Queue(maxsize=64)
     peer_closed, stop_reader = threading.Event(), threading.Event()
     task.cancelled = peer_closed
