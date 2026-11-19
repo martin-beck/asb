@@ -14,7 +14,7 @@ pub(super) static ADAPTER: StaticTool = StaticTool::new(
     },
     ToolKind::Collector,
 )
-.with_helper_executables(&["stackcollapse-perf.pl"])
+.with_helper_executables(&["stackcollapse-perf.pl", "difffolded.pl"])
 .with_init_runtime();
 
 fn install(
@@ -35,15 +35,29 @@ fn install(
             "flamegraph",
             "https://raw.githubusercontent.com/brendangregg/FlameGraph/41fee1f99f9276008b7cd112fca19dc3ea84ac32/flamegraph.pl",
         ),
+        (
+            "difffolded.pl",
+            "https://raw.githubusercontent.com/brendangregg/FlameGraph/41fee1f99f9276008b7cd112fca19dc3ea84ac32/difffolded.pl",
+        ),
     ] {
         let destination = bin.join(name);
         progress(
-            if name == "flamegraph" { 60 } else { 25 },
+            match name {
+                "stackcollapse-perf.pl" => 25,
+                "difffolded.pl" => 50,
+                "flamegraph" => 70,
+                _ => unreachable!("registered FlameGraph asset"),
+            },
             crate::install::ProgressStage::DownloadingAndValidating,
         );
         install_executable_source_in(context, url, &destination, "flamegraph tool")?;
         progress(
-            if name == "flamegraph" { 90 } else { 60 },
+            match name {
+                "stackcollapse-perf.pl" => 50,
+                "difffolded.pl" => 70,
+                "flamegraph" => 90,
+                _ => unreachable!("registered FlameGraph asset"),
+            },
             crate::install::ProgressStage::Copying,
         );
     }

@@ -1,6 +1,8 @@
 //! Offline phase, source, chart and publication contracts; never starts a benchmark.
 use super::*;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 type ReadHook = Box<dyn FnOnce(&fs::File, &Path)>;
 thread_local! { static READ_HOOK: std::cell::RefCell<Option<ReadHook>>=const {std::cell::RefCell::new(None)}; }
 thread_local! {static FAIL_SYNC: std::cell::Cell<bool>=const {std::cell::Cell::new(false)};}
@@ -52,6 +54,24 @@ impl Fixture {
             );
         }
         manifest
+    }
+    #[cfg(unix)]
+    fn install_flamegraph_tools(&self) {
+        self.write(
+            ".asb/project.toml",
+            "tools_dir = 'tools'\nworkloads_dir = 'workloads'\nworkspace_dir = 'workspace'\n",
+        );
+        let diff = self.write(
+            "tools/flamegraph/bin/difffolded.pl",
+            "#!/bin/sh\nprintf 'root;growth 3 12\\nroot;shrink 12 3\\n'\n",
+        );
+        let render = self.write(
+            "tools/flamegraph/bin/flamegraph",
+            "#!/bin/sh\nprintf '%s\\n' '<svg xmlns=\"http://www.w3.org/2000/svg\"><text id=\"title\">Upstream Flame Graph</text><g id=\"frames\"><rect fill=\"rgb(255,0,0)\"/></g></svg>'\n",
+        );
+        for path in [diff, render] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
     }
     fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn visit(base: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -1685,9 +1705,11 @@ fn comparison_publishes_agent_summary_distribution_and_histogram_reports() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     let fixture = Fixture::new();
+    fixture.install_flamegraph_tools();
     let manifest = fixture.seed("", 6);
     for (index, (agent, concurrency)) in [
         ("alpha", 1),
@@ -1866,6 +1888,10 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
         aggregate_flamegraphs.len() >= 24,
         "profiles plus mean/median/p95 diffs"
     );
+    assert!(aggregate_flamegraphs.iter().any(|path| {
+        fs::read_to_string(path)
+            .is_ok_and(|svg| svg.contains("id=\"frames\"") && svg.contains("rgb(255,0,0)"))
+    }));
 }
 
 #[test]
