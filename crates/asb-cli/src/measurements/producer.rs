@@ -30,6 +30,7 @@ pub(crate) struct Completion {
     pub interruption_requested: bool,
     pub interruption_acknowledged: bool,
     pub error: Option<String>,
+    custody_receipt: Option<Arc<AtomicBool>>,
 }
 impl Completion {
     fn failed(exit: Option<ExitStatus>, reason: impl Into<String>) -> Self {
@@ -40,6 +41,7 @@ impl Completion {
             interruption_requested: false,
             interruption_acknowledged: false,
             error: Some(reason.into()),
+            custody_receipt: None,
         }
     }
     #[cfg(test)]
@@ -51,6 +53,7 @@ impl Completion {
             interruption_requested: false,
             interruption_acknowledged: false,
             error: None,
+            custody_receipt: None,
         }
     }
 }
@@ -212,6 +215,9 @@ impl Producer {
         owner: Option<Arc<crate::output_lock::OutputLock>>,
     ) -> Completion {
         if let Some(completion) = &self.completion {
+            if let (Some(receipt), Some(owner)) = (&completion.custody_receipt, owner) {
+                super::retain_owner_until_custody(Arc::clone(receipt), Some(owner));
+            }
             return completion.clone();
         }
         let completion = match self.active.take() {
@@ -227,6 +233,7 @@ impl Producer {
                         interruption_requested: false,
                         interruption_acknowledged: false,
                         error: None,
+                        custody_receipt: None,
                     },
                     Err(error) => Completion::failed(None, error),
                 }
@@ -295,7 +302,7 @@ impl Process {
             std::thread::sleep(Duration::from_millis(5));
         }
         if !handle.is_finished() {
-            super::retain_owner_until_worker_exit(handle, owner);
+            retain_owner_until_capture_worker_custody(handle, owner);
             let mut completion = Completion::failed(
                 None,
                 "collector settlement deadline exceeded; existing worker retains guardian and raw capture custody",
@@ -303,12 +310,42 @@ impl Process {
             completion.guardian_cleanup_confirmed = Some(false);
             return completion;
         }
-        handle.join().unwrap_or_else(|_| {
+        let completion = handle.join().unwrap_or_else(|_| {
             Completion::failed(
                 None,
                 "collector capture worker panicked; capture completeness unconfirmed",
             )
-        })
+        });
+        if let Some(receipt) = &completion.custody_receipt {
+            super::retain_owner_until_custody(Arc::clone(receipt), owner);
+        }
+        completion
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn retain_owner_until_capture_worker_custody(
+    handle: std::thread::JoinHandle<Completion>,
+    owner: Option<Arc<crate::output_lock::OutputLock>>,
+) {
+    if let Some(owner) = owner {
+        let fallback = Arc::clone(&owner);
+        if std::thread::Builder::new()
+            .name("asb-measurement-custody".into())
+            .spawn(move || {
+                let completion = handle.join().ok();
+                if let Some(receipt) = completion.and_then(|completion| completion.custody_receipt)
+                {
+                    while !receipt.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                drop(owner);
+            })
+            .is_err()
+        {
+            std::mem::forget(fallback);
+        }
     }
 }
 
@@ -318,7 +355,7 @@ fn capture(
     mut files: [File; 2],
     policy: Policy,
     stop: &AtomicBool,
-    _dependency: Option<Arc<dyn Send + Sync>>,
+    dependency: Option<Arc<dyn Send + Sync>>,
     #[cfg(test)] fault: Option<Fault>,
 ) -> Completion {
     // A principal exit proves the collector itself is no longer producing.
@@ -436,6 +473,9 @@ fn capture(
                 fault.reached.store(true, Ordering::Release);
                 match fault.kind {
                     "read" => return Err("cannot read collector capture: injected offline read error".into()),
+                    "cleanup-observation" => {
+                        return Err("cannot read collector capture: injected cleanup observation error".into());
+                    }
                     "panic" => panic!("injected offline pump panic"),
                     _ => {}
                 }
@@ -468,6 +508,7 @@ fn capture(
             interruption_requested,
             interruption_acknowledged: gate.interruption_acknowledged(),
             error: None,
+            custody_receipt: None,
         },
         Err(error) => {
             // Do not hand only the child to the generic reaper: capture files
@@ -477,12 +518,19 @@ fn capture(
             #[cfg(test)]
             if let Some(fault) = &fault {
                 fault.reached.store(true, Ordering::Release);
-                while !fault.release.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(5));
+                if fault.kind != "cleanup-observation" {
+                    while !fault.release.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                 }
             }
-            let _ = gate.request_cancel();
-            while !cleanup_confirmed {
+            let cleanup_deadline = Instant::now() + GUARDIAN_SETTLEMENT_BUDGET;
+            let mut cleanup_error = gate
+                .request_cancel()
+                .err()
+                .map(|error| format!("cannot request collector guardian cancellation: {error}"));
+            while !cleanup_confirmed && cleanup_error.is_none() && Instant::now() < cleanup_deadline
+            {
                 if pipes_nonblocking {
                     // Failed capture is not repaired by a later prefix. Drain
                     // only to avoid blocking guardian diagnostics/teardown;
@@ -502,10 +550,25 @@ fn capture(
                         }
                     }
                 }
-                if matches!(gate.try_wait(), Ok(Some(_))) {
-                    cleanup_confirmed = true;
+                #[cfg(test)]
+                let observed = if fault
+                    .as_ref()
+                    .is_some_and(|fault| fault.kind == "cleanup-observation")
+                {
+                    Err(std::io::Error::other("injected guardian observation error"))
                 } else {
-                    std::thread::sleep(Duration::from_millis(50));
+                    gate.try_wait()
+                };
+                #[cfg(not(test))]
+                let observed = gate.try_wait();
+                match observed {
+                    Ok(Some(_)) => cleanup_confirmed = true,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                    Err(observation) => {
+                        cleanup_error = Some(format!(
+                            "cannot observe collector guardian cleanup: {observation}"
+                        ));
+                    }
                 }
             }
             exit = gate
@@ -516,8 +579,87 @@ fn capture(
             completion.guardian_cleanup_confirmed = Some(cleanup_confirmed);
             completion.interruption_requested = interruption_requested;
             completion.interruption_acknowledged = gate.interruption_acknowledged();
+            if !cleanup_confirmed {
+                let cleanup_error = cleanup_error.unwrap_or_else(|| {
+                    "collector guardian cleanup did not settle within the bounded capture custody budget"
+                        .into()
+                });
+                completion.error = Some(format!(
+                    "{}; {cleanup_error}; raw capture retained",
+                    completion
+                        .error
+                        .as_deref()
+                        .unwrap_or("collector capture failed")
+                ));
+                if let Some(receipt) = gate.retain_until_reaped() {
+                    retain_failed_capture_until_reaped(
+                        Arc::clone(&receipt),
+                        files,
+                        out,
+                        err,
+                        dependency,
+                        pipes_nonblocking,
+                    );
+                    completion.custody_receipt = Some(receipt);
+                }
+            }
             completion
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn retain_failed_capture_until_reaped(
+    receipt: Arc<AtomicBool>,
+    files: [File; 2],
+    out: Option<std::process::ChildStdout>,
+    err: Option<std::process::ChildStderr>,
+    dependency: Option<Arc<dyn Send + Sync>>,
+    pipes_nonblocking: bool,
+) {
+    let resources = (files, out, err, dependency);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<(
+        [File; 2],
+        Option<std::process::ChildStdout>,
+        Option<std::process::ChildStderr>,
+        Option<Arc<dyn Send + Sync>>,
+    )>(0);
+    if std::thread::Builder::new()
+        .name("asb-collector-capture-custody".into())
+        .spawn(move || {
+            let Ok((files, mut out, mut err, dependency)) = receiver.recv() else {
+                return;
+            };
+            while !receipt.load(Ordering::Acquire) {
+                if pipes_nonblocking {
+                    for pipe in [
+                        out.as_mut().map(|pipe| pipe as &mut dyn Read),
+                        err.as_mut().map(|pipe| pipe as &mut dyn Read),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let mut discard = [0; 4096];
+                        for _ in 0..16 {
+                            if !matches!(pipe.read(&mut discard), Ok(count) if count > 0) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop((files, out, err, dependency));
+        })
+        .is_ok()
+    {
+        if let Err(resources) = sender.send(resources) {
+            std::mem::forget(resources);
+        }
+    } else {
+        // A capture failure must never release resources while its exact gate
+        // is still in wait-only custody. Retain rather than risk reuse.
+        std::mem::forget(resources);
     }
 }
 
@@ -822,7 +964,12 @@ mod tests {
                 kind == "write",
             );
             until(|| reached.load(Ordering::Acquire));
-            let completion = producer.stop_before(Instant::now() + Duration::from_millis(30));
+            let lock = fixture.path.join("directory.lock");
+            let owner = Arc::new(crate::output_lock::OutputLock::acquire(&lock, "busy").unwrap());
+            let completion = producer.stop_before_with_owner(
+                Instant::now() + Duration::from_millis(30),
+                Some(Arc::clone(&owner)),
+            );
             assert!(!completion.capture_complete);
             assert_eq!(completion.guardian_cleanup_confirmed, Some(false));
             assert_eq!(
@@ -831,12 +978,65 @@ mod tests {
                 "{kind}: dependency released before proof"
             );
             assert!(fixture.sentinel.try_wait().unwrap().is_none());
+            drop(owner);
+            assert!(crate::output_lock::OutputLock::acquire(&lock, "busy").is_err());
             fixture.release.store(true, Ordering::Release);
-            until(|| drops.load(Ordering::Acquire) == 1);
+            until(|| {
+                drops.load(Ordering::Acquire) == 1
+                    && crate::output_lock::OutputLock::acquire(&lock, "busy").is_ok()
+            });
             // Parent's unknown result remains immutable after late settlement.
             assert_eq!(producer.stop().guardian_cleanup_confirmed, Some(false));
             assert!(fixture.sentinel.try_wait().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn failed_capture_observation_handoffs_resources_without_stalling_the_producer() {
+        let fixture = Fixture::new();
+        let lock = fixture.path.join("directory.lock");
+        let owner = Arc::new(crate::output_lock::OutputLock::acquire(&lock, "busy").unwrap());
+        let reached = Arc::new(AtomicBool::new(false));
+        FAULT.with(|slot| {
+            *slot.borrow_mut() = Some(Fault {
+                kind: "cleanup-observation",
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&fixture.release),
+            });
+        });
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut producer = fixture.spawn(
+            "import signal,sys,time\ndef stop(*_):\n sys.stdout.write('X'*262144);sys.stdout.flush();raise SystemExit(0)\nsignal.signal(signal.SIGTERM,stop)\nprint('READY',flush=True)\nwhile True: time.sleep(.01)\n",
+            Some(Arc::new(Dependency(Arc::clone(&drops)))),
+            false,
+        );
+        until(|| reached.load(Ordering::Acquire));
+        let polled = producer
+            .poll()
+            .unwrap()
+            .expect("failed capture must settle");
+        assert!(!polled.capture_complete);
+        let started = Instant::now();
+        let completion = producer.stop_before_with_owner(
+            Instant::now() + Duration::from_millis(250),
+            Some(Arc::clone(&owner)),
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!completion.capture_complete);
+        assert_eq!(completion.guardian_cleanup_confirmed, Some(false));
+        assert!(
+            completion
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("cannot observe collector guardian cleanup"))
+        );
+        drop(owner);
+        assert!(crate::output_lock::OutputLock::acquire(&lock, "busy").is_err());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        until(|| {
+            drops.load(Ordering::Acquire) == 1
+                && crate::output_lock::OutputLock::acquire(&lock, "busy").is_ok()
+        });
     }
 
     #[test]

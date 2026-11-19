@@ -445,6 +445,27 @@ fn retain_owner_until_worker_exit<T: Send + 'static>(
     }
 }
 
+fn retain_owner_until_custody(
+    receipt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    owner: Option<std::sync::Arc<crate::output_lock::OutputLock>>,
+) {
+    if let Some(owner) = owner {
+        let fallback = owner.clone();
+        if std::thread::Builder::new()
+            .name("asb-measurement-custody".into())
+            .spawn(move || {
+                while !receipt.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                drop(owner);
+            })
+            .is_err()
+        {
+            std::mem::forget(fallback);
+        }
+    }
+}
+
 pub struct Session {
     adapters: Vec<&'static dyn collectors::CollectorAdapter>,
     pub(crate) dir: PathBuf,

@@ -497,6 +497,17 @@ impl ManagedGate {
             .is_some_and(|control| control.acknowledged)
     }
 
+    /// Transfer a live guardian to wait-only custody and return a receipt for
+    /// its exact reap. Callers retaining capture resources can use the receipt
+    /// to preserve their own proof-aware lifetime without blocking a worker.
+    pub(crate) fn retain_until_reaped(
+        &mut self,
+    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.child
+            .take()
+            .map(|child| self.keeper.adopt_wait_only_with_receipt(child))
+    }
+
     fn stop_before(&mut self, deadline: Instant) -> io::Result<ExitStatus> {
         if let Some(status) = self.complete {
             return Ok(status);
