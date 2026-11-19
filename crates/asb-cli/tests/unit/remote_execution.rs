@@ -103,7 +103,12 @@ for event in events:
   raw=sys.stdin.readline()
   if not raw: closed();sys.exit(0)
   assert json.loads(raw)==dict(op='resume',exec_id=event['target']['exec_id']);record('resume')
-  if acknowledge_resume: print(json.dumps(dict(event='release_accepted',exec_id=event['target']['exec_id'])),flush=True)
+  if acknowledge_resume:
+   print(json.dumps(dict(event='release_accepted',exec_id=event['target']['exec_id'])),flush=True)
+   raw=sys.stdin.readline()
+   if not raw: closed();sys.exit(0)
+   assert json.loads(raw)==dict(op='activate',exec_id=event['target']['exec_id']);record('activate')
+   print(json.dumps(dict(event='activation_accepted',exec_id=event['target']['exec_id'])),flush=True)
 for raw in sys.stdin:
  request=json.loads(raw);record(request['op'])
  if request['op']=='evaluate':
@@ -179,6 +184,7 @@ def execute_agent(task,request,attach,output,cancelled,on_ended,**options):
  assert request['request']['config']['workspace']=='/fixture-task'
  attach(dict(exec_id='owned-execution'));record('resume')
  options['on_release_accepted'](dict(exec_id='owned-execution'))
+ options['on_activation_accepted'](dict(exec_id='owned-execution'))
  output('stdout',b'live\x00output')
  result=dict(exit_code=carrier,stdout=b'complete\x00output',stderr=b'diagnostic',elapsed_seconds=.125,
   metadata=dict(schema_version=1,exit_code=carrier,final_response='fixture',token_usage={},steps=2,tree_quiesced=True))
@@ -867,7 +873,7 @@ fn unmeasured_shared_launch_requires_valid_target_and_aborts_before_cancellation
         assert_eq!(
             fixture.operations(),
             if fault == "none" {
-                vec!["agent", "resume", "cancel"]
+                vec!["agent", "resume", "activate", "cancel"]
             } else {
                 vec!["agent", "cancel"]
             }
@@ -1002,7 +1008,7 @@ fn prepared_protocol_preserves_output_exit_time_and_grades_only_after_completion
         session.finish().unwrap();
         assert_eq!(
             fixture.operations(),
-            ["agent", "resume", "evaluate", "close"]
+            ["agent", "resume", "activate", "evaluate", "close"]
         );
         assert_eq!(
             config.concurrency, 4,
@@ -1379,6 +1385,7 @@ fn cohort_release_receipts_are_bounded_public_target_evidence() {
         "collector_attached",
         "collector_released",
         "resume_sent",
+        "collector_activated",
         "resume_acknowledged",
     ] {
         write_cohort_release_receipt(&measurements, &target_sha256, stage).unwrap();

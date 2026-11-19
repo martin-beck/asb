@@ -585,19 +585,19 @@ class ManagedDockerWorkspace:
     def execute(self, argv, environment=None, timeout=900, output_limit=256 * 1024, before_resume=None,
                 on_output=None, cancelled=None, gate="shell", preparation_timeout=None,
                 workload_owner=None, on_execution_end=None, transport_factory=None, on_preparation_failure=None,
-                on_release_accepted=None):
+                on_release_accepted=None, on_activation_accepted=None):
         if self.container is None:
             raise ExecutionError("workspace is not running")
         if not self.active.acquire(blocking=False):
             raise ExecutionError("one command is already running in this task workspace")
         try:
             return self._execute(argv, environment or {}, timeout, output_limit, before_resume, on_output, cancelled, gate, preparation_timeout,
-                                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted)
+                                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted, on_activation_accepted)
         finally:
             self.active.release()
 
     def _execute(self, argv, environment, timeout, output_limit, before_resume, on_output, cancelled, gate, preparation_timeout,
-                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted):
+                 workload_owner, on_execution_end, transport_factory, on_preparation_failure, on_release_accepted, on_activation_accepted):
         if (not isinstance(argv, list) or not argv or len(argv) > 10000
                 or any(not isinstance(value, str) or "\x00" in value for value in argv)
                 or not isinstance(environment, dict)
@@ -799,8 +799,6 @@ class ManagedDockerWorkspace:
                 for resume_attempt in range(9):
                     try:
                         release_gate(api, container, release_path)
-                        if gate == "application":
-                            resume_application_gate(api, container, namespace_pid, resume_aborted)
                         resume_error = None
                         break
                     except Exception:
@@ -821,6 +819,15 @@ class ManagedDockerWorkspace:
                     # The controller notification is still part of the gate
                     # release: no agent output can be admitted until it has
                     # accepted this target identity.
+                    if isinstance(error, ExecutionError):
+                        error.asb_preparation_phase = "gate-release"
+                    raise
+            if gate == "application":
+                resume_application_gate(api, container, namespace_pid, resume_aborted)
+            if on_activation_accepted is not None:
+                try:
+                    on_activation_accepted(target)
+                except BaseException as error:
                     if isinstance(error, ExecutionError):
                         error.asb_preparation_phase = "gate-release"
                     raise

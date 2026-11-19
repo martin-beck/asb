@@ -1525,6 +1525,9 @@ impl Session {
                     }
                 }
                 Some(EventKind::ReleaseAccepted) => {
+                    self.activate_measured_target(context, &event, deadline)?;
+                }
+                Some(EventKind::ActivationAccepted) => {
                     self.verify_effective_resume(context, &event)?;
                     // Start the selected execution allowance only after the
                     // workload has durably accepted the shared release.
@@ -1757,6 +1760,36 @@ impl Session {
         )
     }
 
+    fn activate_measured_target(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        event: &Value,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let expected = self
+            .resume_exec_id
+            .as_ref()
+            .ok_or("isolated execution accepted collector activation without a pending target")?;
+        if event["exec_id"] != *expected {
+            return Err(
+                "isolated execution accepted collector activation for a different target".into(),
+            );
+        }
+        if let Some(session) = context.measurements.as_deref_mut() {
+            let target = self
+                .resume_target
+                .as_ref()
+                .ok_or("isolated execution lost its verified target before collector activation")?;
+            session.activate_isolated_collectors(target.pid, target.start_time_ticks)?;
+            if let Some(target_sha256) = self.resume_target_sha256.as_ref() {
+                write_cohort_release_receipt(session, target_sha256, "collector_activated")?;
+            }
+        }
+        self.controller
+            .send(&Request::Activate { exec_id: expected }.value()?, deadline)?;
+        Ok(())
+    }
+
     fn verify_effective_resume_with(
         &mut self,
         context: &mut ExecutionContext<'_>,
@@ -1788,16 +1821,9 @@ impl Session {
                 }
             }
         }
-        // The controller request alone does not prove that the stopped target
-        // has run. Its workload-owned acknowledgement and host identity check
-        // above are the execution-release boundary for snapshots, lifecycle
-        // timing, kernel-pressure capture and tracing collectors.
+        // The activation acknowledgement proves the workload released the
+        // inner application gate after host collectors were armed.
         if let Some(session) = context.measurements.as_deref_mut() {
-            let target = self
-                .resume_target
-                .as_ref()
-                .ok_or("isolated execution lost its verified target before collector activation")?;
-            session.activate_isolated_collectors(target.pid, target.start_time_ticks)?;
             use crate::collectors::LifecycleEvent as Event;
             session.event(Event::AgentExecuteBegin)?;
             self.measurement_active = true;

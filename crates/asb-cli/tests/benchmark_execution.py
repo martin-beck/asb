@@ -789,7 +789,7 @@ class ExecutionTests(unittest.TestCase):
                 api.put_archive = accepted_without_target_resume
                 api.control_status, api.control_output = status, output
                 with patch.object(RUNTIME.time, "sleep"):
-                    with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "execution gate could not be resumed"):
+                    with workspace, self.assertRaisesRegex(RUNTIME.ExecutionError, "application gate could not be resumed"):
                         workspace.execute(["/opt/asb-runtime/asb", "__asb-agent"], gate="application")
                 self.assertIn("kill", container.events)
 
