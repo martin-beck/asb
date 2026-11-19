@@ -413,6 +413,10 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             Request::Resume { exec_id: &resume },
             json!({"op":"resume","exec_id":"owned-exec"}),
         ),
+        (
+            Request::Activate { exec_id: &resume },
+            json!({"op":"activate","exec_id":"owned-exec"}),
+        ),
     ] {
         assert_eq!(request.value().unwrap(), expected);
     }
@@ -458,6 +462,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
         "ready",
         "paused",
         "release_accepted",
+        "activation_accepted",
         "output",
         "execution_ended",
         "completed",
@@ -475,6 +480,7 @@ fn rust_request_and_python_producer_event_spellings_match_the_original_wire() {
             "execute",
             "agent",
             "resume",
+            "activate",
             "capture",
             "evaluate",
             "close",

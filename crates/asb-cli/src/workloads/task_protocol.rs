@@ -24,6 +24,8 @@ pub(super) enum EventKind {
     Paused,
     #[serde(rename = "release_accepted")]
     ReleaseAccepted,
+    #[serde(rename = "activation_accepted")]
+    ActivationAccepted,
     PreparationFailed,
     Output,
     ExecutionEnded,
@@ -52,6 +54,9 @@ pub(super) enum Request<'a> {
         payload: Box<AgentRequest<'a>>,
     },
     Resume {
+        exec_id: &'a Value,
+    },
+    Activate {
         exec_id: &'a Value,
     },
     Evaluate {
