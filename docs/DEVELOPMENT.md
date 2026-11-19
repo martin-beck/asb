@@ -1,10 +1,12 @@
 # Development
 
-Comparison reports place each run's flamegraph in Charts, with its collector
-status, original SVG links, and the same result filters as the table. Each SVG
-runs in a separate sandboxed frame so its controls and element IDs do not
-interfere with other graphs. The frame scrolls deep graphs in both normal and
-enlarged views. The opt-in `generate_flamegraph_browser_fixture` test takes
+Comparison reports place a single representative flamegraph (replica 1) for
+each concurrent run in Charts, with its collector status, original SVG links,
+and the same result filters as the table. The selected SVG is embedded as a
+data image in a separate sandboxed frame, so the report renders independently
+of its artifact directory and its controls and element IDs do not interfere
+with other graphs. The frame scrolls deep graphs in both normal and enlarged
+views. The opt-in `generate_flamegraph_browser_fixture` test takes
 `ASB_TEST_FLAMEGRAPH` and retains a two-run report under the project target
 directory for browser validation.
 
@@ -24,11 +26,12 @@ binary with post-processing changes remains compatible with `asb sweep
 --continue`.
 
 Every generated comparison report groups related dotted metric charts in closed
-subgroups when a prefix has at least two graphs. Each chart retains a closed
-measurement description, and component-timing groups include the recorded
+subgroups when a prefix has at least two graphs. The outer collector root is
+not repeated as an inner subgroup. Each chart retains a closed measurement
+description below its graph, and component-timing groups include the recorded
 agent-flow and collector-boundary diagram. Presentation removes separator
-escaping from component timing titles only; metric identities and filenames
-remain lossless and unchanged.
+escaping from every graph title while retaining unique visible literal-separator
+labels; metric identities and filenames remain lossless and unchanged.
 
 The opt-in [installed-agent snapshot qualification](../crates/asb-cli/tests/fixtures/snapshot_agents/README.md)
 uses a local model fixture to record one official SWE-bench task and replay it

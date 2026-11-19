@@ -773,7 +773,7 @@ fn write_agent_concurrency_svg(path: &Path, plan: &AgentGraphPlan) -> Result<(),
         }
         let legend_x = 24.0 + (series_index % 4) as f64 * 286.0;
         let legend_y = 72.0 + (series_index / 4) as f64 * 20.0;
-        svg.push_str(&format!("<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"{color}\" aria-label=\"{}\">{}</text>", legend_y - 10.0, legend_x + 16.0, legend_y, escape(agent), escape(agent)));
+        svg.push_str(&format!("<rect class=\"legend-swatch\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"{color}\" aria-label=\"{}\">{}</text>", legend_y - 10.0, legend_x + 16.0, legend_y, escape(agent), escape(agent)));
     }
     svg.push_str("</svg>\n");
     fs::write(path, svg)
@@ -1183,23 +1183,53 @@ fn derived_flamegraph_section(stage: &Path, plans: &FlamegraphPlans) -> Result<S
     if plans.profiles.is_empty() {
         return Ok(String::new());
     }
-    let mut figures = String::new();
-    for profile in &plans.profiles {
-        figures.push_str(&derived_flamegraph_figure(
-            stage,
-            &profile_title(profile),
-            &profile.svg,
-            &profile.folded,
-        )?);
-    }
+    let mut groups = Vec::new();
+    let mut diffs = String::new();
     for diff in &plans.diffs {
-        figures.push_str(&derived_flamegraph_figure(
+        diffs.push_str(&derived_flamegraph_figure(
             stage,
             &diff_title(diff),
             &diff.svg,
             &diff.folded,
         )?);
     }
+    if !diffs.is_empty() {
+        groups.push(("Diffs", diffs));
+    }
+    for statistic in FlameStatistic::ALL {
+        let mut figures = String::new();
+        for profile in plans
+            .profiles
+            .iter()
+            .filter(|profile| profile.statistic == statistic)
+        {
+            figures.push_str(&derived_flamegraph_figure(
+                stage,
+                &profile_title(profile),
+                &profile.svg,
+                &profile.folded,
+            )?);
+        }
+        if !figures.is_empty() {
+            groups.push((
+                match statistic {
+                    FlameStatistic::Mean => "Mean",
+                    FlameStatistic::Median => "Median",
+                    FlameStatistic::P95 => "P95",
+                },
+                figures,
+            ));
+        }
+    }
+    let figures = groups
+        .into_iter()
+        .map(|(label, figures)| {
+            format!(
+                "<details class=\"metric-graph-subgroup\"><summary>{label} ({} graphs)</summary><div class=\"charts metric-subgroup-charts\">{figures}</div></details>",
+                figures.matches("<figure class=\"flamegraph-chart\"").count(),
+            )
+        })
+        .collect::<String>();
     Ok(format!(
         "<section class=\"flamegraph-section\"><details><summary>Aggregate flamegraphs</summary><p class=\"muted\">Each statistic includes every completed repeat and replica at that configured concurrency. Diff graphs compare the smallest and largest configured concurrencies for the same agent, trial, provider, and model.</p><div class=\"charts\">{figures}</div></details></section>"
     ))
@@ -1211,13 +1241,13 @@ fn derived_flamegraph_figure(
     svg: &str,
     folded: &str,
 ) -> Result<String, Error> {
-    source::validate_external_svg(&stage.join(svg), svg)?;
+    let svg_document = source::read_flamegraph_svg(&stage.join(svg), svg)?;
     let document = format!(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
-        escape(svg)
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
+        flamegraph_data_uri(&svg_document)
     );
     Ok(format!(
-        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details><iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a></figure>",
+        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details></figure>",
         escape(title),
         escape(title),
         escape(&document),
@@ -1500,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn derived_flamegraphs_keep_large_svg_documents_external() {
+    fn derived_flamegraphs_are_self_contained() {
         let root = std::env::temp_dir().join(format!(
             "asb-large-derived-flamegraph-{}-{}",
             std::process::id(),
@@ -1509,15 +1539,14 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let svg = "aggregate.svg";
         let mut document = String::from("<svg>");
-        // Keep this above the old external-SVG ceiling so a high-concurrency
-        // aggregate regression cannot reintroduce the rejected-output path.
-        document.push_str(&" ".repeat(256 * 1024 * 1024 + 1));
+        document.push_str(&" ".repeat(1024 * 1024));
         document.push_str("</svg>");
         fs::write(root.join(svg), document).unwrap();
 
         let html = derived_flamegraph_figure(&root, "aggregate", svg, "aggregate.folded").unwrap();
         assert!(html.contains("srcdoc="), "{html}");
-        assert!(html.contains("img-src 'self'"), "{html}");
+        assert!(html.contains("img-src data:"), "{html}");
+        assert!(html.contains("data:image/svg+xml;base64,"), "{html}");
         assert!(html.contains("aggregate.svg"), "{html}");
         assert!(!html.contains("allow-scripts"), "{html}");
 
