@@ -1011,10 +1011,12 @@ mod tests {
             false,
         );
         until(|| reached.load(Ordering::Acquire));
-        let polled = producer
-            .poll()
-            .unwrap()
-            .expect("failed capture must settle");
+        let mut polled = None;
+        until(|| {
+            polled = producer.poll().unwrap();
+            polled.is_some()
+        });
+        let polled = polled.expect("failed capture must settle");
         assert!(!polled.capture_complete);
         let started = Instant::now();
         let completion = producer.stop_before_with_owner(
