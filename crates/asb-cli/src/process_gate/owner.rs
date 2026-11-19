@@ -207,9 +207,11 @@ impl Owner {
             }
             if let Some(status) = child.try_wait()? {
                 if let Some(control) = control.as_mut() {
-                    // Optional observation cannot replace an observed wait
-                    // status or independently valid base cleanup evidence.
-                    let _ = control.exited(status);
+                    control.exited(status).map_err(|error| {
+                        io::Error::other(format!(
+                            "cannot deliver final controlled principal exit: {error}"
+                        ))
+                    })?;
                 }
                 return Ok(status);
             }
@@ -317,7 +319,11 @@ impl Owner {
             };
             if let Some(status) = next {
                 if let Some(control) = control.as_mut() {
-                    let _ = control.exited(status);
+                    control.exited(status).map_err(|error| {
+                        io::Error::other(format!(
+                            "cannot deliver final controlled principal exit: {error}"
+                        ))
+                    })?;
                 }
                 return Ok(status);
             }

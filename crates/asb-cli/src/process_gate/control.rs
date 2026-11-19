@@ -17,6 +17,12 @@ const INTERRUPT: u8 = 2;
 const ACK: u8 = 3;
 const EXITED: u8 = 4;
 const PRINCIPAL: u8 = 5;
+const CONTROL_WRITE_DEADLINE: Duration = Duration::from_millis(100);
+// The final exit status is required to interpret a controlled collector's
+// completed raw capture. Dense cohorts can delay the parent long enough to
+// exceed the short request/ack write budget, so give this one final frame a
+// separate bounded delivery window before the guardian exits.
+const EXITED_WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 std::thread_local! { static INTERRUPT_NEXT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -296,7 +302,7 @@ impl ChildControl {
         write_frame(
             &mut self.socket,
             &bytes,
-            Instant::now() + Duration::from_millis(100),
+            Instant::now() + CONTROL_WRITE_DEADLINE,
         )
     }
     pub fn ready(&mut self) -> io::Result<()> {
@@ -319,7 +325,11 @@ impl ChildControl {
         } else {
             return Err(invalid());
         };
-        self.send(frame(EXITED, detail, value))
+        write_frame(
+            &mut self.socket,
+            &frame(EXITED, detail, value),
+            Instant::now() + EXITED_WRITE_DEADLINE,
+        )
     }
     pub fn take_interrupt(&mut self) -> io::Result<bool> {
         let mut buffer = [0; FRAME + 1];
@@ -428,6 +438,38 @@ mod tests {
             );
             drop(held_writer);
         }
+    }
+    #[test]
+    fn final_exit_frame_waits_past_standard_control_deadline_for_backpressure() {
+        let (mut reader, socket) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut child = ChildControl {
+            socket,
+            request: Vec::new(),
+            requested: false,
+        };
+        let filler = [0_u8; 4096];
+        loop {
+            match child.socket.write(&filler) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("cannot fill control socket: {error}"),
+            }
+        }
+        let (release, wait_for_release) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let mut buffer = [0_u8; 8192];
+            assert!(reader.read(&mut buffer).unwrap() > 0);
+            wait_for_release.recv().unwrap();
+        });
+        let started = Instant::now();
+        child
+            .exited(ExitStatus::from_raw(0))
+            .expect("final exit status must survive temporary backpressure");
+        assert!(started.elapsed() >= CONTROL_WRITE_DEADLINE);
+        release.send(()).unwrap();
+        drain.join().unwrap();
     }
     #[test]
     fn capability_ack_and_exit_are_distinct_bounded_ordered_facts() {
