@@ -127,12 +127,13 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
         if response.get("op") != Operation.RESUME or response.get("exec_id") != target["exec_id"]:
             raise ExecutionError("execution was cancelled before collector attachment completed")
 
-    def release_accepted(target):
+    def release_accepted(target, preparation_budget=None):
         exec_id = target.get("exec_id") if isinstance(target, dict) else None
         if not isinstance(exec_id, str) or not exec_id:
             raise ExecutionError("execution release was accepted without a valid target identity")
         emit(Event.RELEASE_ACCEPTED, exec_id=exec_id)
-        response = receive(timeout=ATTACHMENT_TIMEOUT)
+        response = receive(timeout=preparation_budget.remaining() if preparation_budget else ATTACHMENT_TIMEOUT,
+                           cap_idle=preparation_budget is None)
         if response.get("op") != Operation.ACTIVATE or response.get("exec_id") != exec_id:
             raise ExecutionError("execution was cancelled before collector activation completed")
 
@@ -176,7 +177,7 @@ def serve(task, source, destination, idle_timeout=DEFAULT_IDLE_TIMEOUT):
                             result = execute_agent(task, request, lambda target: attach(target,budget), output, peer_closed,
                                 on_ended=lambda result: emit(Event.EXECUTION_ENDED, elapsed_seconds=result["elapsed_seconds"], exit_code=result["exit_code"]),
                                 preparation_budget=budget, on_preparation_failure=lambda: emit(Event.PREPARATION_FAILED),
-                                on_release_accepted=release_accepted,
+                                on_release_accepted=lambda target: release_accepted(target,budget),
                                 on_activation_accepted=activation_accepted)
                         else:
                             result = task.workspace.execute(
