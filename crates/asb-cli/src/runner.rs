@@ -990,7 +990,7 @@ fn run_dispatched(
     if admission.is_some() && !options.json {
         emit_warning(warnings, output, "CPU allocations coordinate ASB campaigns using the same user cache; they do not reserve CPUs from the operating system. Independently created Docker containers may run outside the allocation and cannot be verified by ASB.".into())?;
         if config.runtime.perf_record_scope == crate::runtime::settings::PerfRecordScope::CpuWide {
-            emit_warning(warnings, output, "CPU-wide perf samples may include unrelated host, kernel and collector activity; perf stat remains scoped to the agent process tree.".into())?;
+            emit_warning(warnings, output, "CPU-wide perf samples and interval counters may include unrelated host, kernel and collector activity.".into())?;
         }
     }
     // Parallel sweep configurations can share project-local tool paths.

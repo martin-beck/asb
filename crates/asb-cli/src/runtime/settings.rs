@@ -12,7 +12,7 @@ pub struct CpuPoolSettings {
     pub num_cpus_per_instance: usize,
 }
 
-/// How perf records samples. Perf stat remains process-tree scoped.
+/// How perf records samples and interval counters.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PerfRecordScope {

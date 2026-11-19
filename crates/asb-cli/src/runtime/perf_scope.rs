@@ -23,9 +23,9 @@ pub fn process_tree_record_args(pid: u32) -> Vec<String> {
 /// Build CPU-wide recording arguments for one assigned logical CPU group.
 ///
 /// This samples every task and kernel activity on those CPUs, including
-/// unrelated host work and collectors. It does not reserve CPUs or change the
-/// separate process-tree perf-stat scope. Callers must enforce and verify
-/// allocation for every relevant process and container before using it.
+/// unrelated host work and collectors. It does not reserve CPUs. Callers must
+/// enforce and verify allocation for every relevant process and container
+/// before using it.
 pub fn cpu_wide_record_args(cpus: &[u32]) -> Result<Vec<String>, String> {
     super::affinity::AffinityMask::new(cpus)?;
     let list = cpus
@@ -39,6 +39,33 @@ pub fn cpu_wide_record_args(cpus: &[u32]) -> Result<Vec<String>, String> {
         .chain([list, "--num-thread-synthesize".into(), "4".into()])
         .chain(["--proc-map-timeout".into(), "3000".into()])
         .collect())
+}
+
+/// Build CPU-wide interval counter arguments for one assigned logical CPU
+/// group. The selected CPU list is the same one used by CPU-wide recording.
+pub fn cpu_wide_stat_args(
+    cpus: &[u32],
+    interval_ms: u64,
+    events: &str,
+) -> Result<Vec<String>, String> {
+    super::affinity::AffinityMask::new(cpus)?;
+    let list = cpus
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(vec![
+        "stat".into(),
+        "--no-scale".into(),
+        "-I".into(),
+        interval_ms.to_string(),
+        "-x,".into(),
+        "-e".into(),
+        events.into(),
+        "-a".into(),
+        "-C".into(),
+        list,
+    ])
 }
 
 #[cfg(test)]
@@ -66,6 +93,22 @@ mod tests {
         );
         assert!(cpu_wide_record_args(&[]).is_err());
         assert!(cpu_wide_record_args(&[1, 1]).is_err());
+        assert_eq!(
+            cpu_wide_stat_args(&[1, 3, 4], 1000, "task-clock").unwrap(),
+            [
+                "stat",
+                "--no-scale",
+                "-I",
+                "1000",
+                "-x,",
+                "-e",
+                "task-clock",
+                "-a",
+                "-C",
+                "1,3,4"
+            ]
+        );
+        assert!(cpu_wide_stat_args(&[], 1000, "task-clock").is_err());
         assert_eq!(
             process_tree_record_args(42),
             [

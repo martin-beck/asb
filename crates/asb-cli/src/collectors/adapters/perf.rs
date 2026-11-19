@@ -27,11 +27,7 @@ fn record_args(pid: u32) -> Vec<String> {
 /// Build the process-scoped interval counter arguments with the same
 /// inheritance contract as call-stack recording.
 fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<String> {
-    let mut events = "task-clock,context-switches,cpu-migrations,page-faults".to_owned();
-    if !hardware_events.is_empty() {
-        events.push(',');
-        events.push_str(&hardware_events.join(","));
-    }
+    let events = stat_events(hardware_events);
     vec![
         "stat".into(),
         "--no-scale".into(),
@@ -47,6 +43,63 @@ fn stat_args(pid: u32, interval_ms: u64, hardware_events: &[String]) -> Vec<Stri
         "-p".into(),
         pid.to_string(),
     ]
+}
+
+fn stat_events(hardware_events: &[String]) -> String {
+    let mut events = "task-clock,context-switches,cpu-migrations,page-faults".to_owned();
+    if !hardware_events.is_empty() {
+        events.push(',');
+        events.push_str(&hardware_events.join(","));
+    }
+    events
+}
+
+fn selected_stat_args(
+    pid: u32,
+    cpu_wide: Option<&[u32]>,
+    interval_ms: u64,
+    hardware_events: &[String],
+) -> Result<Vec<String>, String> {
+    match cpu_wide {
+        Some(cpus) => crate::runtime::perf_scope::cpu_wide_stat_args(
+            cpus,
+            interval_ms,
+            &stat_events(hardware_events),
+        ),
+        None => Ok(stat_args(pid, interval_ms, hardware_events)),
+    }
+}
+
+fn perf_stat_plan(
+    root: Option<crate::measurements::ProcessIdentity>,
+    guardian: Option<crate::measurements::ProcessIdentity>,
+    hardware_events: &[String],
+    cpu_wide: Option<&[u32]>,
+) -> serde_json::Value {
+    match cpu_wide {
+        Some(cpus) => serde_json::json!({
+            "schema_version": 1, "scope": "cpu-wide", "counter_mode": "unscaled-observed",
+            "logical_cpus": cpus, "groups": hardware_events,
+            "excluded_controller_pid": std::process::id(), "excluded_guardian": guardian,
+            "inherit": false, "system_wide": true,
+        }),
+        None => serde_json::json!({
+            "schema_version": 1, "scope": "agent-process-tree", "counter_mode": "unscaled-observed",
+            "root": root, "groups": hardware_events,
+            "excluded_controller_pid": std::process::id(), "excluded_guardian": guardian,
+            "inherit": true, "system_wide": false,
+        }),
+    }
+}
+
+fn perf_scope_receipt(cpus: &[u32]) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "scope": "cpu-wide",
+        "logical_cpus": cpus,
+        "perf_stat_scope": "cpu-wide",
+        "warning": "CPU-wide samples and counters can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
+    })
 }
 
 pub(super) struct PerfCollector;
@@ -141,8 +194,8 @@ pub(super) fn usable_symfs(cache: Option<&std::path::Path>) -> Option<(std::path
 impl CollectorAdapter for PerfCollector {
     fn report_command(&self) -> ReportCommand {
         ReportCommand {
-            invocation: "perf stat --no-scale -I <interval-ms> -x, -e <events> --inherit -p <agent-root-pid>; perf record --inherit -p <agent-root-pid>",
-            scope: "verified agent process tree",
+            invocation: "perf stat/record scoped to the verified agent process tree, or with explicit CPU-wide mode to the verified replica CPU allocation",
+            scope: "verified agent process tree or verified replica CPU allocation",
         }
     }
     fn private_service_entry(&self, args: &[std::ffi::OsString]) -> Option<std::process::ExitCode> {
@@ -199,7 +252,7 @@ impl CollectorAdapter for PerfCollector {
             "perf-record-scope.json" => Some(ArtifactDisplay::Status {
                 class: "perf-record-scope",
                 label: "Perf recording scope",
-                suffix: "CPU-wide samples can include unrelated host, kernel and collector activity; perf stat remains agent-process-tree scoped. CPU leases do not reserve CPUs from other host activity.",
+                suffix: "CPU-wide samples and counters can include unrelated host, kernel and collector activity. CPU leases do not reserve CPUs from other host activity.",
             }),
             _ => None,
         }
@@ -862,13 +915,7 @@ impl measurements::Session {
         if let Some(cpus) = cpu_wide {
             measurements::write_json(
                 &self.dir.join("perf-record-scope.json"),
-                &serde_json::json!({
-                    "schema_version": 1,
-                    "scope": "cpu-wide",
-                    "logical_cpus": cpus,
-                    "perf_stat_scope": "agent-process-tree",
-                    "warning": "CPU-wide samples can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
-                }),
+                &perf_scope_receipt(&cpus),
             )?;
         }
         let stat_stdout_path = self.dir.join("perf-stat.stdout");
@@ -881,14 +928,19 @@ impl measurements::Session {
             .unwrap_or_else(|| super::agentsysperf::telemetry_events(self));
         measurements::write_json(
             &self.dir.join("perf-stat-plan.json"),
-            &serde_json::json!({
-                "schema_version":1, "scope":"agent-process-tree", "counter_mode":"unscaled-observed",
-                "root":self.measurement_target(), "groups":hardware_events,
-                "excluded_controller_pid":std::process::id(), "excluded_guardian":self.measurement_guardian(),
-                "inherit":true, "system_wide":false,
-            }),
+            &perf_stat_plan(
+                self.measurement_target(),
+                self.measurement_guardian(),
+                &hardware_events,
+                cpu_wide.as_deref(),
+            ),
         )?;
-        let stat_args = stat_args(pid, measurement_interval_ms(), &hardware_events);
+        let stat_args = selected_stat_args(
+            pid,
+            cpu_wide.as_deref(),
+            measurement_interval_ms(),
+            &hardware_events,
+        )?;
         let (mut command, route) = self.collector_command("perf")?;
         command.args(&stat_args);
         #[cfg(target_os = "linux")]
@@ -979,12 +1031,12 @@ impl measurements::Session {
             .unwrap_or_else(|| super::agentsysperf::telemetry_events(self));
         measurements::write_json(
             &self.dir.join("perf-stat-plan.json"),
-            &serde_json::json!({
-                "schema_version":1, "scope":"agent-process-tree", "counter_mode":"unscaled-observed",
-                "root":self.measurement_target(), "groups":hardware_events,
-                "excluded_controller_pid":std::process::id(), "excluded_guardian":self.measurement_guardian(),
-                "inherit":true, "system_wide":false,
-            }),
+            &perf_stat_plan(
+                self.measurement_target(),
+                self.measurement_guardian(),
+                &hardware_events,
+                cpu_wide.as_deref(),
+            ),
         )?;
         let captures = [
             crate::evidence::Capture::create(&self.dir.join("perf-stat.stdout"))?,
@@ -992,7 +1044,12 @@ impl measurements::Session {
         ];
         let (mut command, route) = self.collector_command("perf")?;
         command
-            .args(stat_args(pid, measurement_interval_ms(), &hardware_events))
+            .args(selected_stat_args(
+                pid,
+                cpu_wide.as_deref(),
+                measurement_interval_ms(),
+                &hardware_events,
+            )?)
             .args(["-D", "-1", "--control", &stat_ready.argument()]);
         let stat = match Collector::spawn("perf-stat", &ADAPTER, command, route, captures) {
             Ok(collector) => collector,
@@ -1064,13 +1121,7 @@ impl measurements::Session {
         if let Some(cpus) = staged.cpu_wide {
             measurements::write_json(
                 &self.dir.join("perf-record-scope.json"),
-                &serde_json::json!({
-                    "schema_version": 1,
-                    "scope": "cpu-wide",
-                    "logical_cpus": cpus,
-                    "perf_stat_scope": "agent-process-tree",
-                    "warning": "CPU-wide samples can include unrelated host, kernel and collector activity; cooperative leases do not reserve CPUs from the operating system."
-                }),
+                &perf_scope_receipt(&cpus),
             )?;
         }
         self.collectors.push(staged.record);
@@ -1417,6 +1468,24 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-a"));
         assert!(!args.iter().any(|arg| arg == "-p"));
         assert!(super::selected_record_args(42, Some(&[])).is_err());
+    }
+
+    #[test]
+    fn selected_stat_scope_switches_with_cpu_wide_recording() {
+        let hardware_events = vec!["cycles".to_owned()];
+        let process_tree = super::selected_stat_args(42, None, 1000, &hardware_events).unwrap();
+        assert!(process_tree.windows(2).any(|pair| pair == ["-p", "42"]));
+        assert!(process_tree.iter().any(|arg| arg == "--inherit"));
+        let cpu_wide =
+            super::selected_stat_args(42, Some(&[3, 5]), 1000, &hardware_events).unwrap();
+        assert!(cpu_wide.windows(2).any(|pair| pair == ["-C", "3,5"]));
+        assert!(cpu_wide.iter().any(|arg| arg == "-a"));
+        assert!(!cpu_wide.iter().any(|arg| arg == "-p" || arg == "--inherit"));
+        let plan = super::perf_stat_plan(None, None, &hardware_events, Some(&[3, 5]));
+        assert_eq!(plan["scope"], "cpu-wide");
+        assert_eq!(plan["logical_cpus"], serde_json::json!([3, 5]));
+        assert_eq!(plan["system_wide"], true);
+        assert_eq!(plan["inherit"], false);
     }
 
     #[test]
