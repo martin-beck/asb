@@ -4,6 +4,21 @@ use crate::Error;
 use std::io::Write;
 use std::path::Path;
 
+const MINIMUM_INSTANCE_SLOTS: usize = 4;
+
+/// Keep enough isolated tracefs instances for the host's normal benchmark
+/// parallelism. The floor preserves the former small-host behavior, while the
+/// ceiling follows ASB's globally validated concurrency limit.
+pub(crate) fn instance_slot_count() -> usize {
+    let available =
+        std::thread::available_parallelism().map_or(MINIMUM_INSTANCE_SLOTS, usize::from);
+    instance_slot_count_for(available)
+}
+
+fn instance_slot_count_for(available: usize) -> usize {
+    available.clamp(MINIMUM_INSTANCE_SLOTS, crate::benchmark::MAX_CONCURRENCY)
+}
+
 pub(crate) fn delegated_ready(path: &Path) -> bool {
     [
         "trace_marker",
@@ -101,7 +116,7 @@ pub(crate) fn instance_names(root: &Path) -> Result<Vec<String>, String> {
     for byte in root.as_os_str().as_encoded_bytes() {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
-    Ok((0..4)
+    Ok((0..instance_slot_count())
         .map(|slot| format!("asb-{hash:016x}-{slot}"))
         .collect())
 }
@@ -269,7 +284,7 @@ fn configure_at_with_consent(
             .collect());
     }
     let traverse = parent_metadata.mode() & 1 == 0;
-    writeln!(output, "Optional Perfetto setup creates or repairs four project-specific tracefs instances. Each concurrent capture leases its own instance. The following commands change only new instances or this user's existing instances, plus execute-only traversal of the instances parent if needed (not write/list permission). Existing foreign-owned instances will not be adopted:").map_err(crate::io_error)?;
+    writeln!(output, "Optional Perfetto setup creates or repairs {} project-specific tracefs instances for this host. Each concurrent capture leases its own instance. The following commands change only new instances or this user's existing instances, plus execute-only traversal of the instances parent if needed (not write/list permission). Existing foreign-owned instances will not be adopted:", names.len()).map_err(crate::io_error)?;
     if traverse {
         writeln!(output, "  sudo chmod o+x -- {}", parent.display()).map_err(crate::io_error)?;
     }
@@ -479,7 +494,7 @@ mod tests {
         let root = std::env::temp_dir();
         let names = instance_names(&root).unwrap();
         assert_eq!(names, instance_names(&root.join(".")).unwrap());
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), instance_slot_count());
         assert!(
             names
                 .iter()
@@ -488,6 +503,17 @@ mod tests {
         assert_ne!(
             names,
             instance_names(root.parent().unwrap_or(Path::new("/"))).unwrap()
+        );
+    }
+
+    #[test]
+    fn instance_capacity_has_a_small_host_floor_and_global_ceiling() {
+        assert_eq!(instance_slot_count_for(0), MINIMUM_INSTANCE_SLOTS);
+        assert_eq!(instance_slot_count_for(1), MINIMUM_INSTANCE_SLOTS);
+        assert_eq!(instance_slot_count_for(128), 128);
+        assert_eq!(
+            instance_slot_count_for(crate::benchmark::MAX_CONCURRENCY + 1),
+            crate::benchmark::MAX_CONCURRENCY
         );
     }
 
