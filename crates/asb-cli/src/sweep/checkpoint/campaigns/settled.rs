@@ -891,12 +891,23 @@ fn slot_roots(
     for (index, path) in start.binding.evidence.into_iter().enumerate() {
         roots.push(Root::path(format!("generation-{index}"), path));
     }
+    let isolated = crate::sweep::isolated_config(&entry.configuration, &layout.root);
+    let config = crate::runner::replica::configuration(&isolated, replica)?;
     let workspace = layout.root.join(&slot.workspace);
-    if !std::fs::symlink_metadata(&workspace).is_ok_and(|metadata| metadata.is_dir()) {
+    let workspace_artifacts_required = workspace_artifacts_required(
+        config.retention.compact_completed_attempts,
+        evidence.summary,
+    );
+    if workspace_artifacts_required
+        && !std::fs::symlink_metadata(&workspace).is_ok_and(|metadata| metadata.is_dir())
+    {
         return Err(resume_error("campaign workspace is missing or aliased"));
     }
     let runtime = crate::runner::replica::runtime_path(&workspace);
-    let mut outputs = BTreeSet::from([workspace, layout.root.join(&slot.log)]);
+    let mut outputs = BTreeSet::from([layout.root.join(&slot.log)]);
+    if workspace_artifacts_required {
+        outputs.insert(workspace);
+    }
     if std::fs::symlink_metadata(&runtime).is_ok() {
         outputs.insert(runtime);
     }
@@ -950,17 +961,19 @@ fn slot_roots(
                     "campaign allocation differs from original execution/selection/evidence",
                 ));
             }
-            let remembered = slot
-                .workspace
-                .join(".asb-attempts")
-                .join(format!("{}.json", allocation.reference.preparation_id));
-            let remembered: AttemptReference =
-                serde_json::from_value(layout.declaration(&remembered, METADATA)?)
-                    .map_err(|_| resume_error("malformed workspace allocation linkage"))?;
-            if remembered != allocation.reference {
-                return Err(resume_error(
-                    "campaign workspace lost its original allocation linkage",
-                ));
+            if workspace_artifacts_required {
+                let remembered = slot
+                    .workspace
+                    .join(".asb-attempts")
+                    .join(format!("{}.json", allocation.reference.preparation_id));
+                let remembered: AttemptReference =
+                    serde_json::from_value(layout.declaration(&remembered, METADATA)?)
+                        .map_err(|_| resume_error("malformed workspace allocation linkage"))?;
+                if remembered != allocation.reference {
+                    return Err(resume_error(
+                        "campaign workspace lost its original allocation linkage",
+                    ));
+                }
             }
             retained.push(RetainedValidation {
                 project_root,
@@ -1000,6 +1013,25 @@ fn slot_roots(
         roots.push(Root::path(format!("evidence-{index}"), path));
     }
     Ok(roots)
+}
+
+/// A successful compacted attempt intentionally removes only its private
+/// workspace before publishing immutable completion evidence. Campaign
+/// continuation accepts that receipt while retaining the stricter workspace
+/// requirement for failed or retained attempts.
+fn compacted_success(compact_enabled: bool, summary: &Value) -> bool {
+    compact_enabled
+        && summary["process_success"] == true
+        && summary["workload_success"] != false
+        && summary.get("failure_kind") == Some(&Value::Null)
+        && matches!(
+            summary["workload_resource_disposition"].as_str(),
+            Some("not-required" | "not-created" | "removed")
+        )
+}
+
+fn workspace_artifacts_required(compact_enabled: bool, summary: &Value) -> bool {
+    !compacted_success(compact_enabled, summary)
 }
 
 fn normalization_protocol_matches(
@@ -1069,5 +1101,29 @@ mod normalizer_tests {
         );
         compatibility.normalization_sha256 = None;
         assert!(normalization_protocol_matches(&compatibility, &base, None).unwrap());
+    }
+
+    #[test]
+    fn compacted_success_allows_missing_workspace_but_failures_do_not() {
+        let summary = serde_json::json!({
+            "process_success": true,
+            "workload_success": true,
+            "failure_kind": null,
+            "workload_resource_disposition": "removed"
+        });
+        assert!(compacted_success(true, &summary));
+        assert!(!workspace_artifacts_required(true, &summary));
+        assert!(!compacted_success(false, &summary));
+        assert!(workspace_artifacts_required(false, &summary));
+
+        let mut failed = summary.clone();
+        failed["failure_kind"] = serde_json::json!("collector_teardown");
+        assert!(!compacted_success(true, &failed));
+        assert!(workspace_artifacts_required(true, &failed));
+
+        let mut retained = summary;
+        retained["workload_resource_disposition"] = serde_json::json!("stopped-preserved");
+        assert!(!compacted_success(true, &retained));
+        assert!(workspace_artifacts_required(true, &retained));
     }
 }
