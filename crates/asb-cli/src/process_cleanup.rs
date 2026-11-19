@@ -15,7 +15,11 @@ fn poll_owned(child: &mut Child) -> std::io::Result<Option<std::process::ExitSta
 
 #[derive(Default)]
 struct State {
-    children: Vec<(Child, ReapPolicy)>,
+    children: Vec<(
+        Child,
+        ReapPolicy,
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+    )>,
     closed: bool,
 }
 
@@ -62,8 +66,13 @@ impl OwnedReaper {
                     // One nonblocking observation per owner in each round.
                     // A held/uncertain first child must not prevent independent
                     // siblings from receiving termination or actual reap work.
-                    children.retain_mut(|(child, policy)| match poll_owned(child) {
-                        Ok(Some(_)) => false, // Actual exit/reap confirmed.
+                    children.retain_mut(|(child, policy, receipt)| match poll_owned(child) {
+                        Ok(Some(_)) => {
+                            if let Some(receipt) = receipt {
+                                receipt.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            false // Actual exit/reap confirmed.
+                        }
                         Ok(None) => {
                             if matches!(policy, ReapPolicy::Terminate) {
                                 let _ = child.kill();
@@ -91,22 +100,38 @@ impl OwnedReaper {
     /// Transfer custody without creating another worker or waiting for exit.
     /// The worker starts reaping when this handoff owner is dropped.
     pub(crate) fn adopt(&self, child: Child) {
-        self.adopt_with_policy(child, ReapPolicy::Terminate);
+        self.adopt_with_policy(child, ReapPolicy::Terminate, None);
     }
 
     /// Keep a supervising gate alive until it confirms and finishes its own
     /// descendant teardown. Killing this child would abandon its custody.
     pub(crate) fn adopt_wait_only(&self, child: Child) {
-        self.adopt_with_policy(child, ReapPolicy::WaitOnly);
+        self.adopt_with_policy(child, ReapPolicy::WaitOnly, None);
     }
 
-    fn adopt_with_policy(&self, child: Child, policy: ReapPolicy) {
+    /// Transfer wait-only custody and expose a receipt which becomes true only
+    /// after the exact owned child has been reaped.
+    pub(crate) fn adopt_wait_only_with_receipt(
+        &self,
+        child: Child,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.adopt_with_policy(child, ReapPolicy::WaitOnly, Some(Arc::clone(&receipt)));
+        receipt
+    }
+
+    fn adopt_with_policy(
+        &self,
+        child: Child,
+        policy: ReapPolicy,
+        receipt: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) {
         self.state
             .0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .children
-            .push((child, policy));
+            .push((child, policy, receipt));
     }
 }
 
