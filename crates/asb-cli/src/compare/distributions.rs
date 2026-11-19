@@ -220,18 +220,12 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
         if measurements.is_empty() {
             html.push_str("<p>No numeric replica measurements available.</p>");
         }
-        if measurements
-            .keys()
-            .any(|(metric, _)| metric.starts_with("component."))
-        {
-            let agents = group
-                .iter()
-                .map(|row| row.agent.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            html.push_str(&component_timing_flow_html(&agents));
-        }
+        let agents = group
+            .iter()
+            .map(|row| row.agent.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut charts = Vec::new();
         for ((metric, series), mut values) in measurements {
             for (agent, total) in &totals {
@@ -252,7 +246,7 @@ pub(super) fn html(rows: &[BenchmarkData]) -> String {
             );
             charts.push((presentation, figure));
         }
-        html.push_str(&chart_subgroups_html(charts));
+        html.push_str(&collector_chart_entries_html(charts, &agents));
         html.push_str("</div></details></section>");
     }
     html
