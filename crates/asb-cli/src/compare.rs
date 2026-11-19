@@ -1222,9 +1222,7 @@ fn chart_description(title: &str, collector: &str) -> String {
             "Captured execution-host fact, shown for comparison rather than attributed as benchmark consumption."
                 .into()
         }
-        _ => format!(
-            "Observed `{metric}` reported by {collector}; unavailable observations are not zero-filled."
-        ),
+        _ => format!("Observed `{metric}` reported by {collector}."),
     }
 }
 
@@ -3317,6 +3315,11 @@ mod tests {
         let fallback = chart_presentation("<svg></svg>", "opaque-name.svg");
         assert_eq!(fallback.title, "opaque-name");
         assert_eq!(fallback.collector, "ASB derived metrics");
+        assert_eq!(
+            fallback.description,
+            "Observed `opaque-name` reported by ASB derived metrics."
+        );
+        assert!(!fallback.description.contains("not zero-filled"));
 
         let component = chart_presentation(
             "<svg><title>component.agent\\.execute.cpu_user_ms</title></svg>",
