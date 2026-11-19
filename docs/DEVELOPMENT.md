@@ -14,10 +14,14 @@ model/concurrency population. The population includes every completed repeat
 and replica, rather than one representative run. Its concurrency reports add
 three folded-stack diffs between the lowest and highest configured
 concurrencies. At concurrency one, all three derived profiles are exact copies
-of the recorded folded stacks and SVG. Comparison publishes these files only
-inside its replacement `comparison/` directory; it never changes campaign
-plans, checkpoints, outcomes, or collector evidence, so a rebuilt binary with
-post-processing changes remains compatible with `asb sweep --continue`.
+of the recorded folded stacks and SVG. Differential graphs use the pinned,
+project-local Brendan Gregg `difffolded.pl` and `flamegraph.pl` programs, so
+their widths, red/blue deltas, text colors, hover text, and search behavior
+follow the canonical FlameGraph implementation. Comparison publishes these
+files only inside its replacement `comparison/` directory; it never changes
+campaign plans, checkpoints, outcomes, or collector evidence, so a rebuilt
+binary with post-processing changes remains compatible with `asb sweep
+--continue`.
 
 Every generated comparison report groups related dotted metric charts in closed
 subgroups when a prefix has at least two graphs. Each chart retains a closed

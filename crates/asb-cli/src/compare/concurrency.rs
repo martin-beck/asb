@@ -1,6 +1,8 @@
 //! Derived report for comparing equivalent benchmark observations by replica concurrency.
 
 use super::*;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub(super) const REPORT_FILE: &str = "concurrency-report.html";
 pub(super) const AGENT_REPORT_FILE: &str = "agent-concurrency-report.html";
@@ -223,6 +225,50 @@ struct FlamegraphPlans {
     diffs: Vec<FlamegraphDiff>,
 }
 
+/// Exact, project-local Brendan Gregg FlameGraph programs. Aggregate diffs use
+/// their standard three-column `difffolded.pl` output so the SVG retains the
+/// canonical width, color, hover text, and search behavior.
+struct FlamegraphTools {
+    diff: PathBuf,
+    render: PathBuf,
+}
+
+impl FlamegraphTools {
+    fn for_request(request: &source::Request) -> Result<Self, Error> {
+        let output_root = request
+            .comparison_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&request.parent);
+        let mut missing = None;
+        for start in [&request.parent, output_root] {
+            let Ok((root, project)) = crate::project::load(start) else {
+                continue;
+            };
+            let bin = crate::project::resolve(&root, &project.tools_dir).join("flamegraph/bin");
+            let diff = bin.join("difffolded.pl");
+            let render = bin.join("flamegraph");
+            if crate::executables::is_executable(&diff)
+                && crate::executables::is_executable(&render)
+            {
+                return Ok(Self { diff, render });
+            }
+            missing = Some((diff, render));
+        }
+        if let Some((diff, render)) = missing {
+            return Err(Error::Input(format!(
+                "aggregate FlameGraph diffs require {} and {}; install or repair them with `asb tool install flamegraph`",
+                diff.display(),
+                render.display()
+            )));
+        }
+        Err(Error::Input(
+            "aggregate FlameGraph diffs require an initialized project with the project-local FlameGraph tools; run `asb tool install flamegraph` and retry"
+                .into(),
+        ))
+    }
+}
+
 /// Reserve the derived report and every graph before publication starts. This
 /// keeps the report generation atomic with the primary comparison report.
 pub(super) fn report_files(prepared: &PreparedReport) -> Vec<String> {
@@ -254,7 +300,10 @@ pub(super) fn render(stage: &Path, prepared: &PreparedReport) -> Result<(), Erro
     for plan in &plans {
         write_concurrency_svg(&stage.join(&plan.filename), plan)?;
     }
-    render_flamegraphs(stage, &flamegraphs)?;
+    let tools = (!flamegraphs.diffs.is_empty())
+        .then(|| FlamegraphTools::for_request(&prepared.data.request))
+        .transpose()?;
+    render_flamegraphs(stage, &flamegraphs, tools.as_ref())?;
 
     let mut by_group = BTreeMap::<GroupKey, Vec<&GraphPlan>>::new();
     for plan in &plans {
@@ -837,8 +886,11 @@ fn svg_source(row: &BenchmarkData) -> Option<PathBuf> {
         .map(|(_, path)| path.clone())
 }
 
-fn render_flamegraphs(stage: &Path, plans: &FlamegraphPlans) -> Result<(), Error> {
-    let mut rendered = BTreeMap::<String, BTreeMap<String, f64>>::new();
+fn render_flamegraphs(
+    stage: &Path,
+    plans: &FlamegraphPlans,
+    tools: Option<&FlamegraphTools>,
+) -> Result<(), Error> {
     for profile in &plans.profiles {
         let folded = aggregate_folded(&profile.inputs, profile.statistic)?;
         let folded_text = if profile.inputs.len() == 1 {
@@ -857,42 +909,90 @@ fn render_flamegraphs(stage: &Path, plans: &FlamegraphPlans) -> Result<(), Error
             } else {
                 fs::write(
                     stage.join(&profile.svg),
-                    folded_svg(&folded, &profile_title(profile), false),
+                    folded_svg(&folded, &profile_title(profile)),
                 )
                 .map_err(crate::io_error)?;
             }
         } else {
             fs::write(
                 stage.join(&profile.svg),
-                folded_svg(&folded, &profile_title(profile), false),
+                folded_svg(&folded, &profile_title(profile)),
             )
             .map_err(crate::io_error)?;
         }
-        rendered.insert(profile.folded.clone(), folded);
     }
     for diff in &plans.diffs {
-        let low = rendered
-            .get(&diff.low_folded)
-            .expect("planned low profile exists");
-        let high = rendered
-            .get(&diff.high_folded)
-            .expect("planned high profile exists");
-        let mut values = BTreeMap::new();
-        for stack in low.keys().chain(high.keys()).collect::<BTreeSet<_>>() {
-            let delta =
-                high.get(stack).copied().unwrap_or(0.0) - low.get(stack).copied().unwrap_or(0.0);
-            if delta != 0.0 {
-                values.insert(stack.clone(), delta);
-            }
-        }
-        fs::write(stage.join(&diff.folded), folded_text(&values)).map_err(crate::io_error)?;
-        fs::write(
-            stage.join(&diff.svg),
-            folded_svg(&values, &diff_title(diff), true),
-        )
-        .map_err(crate::io_error)?;
+        render_flamegraph_diff(
+            tools.expect("diff plans require resolved FlameGraph tools"),
+            stage,
+            diff,
+        )?;
     }
     Ok(())
+}
+
+fn render_flamegraph_diff(
+    tools: &FlamegraphTools,
+    stage: &Path,
+    diff: &FlamegraphDiff,
+) -> Result<(), Error> {
+    let folded = stage.join(&diff.folded);
+    run_flamegraph_command(
+        Command::new(&tools.diff)
+            .arg(stage.join(&diff.low_folded))
+            .arg(stage.join(&diff.high_folded))
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(&folded).map_err(|error| {
+                Error::Run(format!("cannot create {}: {error}", folded.display()))
+            })?)
+            .stderr(Stdio::null()),
+        "FlameGraph differential preparation",
+    )?;
+    run_flamegraph_command(
+        Command::new(&tools.render)
+            .arg("--title")
+            .arg(diff_title(diff))
+            .arg("--subtitle")
+            .arg("Red: higher concurrency; blue: lower concurrency")
+            .arg("--countname")
+            .arg("samples")
+            .arg(&folded)
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(stage.join(&diff.svg)).map_err(|error| {
+                Error::Run(format!(
+                    "cannot create {}: {error}",
+                    stage.join(&diff.svg).display()
+                ))
+            })?)
+            .stderr(Stdio::null()),
+        "FlameGraph differential rendering",
+    )?;
+    source::validate_external_svg(&stage.join(&diff.svg), &diff.svg)
+}
+
+fn run_flamegraph_command(command: &mut Command, label: &str) -> Result<(), Error> {
+    const TIMEOUT: Duration = Duration::from_secs(300);
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::Run(format!("cannot start {label}: {error}")))?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(Error::Run(format!("{label} failed with {status}")));
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::Run(format!(
+                    "{label} exceeded its five-minute limit"
+                )));
+            }
+            Err(error) => return Err(Error::Run(format!("cannot observe {label}: {error}"))),
+        }
+    }
 }
 
 fn aggregate_folded(
@@ -987,12 +1087,12 @@ fn diff_title(diff: &FlamegraphDiff) -> String {
     )
 }
 
-fn folded_svg(values: &BTreeMap<String, f64>, title: &str, diff: bool) -> String {
+fn folded_svg(values: &BTreeMap<String, f64>, title: &str) -> String {
     let tree = FlameTree::from_folded(values);
     let frame_height = 24.0;
     let height = 110.0 + tree.depth().max(1) as f64 * frame_height + 26.0;
     let mut svg = svg_header(1200.0, height, title);
-    svg.push_str(&format!("<text x=\"24\" y=\"34\" font-size=\"15\" font-weight=\"700\">{}</text><text x=\"24\" y=\"55\" font-size=\"11\">{}; frame widths are {} sample weight.</text>", escape(title), if diff { "Red grows at the higher concurrency; blue shrinks" } else { "Aggregate folded stacks" }, if diff { "absolute delta" } else { "aggregate" }));
+    svg.push_str(&format!("<text x=\"24\" y=\"34\" font-size=\"15\" font-weight=\"700\">{}</text><text x=\"24\" y=\"55\" font-size=\"11\">Aggregate folded stacks; frame widths are aggregate sample weight.</text>", escape(title)));
     let mut color_index = 0;
     render_flame_children(
         &mut svg,
@@ -1002,7 +1102,6 @@ fn folded_svg(values: &BTreeMap<String, f64>, title: &str, diff: bool) -> String
         0,
         height - 34.0,
         frame_height,
-        diff,
         &mut color_index,
     );
     svg.push_str(&format!("<text x=\"24\" y=\"{:.1}\" font-size=\"11\">Full stack weights are available in the adjacent folded-stack download.</text></svg>\n", height - 10.0));
@@ -1012,7 +1111,6 @@ fn folded_svg(values: &BTreeMap<String, f64>, title: &str, diff: bool) -> String
 #[derive(Default)]
 struct FlameTree {
     magnitude: f64,
-    signed: f64,
     children: BTreeMap<String, FlameTree>,
 }
 
@@ -1020,13 +1118,11 @@ impl FlameTree {
     fn from_folded(values: &BTreeMap<String, f64>) -> Self {
         let mut root = Self::default();
         for (stack, value) in values {
-            root.magnitude += value.abs();
-            root.signed += value;
+            root.magnitude += value;
             let mut node = &mut root;
             for frame in stack.split(';') {
                 node = node.children.entry(frame.into()).or_default();
-                node.magnitude += value.abs();
-                node.signed += value;
+                node.magnitude += value;
             }
         }
         root
@@ -1050,26 +1146,16 @@ fn render_flame_children(
     depth: usize,
     bottom: f64,
     frame_height: f64,
-    diff: bool,
     color_index: &mut usize,
 ) {
     let mut cursor = x;
     for (frame, child) in &node.children {
         let child_width = width * child.magnitude / node.magnitude.max(1.0);
         let y = bottom - (depth + 1) as f64 * frame_height;
-        let color = if diff {
-            if child.signed >= 0.0 {
-                "#d95f02"
-            } else {
-                "#4472c4"
-            }
-        } else {
-            let colors = ["#e77d5b", "#f6bd60", "#84a59d", "#f28482", "#90be6d"];
-            let selected = colors[*color_index % colors.len()];
-            *color_index += 1;
-            selected
-        };
-        svg.push_str(&format!("<g><rect x=\"{cursor:.2}\" y=\"{y:.2}\" width=\"{child_width:.2}\" height=\"{:.2}\" fill=\"{color}\" stroke=\"#fff\"><title>{}: {:.3}</title></rect>", frame_height - 1.0, escape(frame), child.signed));
+        let colors = ["#e77d5b", "#f6bd60", "#84a59d", "#f28482", "#90be6d"];
+        let color = colors[*color_index % colors.len()];
+        *color_index += 1;
+        svg.push_str(&format!("<g><rect x=\"{cursor:.2}\" y=\"{y:.2}\" width=\"{child_width:.2}\" height=\"{:.2}\" fill=\"{color}\" stroke=\"#fff\"><title>{}: {:.3}</title></rect>", frame_height - 1.0, escape(frame), child.magnitude));
         if child_width > 70.0 {
             svg.push_str(&format!(
                 "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"11\" fill=\"#18212b\">{}</text>",
@@ -1087,7 +1173,6 @@ fn render_flame_children(
             depth + 1,
             bottom,
             frame_height,
-            diff,
             color_index,
         );
         cursor += child_width;
@@ -1144,6 +1229,30 @@ fn derived_flamegraph_figure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    fn differential_tools(root: &Path) -> FlamegraphTools {
+        let bin = root.join("tools");
+        fs::create_dir_all(&bin).unwrap();
+        let diff = bin.join("difffolded.pl");
+        let render = bin.join("flamegraph");
+        fs::write(
+            &diff,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" \"$2\" > \"$0.args\"\nprintf 'root;growth 3 12\\nroot;shrink 12 3\\n'\n",
+        )
+        .unwrap();
+        fs::write(
+            &render,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf '%s\\n' '<svg xmlns=\"http://www.w3.org/2000/svg\"><text id=\"title\">Upstream Flame Graph</text><g id=\"frames\"><title>root;growth (12 samples, 75%; +56.25%)</title><rect fill=\"rgb(255,0,0)\"/></g></svg>'\n",
+        )
+        .unwrap();
+        for path in [&diff, &render] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        FlamegraphTools { diff, render }
+    }
 
     fn flame_row(
         agent: &str,
@@ -1244,6 +1353,7 @@ mod tests {
         assert!(agent_graph_plans(&[row("pi", 32, 10.0), row("opencode", 32, 20.0)]).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn aggregate_flamegraphs_preserve_evidence_for_rebuilt_sweep_continuation() {
         let root = std::env::temp_dir().join(format!(
@@ -1341,7 +1451,8 @@ mod tests {
             BTreeMap::from([("root;only".into(), 9.0), ("root;shared".into(), 7.0)])
         );
 
-        render_flamegraphs(&stage, &plans).unwrap();
+        let tools = differential_tools(&root);
+        render_flamegraphs(&stage, &plans, Some(&tools)).unwrap();
         for statistic in FlameStatistic::ALL {
             let c1 = plans
                 .profiles
@@ -1361,9 +1472,21 @@ mod tests {
         }
         for diff in &plans.diffs {
             let svg = fs::read_to_string(stage.join(&diff.svg)).unwrap();
-            assert!(svg.contains("Red grows at the higher concurrency"));
-            assert!(svg.contains("root"));
+            assert!(svg.contains("id=\"title\""));
+            assert!(svg.contains("id=\"frames\""));
+            assert!(svg.contains("rgb(255,0,0)"));
+            assert!(!svg.contains("Red grows at the higher concurrency"));
+            let folded = fs::read_to_string(stage.join(&diff.folded)).unwrap();
+            assert_eq!(folded, "root;growth 3 12\nroot;shrink 12 3\n");
         }
+        let args = fs::read_to_string(tools.render.with_extension("args")).unwrap();
+        assert!(args.contains("--title"));
+        assert!(args.contains("--subtitle"));
+        assert!(args.contains("Red: higher concurrency; blue: lower concurrency"));
+        assert!(args.contains("--countname"));
+        assert!(args.contains("samples"));
+        let diff_args = fs::read_to_string(format!("{}.args", tools.diff.display())).unwrap();
+        assert!(diff_args.contains("concurrency-flamegraph"));
         let after = rows
             .iter()
             .flat_map(|row| row.artifact_sources.values())
