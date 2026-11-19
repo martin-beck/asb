@@ -154,6 +154,74 @@ fn perf_record_allows_delayed_flush_without_accepting_incomplete_capture() {
 }
 
 #[test]
+fn dense_perf_stat_teardown_cancels_descendant_writers_after_principal_exit() {
+    // This models the Node26 replay failure: perf's principal handles SIGINT,
+    // writes its final valid CSV interval, and exits while a descendant still
+    // owns the stderr pipe. The session first requests stop for every
+    // collector, then settles them against one shared deadline.
+    const COHORT_SIZE: usize = 32;
+    let fixture = Fixture::new();
+    let policy = ADAPTER.producer_policy("perf-stat");
+    let script = "trap 'sleep 30 & printf \"1.0,42,,cycles,100,100.0,,\\n\" >&2; trap - INT; kill -INT $$' INT\nprintf 'READY\\n'\nwhile :; do sleep 1; done\n";
+    let mut producers = Vec::with_capacity(COHORT_SIZE);
+
+    for index in 0..COHORT_SIZE {
+        let stdout = fixture.0.join(format!("dense-{index}.stdout"));
+        let stderr = fixture.0.join(format!("dense-{index}.stderr"));
+        let mut launch = crate::launch::ProcessLaunch::new("/bin/sh");
+        launch.arg("-c").arg(script);
+        let (mut command, route) = measurements::producer_command(&mut launch).unwrap();
+        let producer = measurements::Producer::spawn_with_dependency(
+            &mut command,
+            route,
+            policy,
+            [
+                File::create(&stdout).unwrap(),
+                File::create(&stderr).unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+        until(|| fs::read(&stdout).is_ok_and(|data| data.starts_with(b"READY\n")));
+        producers.push((producer, stdout, stderr));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for (producer, _, _) in &producers {
+        producer.request_stop();
+    }
+    for (mut producer, stdout, stderr) in producers {
+        let completion = producer.stop_before(deadline);
+        assert!(completion.capture_complete, "{:?}", completion.error);
+        assert!(completion.interruption_requested, "{:?}", completion.error);
+        assert!(
+            completion.interruption_acknowledged,
+            "{:?}",
+            completion.error
+        );
+        assert_eq!(completion.guardian_cleanup_confirmed, Some(true));
+        assert!(ADAPTER.accepts_termination("perf-stat", &completion));
+
+        let mut captures = [
+            crate::evidence::Capture::open(&stdout).unwrap(),
+            crate::evidence::Capture::open(&stderr).unwrap(),
+        ];
+        for capture in &mut captures {
+            capture.freeze().unwrap();
+        }
+        let context = ProcessContext::from_completion(
+            "perf-stat",
+            &completion,
+            ["", ""],
+            [&captures[0], &captures[1]],
+        );
+        let result = process(&mut fixture.session(), &context).unwrap();
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.metrics["perf.observed_cycles_count"], 42.0);
+    }
+}
+
+#[test]
 fn installed_offline_decoder_runs_once_with_closed_environment_and_retains_failed_captures() {
     for mode in ["valid", "nonzero", "timeout", "overflow"] {
         let fixture = Fixture::new();
