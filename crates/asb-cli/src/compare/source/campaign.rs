@@ -194,10 +194,9 @@ pub(super) fn rows(
             ) && !previews.contains_key(href)
             {
                 if name == "flamegraph.svg" {
-                    super::validate_svg(physical, href)?;
-                    // Keep only a validated external-artifact marker. A
-                    // campaign can have hundreds of large flamegraphs.
-                    previews.insert(href.clone(), String::new());
+                    if row.id.replica == 1 && row.replica_index.is_none_or(|replica| replica == 1) {
+                        previews.insert(href.clone(), super::read_flamegraph_svg(physical, href)?);
+                    }
                 } else {
                     previews.insert(href.clone(), read_svg(physical, href)?);
                 }

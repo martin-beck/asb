@@ -929,6 +929,9 @@ fn flamegraph_section(
     let figures = benchmarks
         .iter()
         .filter(|benchmark| {
+            benchmark.id.replica == 1 && benchmark.replica_index.is_none_or(|replica| replica == 1)
+        })
+        .filter(|benchmark| {
             benchmark
                 .artifacts
                 .iter()
@@ -961,15 +964,11 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         graph.filter(|_| benchmark.result_source != ResultSource::RecoveredOfficialGrade)
     {
         if previews.contains_key(artifact) {
-            // Keep the complete collector SVG outside report HTML. The small
-            // srcdoc wrapper has an enforced CSP and displays the artifact as
-            // an image, where SVG scripts do not execute. It keeps the report
-            // origin solely so CSP 'self' resolves the report-relative image;
-            // scripts remain disabled by the sandbox and CSP. This is
-            // deliberately separate from opening the original SVG in a tab.
+            // The selected SVG is contained in a CSP-constrained image wrapper
+            // so the report remains self-contained and SVG scripts never run.
             let document = format!(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Flamegraph\">",
-                escape(artifact)
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Flamegraph\">",
+                flamegraph_data_uri(previews.get(artifact).expect("selected preview exists"))
             );
             body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
         }
@@ -1007,7 +1006,7 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
         ));
     }
     format!(
-        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\" data-collector=\"Flamegraph\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><details class=\"chart-description\"><summary>What this measures</summary><p>Sampled process-tree call-stack time for this recorded attempt. Frame width represents sampled time, not an exact wall-time breakdown.</p></details>{body}</figure>",
+        "<figure class=\"flamegraph-chart\" data-flamegraph-benchmark=\"{}\" data-collector=\"Flamegraph\"><div class=\"flamegraph-toolbar\"><strong>{} · {} · {} · {}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{body}<details class=\"chart-description\"><summary>What this measures</summary><p>Sampled process-tree call-stack time for this recorded attempt. Frame width represents sampled time, not an exact wall-time breakdown.</p></details></figure>",
         escape(&benchmark.label),
         escape(&benchmark.agent),
         escape(&benchmark.workload),
@@ -1021,7 +1020,7 @@ pub(super) fn chart_figure(comparison_dir: &Path, graph: &str) -> Result<String,
         .map_err(|error| Error::Run(format!("cannot read generated chart {}: {error}", graph)))?;
     let presentation = chart_presentation(&svg, graph);
     Ok(format!(
-        "<figure id=\"chart-{}\" class=\"interactive-chart\" data-graph=\"{}\" data-chart-title=\"{}\" data-collector=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><details class=\"chart-description\"><summary>What this measures</summary><p>{}</p></details><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption></figure>",
+        "<figure id=\"chart-{}\" class=\"interactive-chart\" data-graph=\"{}\" data-chart-title=\"{}\" data-collector=\"{}\"><div class=\"chart-backdrop\" aria-hidden=\"true\"></div><div class=\"chart-toolbar\"><strong>{}</strong><span><label class=\"highlight-toggle\"><input type=\"checkbox\" data-highlight-graph=\"{}\"><span>Highlight</span></label><button type=\"button\" class=\"chart-reset\">Reset view</button><button type=\"button\" class=\"chart-expand\" aria-label=\"Enlarge chart\">Enlarge</button><button type=\"button\" class=\"chart-close\" aria-label=\"Close enlarged chart\" hidden>Close</button></span></div><div class=\"chart-stage\"><div class=\"chart-tooltip\" role=\"status\" aria-live=\"polite\"></div>{svg}<p class=\"chart-empty\" role=\"status\" hidden>No selected benchmarks have data for this graph.</p></div><figcaption><a href=\"{}\" download>Download SVG (all results)</a></figcaption><details class=\"chart-description\"><summary>What this measures</summary><p>{}</p></details></figure>",
         escape(graph),
         escape(graph),
         escape(&presentation.title),
@@ -1168,19 +1167,39 @@ pub(super) fn chart_presentation(svg: &str, fallback: &str) -> ChartPresentation
     }
 }
 
-/// Metric identities escape separators to remain lossless.  Presentation does
-/// not use those identities as keys, so component timing titles can use the
-/// human-readable component name without changing the underlying metric.
+/// Metric identities escape separators to remain lossless. Presentation does
+/// not use those identities as keys, so report titles never expose escaping.
 fn display_metric_title(title: &str) -> String {
-    if title.starts_with("component.") {
-        title
-            .replace("\\\\", "\\")
-            .replace("\\.", ".")
-            .replace("\\[", "[")
-            .replace("\\]", "]")
-    } else {
-        title.into()
+    title
+        .replace("\\\\", " [backslash]")
+        .replace("\\.", " [dot]")
+        .replace("\\[", "[")
+        .replace("\\]", "]")
+        .replace("\\0", "[empty]")
+        .replace('\\', "")
+}
+
+pub(super) fn flamegraph_data_uri(svg: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(svg.len().div_ceil(3) * 4);
+    for chunk in svg.as_bytes().chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[((first & 3) << 4 | second >> 4) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((second & 15) << 2 | third >> 6) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(third & 63) as usize] as char
+        } else {
+            '='
+        });
     }
+    format!("data:image/svg+xml;base64,{encoded}")
 }
 
 fn chart_description(title: &str, collector: &str) -> String {
@@ -1321,14 +1340,14 @@ fn chart_subgroups_html_with_outer_collector(
 ) -> String {
     let mut prefix_counts = BTreeMap::<String, usize>::new();
     for (presentation, _) in &entries {
-        for prefix in display_dotted_prefixes(&presentation.title) {
+        for prefix in display_dotted_prefixes(&presentation.title, outer_collector) {
             *prefix_counts.entry(prefix).or_default() += 1;
         }
     }
     let mut grouped = BTreeMap::<String, Vec<String>>::new();
     let mut direct = Vec::new();
     for (presentation, figure) in entries {
-        let subgroup = display_dotted_prefixes(&presentation.title)
+        let subgroup = display_dotted_prefixes(&presentation.title, outer_collector)
             .into_iter()
             .rev()
             .find(|prefix| {
@@ -1356,24 +1375,62 @@ fn chart_subgroups_html_with_outer_collector(
 }
 
 /// Presentation-only dotted prefixes. Metric identities retain escaping, but
-/// group labels must not expose separator escapes or repeated nesting roots.
-fn display_dotted_prefixes(title: &str) -> Vec<String> {
+/// group labels omit them and any root already shown by the outer collector.
+fn display_dotted_prefixes(title: &str, outer_collector: Option<&str>) -> Vec<String> {
+    let mut parts = title
+        .split(" (per-replica series mean)")
+        .next()
+        .unwrap_or(title)
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(collector) = outer_collector {
+        parts = strip_collector_roots(parts, collector);
+    }
     let mut prefixes = BTreeSet::new();
-    for prefix in dotted_prefixes(title) {
-        prefixes.insert(collapse_repeated_segments(&display_group_label(&prefix)));
+    for length in 1..parts.len() {
+        prefixes.insert(collapse_repeated_segments(&parts[..length].join(".")));
     }
     prefixes.into_iter().collect()
 }
 
-fn dotted_prefixes(title: &str) -> Vec<String> {
-    let metric = title
-        .split(" (per-replica series mean)")
-        .next()
-        .unwrap_or(title);
-    let parts = metric.split('.').collect::<Vec<_>>();
-    (1..parts.len())
-        .map(|length| parts[..length].join("."))
-        .collect()
+fn strip_collector_roots<'a>(mut parts: Vec<&'a str>, collector: &str) -> Vec<&'a str> {
+    let roots: &[&[&str]] = match collector {
+        "ASB derived metrics" => &[&["asb", "derived", "metrics"], &["asb", "derived"]],
+        "Component timings" => &[&["component"]],
+        "Kernel pressure" => &[&["analysis", "pressure"], &["kernel", "pressure"]],
+        "Arm SPE" => &[&["analysis", "arm_spe"], &["arm", "spe"]],
+        "Arm PMU" => &[&["arm", "pmu"]],
+        "Agent process observation" => &[&["agent"]],
+        "Tool calls" => &[&["tool_calls"]],
+        "AgentSysPerf" => &[&["agentsysperf"]],
+        "bpftrace" => &[&["bpftrace"]],
+        "Perfetto" => &[&["perfetto"]],
+        "perf" => &[&["perf"]],
+        "mpstat" => &[&["process", "cpu"]],
+        "iostat" => &[&["process", "io"]],
+        _ => &[],
+    };
+    let mut index = 0;
+    while index < parts.len() {
+        let mut removed = false;
+        for root in roots {
+            if parts.len().saturating_sub(index) >= root.len()
+                && parts[index..]
+                    .iter()
+                    .zip(root.iter())
+                    .all(|(part, root)| part.eq_ignore_ascii_case(root))
+            {
+                parts.drain(index..index + root.len());
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            index += 1;
+        }
+    }
+    parts
 }
 
 fn collapse_repeated_segments(prefix: &str) -> String {
@@ -1509,7 +1566,7 @@ const HTML_HEAD: &str = r#"<!doctype html><html lang="en"><head><meta charset="u
 :root{color-scheme:light;--ink:#18212b;--muted:#61707f;--line:#dce4ec;--panel:#fff;--accent:#1769aa;--accent-soft:#e8f2fa;--bg:#f4f7fa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{max-width:1500px;margin:auto;padding:36px 28px 56px}.hero{background:linear-gradient(135deg,#12344d,#1769aa);color:#fff;border-radius:18px;padding:42px 46px;box-shadow:0 14px 32px #12344d33}.hero h1{font-size:clamp(2rem,4vw,3.4rem);line-height:1.05;margin:4px 0 14px;letter-spacing:-.04em}.hero p{max-width:760px;margin:0;color:#e5f2fb;font-size:16px}.eyebrow{font-size:11px!important;letter-spacing:.16em;font-weight:700}.explain,.filters,section{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-top:20px;padding:24px;box-shadow:0 4px 14px #17324d0b}.explain{border-left:4px solid var(--accent)}h2{font-size:19px;margin:0}.section-title{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}legend{font-weight:700;color:var(--accent);padding:0 5px}label{display:flex;gap:8px;align-items:flex-start;margin:6px 0;color:var(--muted);overflow-wrap:anywhere}input{accent-color:var(--accent);margin-top:4px}.filter-count,.muted{color:var(--muted);margin:14px 0 0}.text-link,a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}button{background:#fff;border:1px solid #b9c9d8;border-radius:7px;color:var(--accent);cursor:pointer;padding:7px 11px;margin-left:6px}button:hover{background:var(--accent-soft)}.table-wrap{overflow:auto}table{border-collapse:collapse;min-width:100%;white-space:nowrap}th{text-align:left;background:#eef4f8;color:#405466;font-size:12px;letter-spacing:.04em;text-transform:uppercase}th,td{border-bottom:1px solid var(--line);padding:12px 10px;vertical-align:top}.links{white-space:normal;min-width:170px}.links a{display:inline-block;margin:0 8px 5px 0;font-size:12px}.artifact-list{padding-left:18px;margin:8px 0;white-space:normal}.perfetto-metric{display:block;width:min(760px,100%);height:180px;border:0;margin:8px 0}.status{display:block;color:#9a4b00;background:#fff4e5;border-radius:5px;font-size:11px;padding:3px 6px;margin-top:4px;max-width:260px;white-space:normal}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}.charts figure{margin:0;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fbfdff}.charts img{width:100%;height:auto;display:block}.charts figcaption{padding:8px 2px 2px;font-size:12px;overflow-wrap:anywhere}footer{color:var(--muted);text-align:center;padding:28px 0 0}code{background:#e9eef3;border-radius:4px;padding:2px 5px}@media(max-width:700px){.shell{padding:18px 12px}.hero{padding:30px 24px}.section-title{align-items:flex-start;flex-direction:column}.section-title button{margin:0 6px 0 0}}
 </style></head><body>"#;
 
-const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-description{margin:0 0 8px;color:var(--muted);font-size:12px}.chart-description>summary{cursor:pointer;color:var(--accent);font-weight:700}.chart-description[open]>summary{margin-bottom:4px}.chart-description p{margin:0}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-stage .series-hidden{display:none}.chart-stage .legend-item{cursor:pointer;user-select:none}.chart-stage .legend-hidden{opacity:.35;text-decoration:line-through}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan · click a legend item to hide or show its series';color:var(--muted);font-size:11px}.collector-graph-group,.report-graph-group,.folded-filter-pane,.folded-artifact-section,.metric-graph-subgroup{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group{grid-column:1/-1}.metric-graph-subgroup{grid-column:1/-1}.collector-graph-group>summary,.report-graph-group>summary,.folded-filter-pane>summary,.folded-artifact-section>summary,.folded-table>summary,.metric-graph-subgroup>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.report-graph-group[open]>summary,.folded-filter-pane[open]>summary,.folded-artifact-section[open]>summary,.folded-table[open]>summary,.metric-graph-subgroup[open]>summary{margin-bottom:12px}.collector-charts,.metric-subgroup-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.component-flow{grid-column:1/-1;border:1px solid #b9d5e9;border-radius:8px;background:#f4f9fd;padding:12px;margin-bottom:2px}.component-flow-row{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap}.component-flow-node{flex:1 1 150px;display:flex;align-items:center;justify-content:center;border:1px solid #83afd0;border-radius:6px;background:#fff;padding:8px;text-align:center;font-size:12px;font-weight:700}.component-flow-agents{gap:5px;flex-wrap:wrap}.component-flow-agent{border-radius:4px;background:#e8f2fa;padding:3px 6px}.component-flow-arrow{align-self:center;color:var(--accent);font-size:20px;font-weight:700}.component-flow-lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px}.component-flow-lanes>div{border-left:3px solid #83afd0;background:#fff;padding:8px;font-size:12px}.component-flow-lanes strong,.component-flow-lanes span{display:block}.component-flow-lanes span{margin-top:4px;color:var(--muted);line-height:1.35}.component-flow p{margin:9px 0 0;color:var(--muted);font-size:12px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
+const INTERACTIVE_STYLE: &str = r#".interactive-chart{position:relative;overflow:hidden}.chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;color:var(--ink);font-size:12px}.chart-toolbar strong{overflow-wrap:anywhere}.chart-toolbar button{margin:0;font-size:12px}.chart-description{margin:8px 0 0;color:var(--muted);font-size:12px}.chart-description>summary{cursor:pointer;color:var(--accent);font-weight:700}.chart-description[open]>summary{margin-bottom:4px}.chart-description p{margin:0}.chart-stage{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#f7fbfe)}.chart-stage svg{display:block;width:100%;height:auto;min-height:260px;cursor:grab;touch-action:none;user-select:none}.chart-stage svg.is-panning{cursor:grabbing}.chart-stage .bar{transition:fill .12s,opacity .12s}.chart-stage .bar.hovered{fill:#d95f02;stroke:#8f3f00;stroke-width:1.5}.chart-stage .series{transition:stroke-width .12s,opacity .12s}.chart-stage .series.hovered{stroke-width:4;filter:drop-shadow(0 2px 2px #18212b44)}.chart-stage .series-point{pointer-events:all;transition:fill .12s,r .12s}.chart-stage .series-point.hovered{fill:#d95f02;stroke:#fff;stroke-width:2;r:7}.chart-stage .series-hidden{display:none}.chart-stage .legend-item,.chart-stage .legend-swatch{cursor:pointer;user-select:none;transition:opacity .12s}.chart-stage .legend-item.legend-hidden,.chart-stage .legend-swatch.legend-hidden{opacity:.35}.chart-stage .legend-item.legend-hidden{text-decoration:line-through}.chart-tooltip{position:absolute;z-index:2;pointer-events:none;opacity:0;transform:translateY(-3px);padding:7px 10px;border:1px solid #17324d33;border-radius:7px;background:#18212bf2;color:#fff;box-shadow:0 6px 16px #17324d44;font-size:12px;line-height:1.3;white-space:nowrap;transition:opacity .12s}.chart-tooltip.visible{opacity:1}.interactive-chart figcaption{display:flex;justify-content:space-between;gap:8px}.interactive-chart figcaption::after{content:'Hover values · wheel zoom · drag pan · click a legend item to hide or show its series';color:var(--muted);font-size:11px}.collector-graph-group,.report-graph-group,.folded-filter-pane,.folded-artifact-section,.metric-graph-subgroup{border:1px solid var(--line);border-radius:10px;background:#fbfdff;padding:10px}.collector-graph-group{grid-column:1/-1}.metric-graph-subgroup{grid-column:1/-1}.collector-graph-group>summary,.report-graph-group>summary,.folded-filter-pane>summary,.folded-artifact-section>summary,.folded-table>summary,.metric-graph-subgroup>summary{cursor:pointer;color:var(--accent);font-weight:700}.collector-graph-group[open]>summary,.report-graph-group[open]>summary,.folded-filter-pane[open]>summary,.folded-artifact-section[open]>summary,.folded-table[open]>summary,.metric-graph-subgroup[open]>summary{margin-bottom:12px}.collector-charts,.metric-subgroup-charts{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}.folded-table{margin-top:8px}.folded-table>.table-wrap{margin-top:10px}.component-flow{grid-column:1/-1;border:1px solid #b9d5e9;border-radius:8px;background:#f4f9fd;padding:12px;margin-bottom:2px}.component-flow-row{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap}.component-flow-node{flex:1 1 150px;display:flex;align-items:center;justify-content:center;border:1px solid #83afd0;border-radius:6px;background:#fff;padding:8px;text-align:center;font-size:12px;font-weight:700}.component-flow-agents{gap:5px;flex-wrap:wrap}.component-flow-agent{border-radius:4px;background:#e8f2fa;padding:3px 6px}.component-flow-arrow{align-self:center;color:var(--accent);font-size:20px;font-weight:700}.component-flow-lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px}.component-flow-lanes>div{border-left:3px solid #83afd0;background:#fff;padding:8px;font-size:12px}.component-flow-lanes strong,.component-flow-lanes span{display:block}.component-flow-lanes span{margin-top:4px;color:var(--muted);line-height:1.35}.component-flow p{margin:9px 0 0;color:var(--muted);font-size:12px}.bpftrace-profile{display:block;width:min(760px,100%);height:220px;border:0;margin:8px 0}.flamegraph{display:block;width:min(1100px,100%);height:420px;border:1px solid var(--line);border-radius:8px;margin:10px 0;background:#fff}.flamegraph-status{color:var(--muted);font-size:12px;margin:8px 0}"#;
 
 const HIGHLIGHT_STYLE: &str = r#".interactive-chart.highlighted{outline:5px solid #d81b60;outline-offset:3px;box-shadow:0 0 0 9px #d81b6033}.highlight-toggle{display:inline-flex;align-items:center;gap:5px;margin:0 6px 0 0;color:#8d1748;font-weight:700}.highlight-toggle input{accent-color:#d81b60;margin:0}.chart-picker tr.highlighted{background:#fff0f5;box-shadow:inset 5px 0 #d81b60}"#;
 
@@ -1821,7 +1878,7 @@ fn write_series_svg_with_labels(
         let lines = &legend_lines[series_index];
         let legend_y = row_y + 6.0;
         svg.push_str(&format!(
-            "<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"{color}\" aria-label=\"{}\">",
+            "<rect class=\"legend-swatch\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{series_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"{color}\" aria-label=\"{}\">",
             legend_y - 10.0,
             legend_x + 16.0,
             legend_y,
@@ -2539,21 +2596,21 @@ mod tests {
         assert!(html.contains(
             "<details class=\"folded-artifact-section\"><summary>Other analysis artifacts</summary>"
         ));
-        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 2);
-        assert_eq!(html.matches("<iframe title=\"Flamegraph\"").count(), 2);
+        assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 1);
+        assert_eq!(html.matches("<iframe title=\"Flamegraph\"").count(), 1);
         assert!(html.contains("&lt;img src=&quot;"));
-        assert!(html.contains("flamegraph.svg&quot; alt=&quot;Flamegraph&quot;&gt;"));
+        assert!(html.contains("data:image/svg+xml;base64,"));
         assert!(html.contains("srcdoc="));
         assert!(!html.contains("<title>flame</title>"));
-        assert_eq!(html.matches("sandbox=\"allow-same-origin\"").count(), 2);
+        assert_eq!(html.matches("sandbox=\"allow-same-origin\"").count(), 1);
         assert_eq!(
-            html.matches("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'")
+            html.matches("default-src 'none'; img-src data:; style-src 'unsafe-inline'")
                 .count(),
-            2
+            1
         );
-        assert_eq!(html.matches("Download original SVG").count(), 2);
-        assert_eq!(html.matches("Download folded stacks").count(), 2);
-        assert_eq!(html.matches("Collector status: completed").count(), 2);
+        assert_eq!(html.matches("Download original SVG").count(), 1);
+        assert_eq!(html.matches("Download folded stacks").count(), 1);
+        assert_eq!(html.matches("Collector status: completed").count(), 1);
         let table = &html[..flamegraphs];
         assert!(!table.contains("flamegraph.svg"));
         assert!(!table.contains("flamegraph.json"));
@@ -2703,7 +2760,7 @@ mod tests {
             GraphNames::default().allocate("metric", "component.agent\\.execute.cpu_user_ms"),
         ))
         .unwrap();
-        assert!(component_svg.contains("<title>component.agent.execute.cpu_user_ms</title>"));
+        assert!(component_svg.contains("<title>component.agent [dot]execute.cpu_user_ms</title>"));
         let timeline = root.join("results/sweep-comparison/perfetto-execution-composition.svg");
         assert!(timeline.is_file());
         let timeline_svg = std::fs::read_to_string(timeline).unwrap();
@@ -2785,11 +2842,6 @@ mod tests {
         assert!(report.contains("All metrics"));
         assert!(report.contains("metric-tool_call_count.svg"));
         assert!(report.contains("<details class=\"collector-graph-group\"><summary>"));
-        assert!(
-            report.contains(
-                "<details class=\"metric-graph-subgroup\"><summary>component.agent.execute"
-            )
-        );
         assert!(report.contains("Component timing flow"));
         assert!(report.contains("class=\"chart-description\""));
         assert!(report.contains("Host metadata"));
@@ -2850,7 +2902,7 @@ mod tests {
         assert!(report.contains("Flamegraph collector status"));
         assert!(report.contains("Kernel symbols: indeterminate."));
         assert!(report.contains("CPU-wide perf recording on logical CPUs 1, 3."));
-        assert!(report.contains("perf stat remains agent-process-tree scoped"));
+        assert!(report.contains("Perf stat uses the agent process tree."));
         assert!(report.contains("unknown &lt;frames&gt;"));
         assert!(report.contains("map hidden build unknown"));
         assert!(report.contains("class=\"interactive-chart\""));
@@ -3291,7 +3343,7 @@ mod tests {
         for (name, value) in [
             ("custom.a/b", 113),
             ("custom.a?b", 227),
-            ("custom.a\\.b", 331),
+            ("custom.a [dot]b", 331),
             ("custom.a.b", 449),
             ("custom.é", 557),
             ("custom.ü", 661),
@@ -3397,9 +3449,16 @@ mod tests {
             "<svg><title>component.agent\\.execute.cpu_user_ms</title></svg>",
             "metric-component.svg",
         );
-        assert_eq!(component.title, "component.agent.execute.cpu_user_ms");
+        assert_eq!(component.title, "component.agent [dot]execute.cpu_user_ms");
         assert_eq!(component.collector, "Component timings");
         assert!(component.description.contains("user mode"));
+
+        let escaped = chart_presentation(
+            "<svg><title>analysis\\.pressure.cpu_some_pct</title></svg>",
+            "metric-derived.svg",
+        );
+        assert_eq!(escaped.title, "analysis [dot]pressure.cpu_some_pct");
+        assert!(!escaped.title.contains('\\'));
     }
 
     #[test]
@@ -3491,8 +3550,41 @@ mod tests {
                 ),
             ],
         );
-        assert!(derived.contains("<summary>ASB.derived.container.io (2 graphs)</summary>"));
+        assert!(derived.contains("<summary>container.io (2 graphs)</summary>"));
+        assert!(!derived.contains("ASB.derived"));
         assert!(!derived.contains("<summary>ASB (2 graphs)</summary>"));
+
+        let component = chart_subgroups_html_for_collector(
+            "Component timings",
+            vec![
+                (
+                    presentation("component.agent.execute.cpu_user_ms", "Component timings"),
+                    "<figure>user</figure>".into(),
+                ),
+                (
+                    presentation("component.agent.execute.cpu_system_ms", "Component timings"),
+                    "<figure>system</figure>".into(),
+                ),
+            ],
+        );
+        assert!(component.contains("<summary>agent.execute (2 graphs)</summary>"));
+        assert!(!component.contains("component.agent.execute"));
+
+        let pressure = chart_subgroups_html_for_collector(
+            "Kernel pressure",
+            vec![
+                (
+                    presentation("analysis.pressure.cpu.some_pct", "Kernel pressure"),
+                    "<figure>some</figure>".into(),
+                ),
+                (
+                    presentation("analysis.pressure.cpu.full_pct", "Kernel pressure"),
+                    "<figure>full</figure>".into(),
+                ),
+            ],
+        );
+        assert!(pressure.contains("<summary>cpu (2 graphs)</summary>"));
+        assert!(!pressure.contains("analysis.pressure"));
     }
 
     #[test]

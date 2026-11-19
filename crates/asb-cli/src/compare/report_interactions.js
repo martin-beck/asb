@@ -77,11 +77,14 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
     for(const item of svg.querySelectorAll('.bar,.series,.series-point')){
       if(item.dataset.seriesIndex===seriesIndex)item.classList.toggle('series-hidden',!visible);
     }
-    for(const item of svg.querySelectorAll('.legend-item')){
-      if(item.dataset.seriesIndex===seriesIndex)item.classList.toggle('legend-hidden',!visible);
+    for(const item of svg.querySelectorAll('.legend-item,.legend-swatch')){
+      if(item.dataset.seriesIndex===seriesIndex){
+        item.classList.toggle('legend-hidden',!visible);
+        item.setAttribute('aria-pressed',String(!visible));
+      }
     }
   };
-  for(const legend of svg.querySelectorAll('.legend-item')){
+  for(const legend of svg.querySelectorAll('.legend-item,.legend-swatch')){
     const toggle=()=>setSeriesVisible(legend.dataset.seriesIndex,legend.classList.contains('legend-hidden'));
     legend.addEventListener('click',event=>{event.stopPropagation();toggle();});
     legend.addEventListener('keydown',event=>{
@@ -151,7 +154,7 @@ document.querySelectorAll('.interactive-chart').forEach(chart=>{
     view.w=w;view.h=h;applyView();
   },{passive:false});
   svg.addEventListener('pointerdown',event=>{
-    if(event.target.closest('.bar,.series-point'))return;
+    if(event.target.closest('.bar,.series-point,.legend-item,.legend-swatch'))return;
     drag={x:event.clientX,y:event.clientY,view:{...view}};svg.classList.add('is-panning');svg.setPointerCapture(event.pointerId);
   });
   svg.addEventListener('pointermove',event=>{

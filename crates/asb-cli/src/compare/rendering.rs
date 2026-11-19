@@ -565,7 +565,7 @@ fn write_histogram_svg(
         }
         let legend_x = 90.0 + (agent_index % 3) as f64 * 300.0;
         let legend_y = 74.0 + (agent_index / 3) as f64 * 18.0;
-        svg.push_str(&format!("<rect class=\"legend-swatch\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{agent_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{legend_y:.1}\" font-size=\"12\">{}</text></g>", legend_y - 9.0, legend_x + 16.0, escape(agent)));
+        svg.push_str(&format!("<rect class=\"legend-swatch\" data-series-index=\"{agent_index}\" role=\"button\" tabindex=\"0\" x=\"{legend_x:.1}\" y=\"{:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{color}\"/><text class=\"legend-item\" data-series-index=\"{agent_index}\" role=\"button\" tabindex=\"0\" x=\"{:.1}\" y=\"{legend_y:.1}\" font-size=\"12\">{}</text></g>", legend_y - 9.0, legend_x + 16.0, escape(agent)));
     }
     for value in &x_axis.ticks {
         let x = LEFT + domain_fraction(*value, x_axis.min, x_axis.max) * (RIGHT - LEFT);

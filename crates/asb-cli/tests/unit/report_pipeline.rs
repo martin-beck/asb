@@ -1774,9 +1774,15 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     assert!(concurrency_report.contains("foldReportTables"));
     assert!(concurrency_report.contains("groupReportCharts"));
     assert!(concurrency_report.contains("Aggregate flamegraphs"));
+    let diffs = concurrency_report.find("<summary>Diffs (").unwrap();
+    let mean = concurrency_report.find("<summary>Mean (").unwrap();
+    let median = concurrency_report.find("<summary>Median (").unwrap();
+    let p95 = concurrency_report.find("<summary>P95 (").unwrap();
+    assert!(diffs < mean && mean < median && median < p95);
     assert!(concurrency_report.contains("setSeriesVisible"));
     assert!(concurrency_report.contains("metric-graph-subgroup"));
-    assert!(concurrency_report.contains("component.agent.execute"));
+    assert!(concurrency_report.contains("agent.execute"));
+    assert!(!concurrency_report.contains("<summary>component.agent.execute"));
     assert!(concurrency_report.contains("chart-description"));
     assert!(concurrency_report.contains("Component timing flow"));
     let graphs = fs::read_dir(directory)
@@ -1867,6 +1873,8 @@ fn comparison_publishes_concurrency_scaling_report_for_matching_agent_trials() {
     let agent_scalar = fs::read_to_string(agent_scalar).unwrap();
     assert!(agent_scalar.contains("data-label=\"alpha\""));
     assert!(agent_scalar.contains("data-label=\"beta\""));
+    assert!(agent_scalar.contains("class=\"legend-swatch\" data-series-index=\"0\""));
+    assert!(agent_scalar.contains("class=\"legend-swatch\" data-series-index=\"1\""));
     assert!(
         fs::read_to_string(&report)
             .unwrap()

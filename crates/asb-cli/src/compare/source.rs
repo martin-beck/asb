@@ -82,7 +82,17 @@ pub(super) fn read_json(path: &Path) -> Result<Value, Error> {
     Ok(value)
 }
 pub(super) fn read_svg(path: &Path, artifact: &str) -> Result<String, Error> {
-    let svg = read_text(path, "embedded SVG artifact").map_err(|error| {
+    read_svg_limit(path, artifact, MAX_BYTES)
+}
+
+/// Read a selected flamegraph for the self-contained report. The bound matches
+/// the existing external flamegraph policy while retaining a finite limit.
+pub(super) fn read_flamegraph_svg(path: &Path, artifact: &str) -> Result<String, Error> {
+    read_svg_limit(path, artifact, 512 * 1024 * 1024)
+}
+
+fn read_svg_limit(path: &Path, artifact: &str, limit: u64) -> Result<String, Error> {
+    let svg = read_text_limit(path, "embedded SVG artifact", limit).map_err(|error| {
         Error::Run(format!(
             "cannot read embedded SVG artifact {artifact}: {error}"
         ))
@@ -94,16 +104,6 @@ pub(super) fn read_svg(path: &Path, artifact: &str) -> Result<String, Error> {
         )));
     }
     Ok(svg)
-}
-
-/// Check a report SVG without retaining its document in the report model.
-///
-/// Flamegraphs can be many megabytes each. They are rendered from their
-/// report-relative artifact in a sandboxed frame, so holding every document
-/// until HTML publication would make comparison memory grow with every run.
-pub(super) fn validate_svg(path: &Path, artifact: &str) -> Result<(), Error> {
-    drop(read_svg(path, artifact)?);
-    Ok(())
 }
 
 /// Validate a report-relative SVG which remains external to the report HTML.
@@ -407,10 +407,9 @@ pub(super) fn load_at(
             ) && !previews.contains_key(href)
             {
                 if name == "flamegraph.svg" {
-                    validate_svg(physical, href)?;
-                    // An empty value marks a validated external SVG. Unlike
-                    // other collector charts, flamegraphs are not inlined.
-                    previews.insert(href.clone(), String::new());
+                    if row.id.replica == 1 && row.replica_index.is_none_or(|replica| replica == 1) {
+                        previews.insert(href.clone(), read_flamegraph_svg(physical, href)?);
+                    }
                 } else {
                     previews.insert(href.clone(), read_svg(physical, href)?);
                 }
