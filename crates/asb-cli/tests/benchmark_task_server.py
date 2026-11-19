@@ -40,6 +40,32 @@ class Task:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_initial_idle_timeout_uses_only_a_bounded_controller_value(self):
+        with patch.dict(os.environ, {subject.INITIAL_IDLE_TIMEOUT_ENV: "7320"}, clear=False):
+            self.assertEqual(subject.initial_idle_timeout_seconds(), 7320)
+        for value in ["899", "43501", "not-a-number", "+900", ""]:
+            with self.subTest(value=value), patch.dict(
+                os.environ, {subject.INITIAL_IDLE_TIMEOUT_ENV: value}, clear=False
+            ):
+                with self.assertRaisesRegex(subject.ExecutionError, "initial idle timeout"):
+                    subject.initial_idle_timeout_seconds()
+
+    def test_server_uses_bootstrap_idle_timeout_before_first_request(self):
+        clock = SimpleNamespace(now=0.0, monotonic=lambda: clock.now)
+        class DelayedQueue:
+            calls = 0
+            def get(self, timeout):
+                self.calls += 1
+                clock.now += 300.0
+                raise subject.queue.Empty
+        requests = DelayedQueue()
+        with patch.dict(os.environ, {subject.INITIAL_IDLE_TIMEOUT_ENV: "1800"}, clear=False), \
+             patch.object(subject, "time", clock, create=True), \
+             patch.object(subject.queue, "Queue", return_value=requests), \
+             patch.object(subject.threading, "Thread"):
+            self.assertEqual(serve(Task(), io.StringIO(""), io.StringIO()), 1)
+        self.assertEqual(requests.calls, 6)
+
     def test_unexpected_start_failure_logs_bounded_frames_without_exception_text(self):
         class BrokenTask(Task):
             def __enter__(self):

@@ -209,6 +209,13 @@ fn controller_command(program: impl AsRef<std::ffi::OsStr>) -> Result<Controller
     Ok(command)
 }
 
+const TASK_SERVER_INITIAL_IDLE_TIMEOUT_ENV: &str = "ASB_TASK_SERVER_INITIAL_IDLE_TIMEOUT_SECONDS";
+const TASK_SERVER_DEFAULT_INITIAL_IDLE_SECONDS: u64 = 900;
+
+fn task_server_initial_idle_seconds(preparation_seconds: u64) -> u64 {
+    preparation_seconds.max(TASK_SERVER_DEFAULT_INITIAL_IDLE_SECONDS)
+}
+
 const GUEST_ENVIRONMENT_VARS: &[&str] = &[
     "http_proxy",
     "HTTP_PROXY",
@@ -1039,7 +1046,13 @@ fn launch_inner(
     let error_log = options
         .open(artifacts.with_extension("controller.log"))
         .map_err(|error| error.to_string())?;
+    let preparation_seconds =
+        preparation_seconds(workload, context.budgets.environment_preparation_seconds);
     let mut command = controller_command(tool.join("venv/bin/python"))?;
+    command.env(
+        TASK_SERVER_INITIAL_IDLE_TIMEOUT_ENV,
+        task_server_initial_idle_seconds(preparation_seconds).to_string(),
+    );
     if let Some(cpus) = context.cpu_allocation {
         let mask = crate::runtime::affinity::AffinityMask::new(cpus)?;
         mask.prepare_command(&mut command)
@@ -1111,8 +1124,6 @@ fn launch_inner(
     crate::project::apply_network_proxy(&mut command, project_root)
         .map_err(|error| error.to_string())?;
     let mut controller = Controller::spawn(&mut command)?;
-    let preparation_seconds =
-        preparation_seconds(workload, context.budgets.environment_preparation_seconds);
     let prepared = (|| -> Result<_, String> {
         let ready =
             controller.receive(Instant::now() + Duration::from_secs(preparation_seconds))?;
@@ -2474,6 +2485,12 @@ mod tests {
         assert_eq!(event["cwd"], root.to_str().unwrap());
         drop(controller);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_server_initial_idle_covers_bounded_cohort_preparation() {
+        assert_eq!(super::task_server_initial_idle_seconds(120), 900);
+        assert_eq!(super::task_server_initial_idle_seconds(7_320), 7_320);
     }
 
     #[test]
