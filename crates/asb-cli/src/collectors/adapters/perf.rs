@@ -1489,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_wide_recording_allows_synthesis_before_declaring_startup_failure() {
+    fn cpu_wide_recording_allows_all_perf_helpers_to_start_before_failure() {
         assert_eq!(
             super::record_activation_timeout(false),
             std::time::Duration::from_secs(10)
