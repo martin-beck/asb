@@ -20,6 +20,9 @@ from asb_execution import ExecutionError
 
 OPEN, DATA, EOF, CLOSE, READY = range(1, 6)
 MAX_FRAME, MAX_CHANNELS, MAX_DIAGNOSTIC = 65536, 128, 8192
+# A cohort may start many isolated Docker exec relay processes at once.  Keep
+# the readiness wait bounded, while allowing the daemon to schedule that burst.
+RELAY_READY_TIMEOUT_SECONDS = 60
 PROXY_NAMES = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
                "all_proxy", "ALL_PROXY", "socks_proxy", "SOCKS_PROXY")
 
@@ -114,7 +117,8 @@ class HostRelay:
         self.stderr_reader.start()
         self.reader = threading.Thread(target=self.run, daemon=True)
         self.reader.start()
-        if not self.ready.wait(10) or self.error or self.ports is None:
+        if (not self.ready.wait(RELAY_READY_TIMEOUT_SECONDS)
+                or self.error or self.ports is None):
             self.close()
             raise ExecutionError("private endpoint relay did not become ready")
 

@@ -389,6 +389,17 @@ class ForwardingTests(unittest.TestCase):
                 self.assertEqual(len(children), 1)
                 self.assertIsNotNone(children[0].poll())
 
+    def test_startup_timeout_uses_the_bounded_relay_readiness_window(self):
+        # Keep the regression fast while checking that startup uses the named
+        # cohort-safe timeout rather than an inline literal.
+        script = "import time; time.sleep(60)"
+        started = time.monotonic()
+        with patch("asb_relay.RELAY_READY_TIMEOUT_SECONDS", 0.01):
+            with self.assertRaisesRegex(ExecutionError, "did not become ready"):
+                HostRelay([("127.0.0.1", 12345)], [sys.executable, "-c", script])
+        # HostRelay closes and reaps its owned child after readiness failure.
+        self.assertLess(time.monotonic() - started, 5)
+
     def test_disconnect_keeps_bounded_child_diagnostics_in_an_attempt_artifact(self):
         # Use a private temporary directory; the diagnostic must be useful
         # after a controller failure without exposing an unbounded stderr pipe.
