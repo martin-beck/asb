@@ -3,7 +3,6 @@ use super::{ADAPTER, SharedArtifact, readiness};
 use crate::measurements::{self, Collector};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::time::Duration;
 
 impl measurements::Session {
     pub(super) fn start_perf_symbols(&mut self, pid: u32) -> Result<(), String> {
@@ -87,7 +86,16 @@ impl measurements::Session {
         ];
         let mut collector =
             Collector::spawn("perf-symbol-custody", &ADAPTER, command, route, captures)?;
-        if let Err(error) = ready.enable(Duration::from_secs(10), || collector.startup_exit()) {
+        // CPU-wide recording starts one symbol helper per pinned replica.  At
+        // high concurrency those short-lived Python helpers can be queued
+        // behind other admitted replicas even after perf itself has enabled
+        // successfully.  Use the same bounded allowance as CPU-wide perf
+        // activation rather than treating scheduler pressure as a collector
+        // failure.
+        let cpu_wide = self.state::<super::PerfState>().borrow().cpu_wide.is_some();
+        if let Err(error) = ready.enable(super::record_activation_timeout(cpu_wide), || {
+            collector.startup_exit()
+        }) {
             return Err(collector.startup_failure(error, self._directory_owner.clone()));
         }
         self.set_artifact(SharedArtifact::PerfSymbolCache, cache);
