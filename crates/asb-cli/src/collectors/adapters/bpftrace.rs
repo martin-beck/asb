@@ -12,6 +12,8 @@ use std::time::Instant;
 // Kernel program loading is serialized by the kernel under dense pressure.
 // Keep readiness finite while allowing a full selected cohort to queue.
 const DENSE_PROFILE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const DENSE_PROFILE_ADMISSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
 mod custom_scope;
 mod snapshots;
 #[cfg(test)]
@@ -354,6 +356,7 @@ impl measurements::Session {
     fn start_bpftrace(&mut self, pid: u32) -> Result<(), String> {
         let programs = self.state::<BpftraceState>().borrow().custom.clone();
         for (index, program) in programs.into_iter().enumerate() {
+            let _admission = bpftrace_admission(self.project_root.as_deref())?;
             let (command, route) = self.collector_command("bpftrace").map_err(|error| {
                 format!("cannot start bpftrace program {}: {error}", program.path)
             })?;
@@ -396,6 +399,7 @@ impl measurements::Session {
         let profiles = self.state::<BpftraceState>().borrow().profiles.clone();
         let prelude = process_tree_prelude(pid);
         for profile in &profiles {
+            let _admission = bpftrace_admission(self.project_root.as_deref())?;
             let name = format!("bpftrace-{}", profile.name);
             let stdout_path = self.dir.join(format!("{name}.stdout"));
             let stderr_path = self.dir.join(format!("{name}.stderr"));
@@ -441,6 +445,15 @@ impl measurements::Session {
         }
         Ok(())
     }
+}
+
+fn bpftrace_admission(project_root: Option<&Path>) -> Result<Option<std::fs::File>, String> {
+    project_root
+        .map(|root| {
+            super::perfetto::lock_bpftrace_admission_for(root, DENSE_PROFILE_ADMISSION_TIMEOUT)
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 const MAX_CUSTOM_PROGRAM: u64 = 256 * 1024;

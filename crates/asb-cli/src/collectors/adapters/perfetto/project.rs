@@ -46,8 +46,24 @@ pub(crate) fn lock_admission_for(
     root: &Path,
     timeout: std::time::Duration,
 ) -> Result<std::fs::File, Error> {
+    lock_named_admission_for(root, "perfetto", "Perfetto service", timeout)
+}
+
+pub(crate) fn lock_bpftrace_admission_for(
+    root: &Path,
+    timeout: std::time::Duration,
+) -> Result<std::fs::File, Error> {
+    lock_named_admission_for(root, "bpftrace", "bpftrace profile", timeout)
+}
+
+fn lock_named_admission_for(
+    root: &Path,
+    name: &str,
+    label: &str,
+    timeout: std::time::Duration,
+) -> Result<std::fs::File, Error> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let path = root.join(".asb-perfetto-admission.lock");
+    let path = root.join(format!(".asb-{name}-admission.lock"));
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -64,8 +80,14 @@ pub(crate) fn lock_admission_for(
             Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
-            Err(std::fs::TryLockError::WouldBlock) => return Err(Error::Input("project reset or Perfetto service admission is still in progress; retry after initialization or service startup completes".into())),
-            Err(std::fs::TryLockError::Error(error)) => return Err(Error::Io(format!("cannot lock Perfetto admission: {error}"))),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::Input(format!(
+                    "project reset or {label} admission is still in progress; retry after initialization or collector startup completes"
+                )));
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(Error::Io(format!("cannot lock {label} admission: {error}")));
+            }
         }
     }
     let opened = file.metadata().map_err(crate::io_error)?;
@@ -602,6 +624,23 @@ mod tests {
         assert!(lock_for_reset(&root).is_err());
         drop(admission);
         drop(released_reset(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bpftrace_admission_is_exclusive_without_blocking_perfetto_admission() {
+        use std::fs;
+        use std::time::Duration;
+        let root = std::env::temp_dir()
+            .join(crate::workloads::TaskIdentity::local("bpftrace-admission", None).attempt_id);
+        fs::create_dir_all(&root).unwrap();
+        let bpftrace = lock_bpftrace_admission_for(&root, Duration::ZERO).unwrap();
+        assert!(lock_bpftrace_admission_for(&root, Duration::ZERO).is_err());
+        let perfetto = lock_admission_for(&root, Duration::ZERO).unwrap();
+        drop(perfetto);
+        drop(bpftrace);
+        let bpftrace = lock_bpftrace_admission_for(&root, Duration::from_secs(1)).unwrap();
+        drop(bpftrace);
         fs::remove_dir_all(root).unwrap();
     }
 }

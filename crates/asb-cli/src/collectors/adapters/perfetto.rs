@@ -13,6 +13,13 @@ use service::Service;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub(crate) fn lock_bpftrace_admission_for(
+    root: &Path,
+    timeout: Duration,
+) -> Result<std::fs::File, crate::Error> {
+    project::lock_bpftrace_admission_for(root, timeout)
+}
+
 // Tracefs service startup is serialized for a project. A dense cohort needs a
 // longer but still finite wait before the shared launch gate admits execution.
 const DENSE_CAPTURE_READY_TIMEOUT: Duration = Duration::from_secs(10 * 60);

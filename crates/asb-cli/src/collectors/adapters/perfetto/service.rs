@@ -13,7 +13,7 @@ static SERVICES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Service>>>> = OnceLock::n
 
 // Dense cohorts serialize tracefs service admission. This remains bounded but
 // leaves enough time for all selected replicas to acquire isolated instances.
-const DENSE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const DENSE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[cfg(test)]
 #[path = "probe_tests.rs"]
