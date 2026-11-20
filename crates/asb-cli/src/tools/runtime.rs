@@ -6,7 +6,7 @@ use crate::install::{
 };
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Eq, PartialEq)]
 struct ArchiveStamp {
@@ -52,6 +52,41 @@ fn forget_verified_archive(path: &Path) {
         .lock()
         .expect("runtime verification cache lock")
         .remove(path);
+}
+
+fn runtime_is_ready(root: &Path, checksum: &str, programs: &[(&str, &str)]) -> bool {
+    let runtime = root.join("runtime");
+    fs::read_to_string(root.join("ASB-RUNTIME")).ok().as_deref() == Some(checksum)
+        && programs
+            .iter()
+            .all(|(_, path)| runtime.join(path).is_file())
+}
+
+/// Serialize publication of a shared project-local runtime across guest replicas.
+///
+/// Archive download has its own lock. Extraction and replacing `runtime/` must
+/// use a separate lock because concurrent benchmark guests share `.asb-tools`.
+fn runtime_publication_lock(context: &OperationContext, root: &Path) -> InstallResult<fs::File> {
+    let lock_path = root.join(".runtime-publication.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| Error::Io(error.to_string()))?;
+    loop {
+        context.check_before_admission("runtime publication lock", root)?;
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(10)),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(
+                    Error::Io(format!("cannot lock shared runtime publication: {error}")).into(),
+                );
+            }
+        }
+    }
 }
 
 fn verify_cached_archive(path: &Path, checksum: &str) -> Result<(), Error> {
@@ -196,13 +231,14 @@ pub(super) fn archive(
         checksum,
         progress,
     )?;
+    // Every concurrent guest sees the same project-local tool root. Hold this
+    // lock through validation, extraction and executable publication, then a
+    // later replica can reuse the complete verified runtime instead of racing
+    // a partially extracted directory.
+    let _publication = runtime_publication_lock(context, root)?;
     let runtime = root.join("runtime");
     let receipt = root.join("ASB-RUNTIME");
-    if fs::read_to_string(&receipt).ok().as_deref() != Some(checksum)
-        || programs
-            .iter()
-            .any(|(_, path)| !runtime.join(path).is_file())
-    {
+    if !runtime_is_ready(root, checksum, programs) {
         let stage = root.join(format!(".runtime-{}", unique_id()));
         fs::create_dir(&stage).map_err(|error| Error::Io(error.to_string()))?;
         let owner = ProducerDirectory::open(&stage)?;
@@ -316,6 +352,22 @@ mod tests {
             .unwrap()
             .to_owned();
         (archive, digest)
+    }
+
+    #[test]
+    fn published_runtime_requires_matching_receipt_and_every_program() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("project-tool");
+        fs::create_dir_all(root.join("runtime/bin")).unwrap();
+        fs::write(root.join("ASB-RUNTIME"), "first").unwrap();
+        fs::write(root.join("runtime/bin/one"), "one").unwrap();
+        assert!(runtime_is_ready(&root, "first", &[("one", "bin/one")]));
+        assert!(!runtime_is_ready(&root, "second", &[("one", "bin/one")]));
+        assert!(!runtime_is_ready(
+            &root,
+            "first",
+            &[("one", "bin/one"), ("two", "bin/two")]
+        ));
     }
 
     #[test]
