@@ -1372,6 +1372,7 @@ mod tests {
             enabled: true,
             directory: "measurements".into(),
             collectors: Vec::new(),
+            dense_collector_replica_limit: crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
         });
         for index in 0..2 {
             let mut outcome = fixture.read(index);
@@ -1914,6 +1915,8 @@ mod tests {
                 enabled: true,
                 directory: "original-setting-is-isolated".into(),
                 collectors: Vec::new(),
+                dense_collector_replica_limit:
+                    crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
             });
             for replica in 1..=2 {
                 let directory = fixture

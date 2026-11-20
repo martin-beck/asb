@@ -3505,6 +3505,8 @@ fn prepare_configs(app: &App) -> Result<(usize, PathBuf, Vec<BenchmarkConfig>), 
                                     enabled: true,
                                     directory: "measurements".into(),
                                     collectors: measures.clone(),
+                                    dense_collector_replica_limit:
+                                        crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
                                 }),
                                 retention: crate::benchmark::RetentionConfig::default(),
                                 mcp_servers: Vec::new(),

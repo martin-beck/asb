@@ -335,6 +335,8 @@ fn shared_slot_paths_match_existing_runner_replica_configuration() {
                 enabled: true,
                 directory: format!("batch-{}/measurements", actual.batch),
                 collectors: Vec::new(),
+                dense_collector_replica_limit:
+                    crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
             });
             let replica = crate::runner::replica::configuration(
                 &configured,

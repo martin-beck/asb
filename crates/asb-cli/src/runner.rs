@@ -306,6 +306,13 @@ pub(crate) struct RunOptions<'a> {
     /// Replay-only replica count replacing the source TOML value for this
     /// invocation. The source configuration is never rewritten.
     pub replay_concurrency: Option<usize>,
+    /// Ephemeral cap for high-overhead Perfetto and bpftrace collection.
+    /// The source configuration is never rewritten.
+    pub dense_collector_replica_limit: Option<usize>,
+    /// Internal per-replica decision derived from the configured dense
+    /// collector cap. `None` preserves existing callers; `Some(false)` also
+    /// suppresses environment-enabled dense traces.
+    pub dense_collectors_allowed: Option<bool>,
     /// Adapter-local tool recording/replay is independently selectable from
     /// provider recording/replay, while sharing the sealed cassette carrier.
     pub tool_mode: Option<tape::Mode>,
@@ -458,6 +465,27 @@ pub(crate) fn apply_replay_concurrency(
     Ok(())
 }
 
+/// Apply the ephemeral CLI cap for the two high-overhead trace collectors.
+/// The configuration value is preserved when the override is absent.
+pub(crate) fn apply_dense_collector_replica_limit(
+    config: &mut BenchmarkConfig,
+    override_limit: Option<usize>,
+) -> Result<(), Error> {
+    let Some(limit) = override_limit else {
+        return Ok(());
+    };
+    if limit > crate::benchmark::MAX_CONCURRENCY {
+        return Err(Error::Input(format!(
+            "--dense-collector-replica-limit must not exceed {}",
+            crate::benchmark::MAX_CONCURRENCY
+        )));
+    }
+    if let Some(measurements) = config.measurements.as_mut() {
+        measurements.dense_collector_replica_limit = limit;
+    }
+    Ok(())
+}
+
 fn select_adapter_recording_transport(config: &mut BenchmarkConfig, tool_mode: Option<tape::Mode>) {
     if tool_mode == Some(tape::Mode::Record)
         && agents::find(&config.agent)
@@ -495,6 +523,7 @@ pub(crate) fn run_with_diagnostics(
     let mut config: BenchmarkConfig = toml::from_str(&text)
         .map_err(|error| Error::Input(format!("cannot parse {path}: {error}")))?;
     apply_replay_concurrency(&mut config, options.mode, options.replay_concurrency)?;
+    apply_dense_collector_replica_limit(&mut config, options.dense_collector_replica_limit)?;
     validate_runtime_configuration(&config)?;
     validate_thinking_effort_configuration(&config)?;
     validate_runtime_target(&config)?;
@@ -1067,6 +1096,7 @@ fn run_dispatched(
     let options = RunOptions {
         cpu_allocation: allocation.map(|(cpus, _)| cpus),
         cpu_affinity: allocation.map(|(_, mask)| mask),
+        dense_collectors_allowed: Some(replica::dense_collectors_allowed(&config, 1)),
         ..options
     };
     std::thread::scope(|scope| {
@@ -1110,6 +1140,18 @@ fn run_concurrent(
                 total: config.concurrency,
             },
         )?;
+        let dense_collectors_allowed = replica::dense_collectors_allowed(config, index);
+        let replica_policy = options
+            .policy
+            .map(|saved| {
+                let mut policy =
+                    crate::planning::resolve_for_run(&replica, options.measurement_dir.is_some())?;
+                // Sweep-owned requirements are selected once from the frozen
+                // task catalog, while collector selection is replica-specific.
+                policy.task_requirements = saved.task_requirements.clone();
+                Ok(policy)
+            })
+            .transpose()?;
         let cassette = tape_request.map(|(mode, requested)| {
             let base = requested
                 .map(PathBuf::from)
@@ -1119,7 +1161,14 @@ fn run_concurrent(
         let measurement = options
             .measurement_dir
             .map(|path| PathBuf::from(parallel_path(path, index)));
-        jobs.push((index - 1, replica, measurement, cassette));
+        jobs.push((
+            index - 1,
+            replica,
+            measurement,
+            cassette,
+            replica_policy,
+            dense_collectors_allowed,
+        ));
     }
 
     let has_jobs = !jobs.is_empty();
@@ -1131,7 +1180,9 @@ fn run_concurrent(
             scope.spawn(move || gate.watch_collector_deadline());
         }
         let mut handles = Vec::new();
-        for (index, replica, measurement, cassette) in jobs {
+        for (index, replica, measurement, cassette, replica_policy, dense_collectors_allowed) in
+            jobs
+        {
             #[cfg(test)]
             let test_rendezvous = REPLICA_TEST_RENDEZVOUS.with(|value| value.borrow().clone());
             let spawn = if injected_replica_spawn_failure(index) {
@@ -1199,6 +1250,8 @@ fn run_concurrent(
                                 mode,
                                 cassette: cassette_path,
                                 interactive: false,
+                                policy: replica_policy.as_ref(),
+                                dense_collectors_allowed: Some(dense_collectors_allowed),
                                 ..options
                             },
                             buffer,
@@ -1387,11 +1440,16 @@ fn run_mode(
     };
     let result =
         (|| {
-            let policy = crate::planning::resolve_snapshot(
+            let mut policy = crate::planning::resolve_snapshot(
                 &config,
                 options.measurement_dir.is_some(),
                 options.policy,
             )?;
+            if options.dense_collectors_allowed == Some(false) {
+                policy
+                    .collectors
+                    .retain(|collector| collector.id != "perfetto" && collector.id != "bpftrace");
+            }
             let admitted = AdmittedAttempt::admit(config_path, config, options)?;
             attempt::ConfiguredAttempt::configure(config_path, admitted, policy, output, warnings)?
                 .run(&mut arrival, output, warnings)
@@ -2490,6 +2548,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be between 1"));
+    }
+
+    #[test]
+    fn dense_collector_limit_override_applies_without_replay() {
+        let mut config: BenchmarkConfig = toml::from_str(
+            "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='fixture'\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perfetto']\n",
+        )
+        .unwrap();
+        super::apply_dense_collector_replica_limit(&mut config, Some(3)).unwrap();
+        assert_eq!(
+            config
+                .measurements
+                .as_ref()
+                .unwrap()
+                .dense_collector_replica_limit,
+            3
+        );
+        assert!(super::apply_dense_collector_replica_limit(&mut config, Some(513)).is_err());
     }
 
     #[test]

@@ -23,6 +23,16 @@ impl Identity {
     }
 }
 
+pub(crate) fn dense_collectors_allowed(
+    config: &crate::benchmark::BenchmarkConfig,
+    replica_index: usize,
+) -> bool {
+    config
+        .measurements
+        .as_ref()
+        .is_none_or(|measurements| replica_index <= measurements.dense_collector_replica_limit)
+}
+
 /// Optional persistence observers never select an agent, provider or workload.
 /// Failed metadata publication cannot change a freshly computed task grade.
 pub(crate) trait CompletionObserver: Sync {
@@ -68,6 +78,15 @@ pub(crate) fn configuration(
         if let Some(measurements) = selected.measurements.as_mut() {
             measurements.directory = super::parallel_path(&measurements.directory, replica.index);
         }
+    }
+    if let Some(measurements) = selected.measurements.as_mut()
+        && !dense_collectors_allowed(config, replica.index)
+    {
+        measurements.collectors.retain(|collector| {
+            collector != "perfetto"
+                && collector != "bpftrace"
+                && !collector.starts_with("bpftrace:")
+        });
     }
     Ok(selected)
 }
@@ -118,6 +137,68 @@ mod tests {
         assert_eq!(
             runtime_path(Path::new("a/workspace")),
             Path::new("a/workspace.asb-agent-runtime")
+        );
+    }
+
+    #[test]
+    fn dense_collectors_are_limited_to_the_first_configured_replicas() {
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=3\n[measurements]\nenabled=true\ndirectory='measures'\ncollectors=['system','perfetto','bpftrace:sched-latency']\ndense_collector_replica_limit=2\n",
+        )
+        .unwrap();
+        for index in [1, 2] {
+            assert_eq!(
+                configuration(&config, Identity { index, total: 3 })
+                    .unwrap()
+                    .measurements
+                    .unwrap()
+                    .collectors,
+                ["system", "perfetto", "bpftrace:sched-latency"]
+            );
+        }
+        assert_eq!(
+            configuration(&config, Identity { index: 3, total: 3 })
+                .unwrap()
+                .measurements
+                .unwrap()
+                .collectors,
+            ["system"]
+        );
+    }
+
+    #[test]
+    fn dense_collector_limit_defaults_to_sixteen_replicas() {
+        let config: crate::benchmark::BenchmarkConfig = toml::from_str(
+            "agent='fixture'\nprovider='fixture'\nmodel='fixture'\nworkload='bug-fix'\nconcurrency=17\n[measurements]\nenabled=true\ndirectory='measures'\ncollectors=['perfetto','bpftrace']\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configuration(
+                &config,
+                Identity {
+                    index: 16,
+                    total: 17
+                }
+            )
+            .unwrap()
+            .measurements
+            .unwrap()
+            .collectors,
+            ["perfetto", "bpftrace"]
+        );
+        assert!(
+            configuration(
+                &config,
+                Identity {
+                    index: 17,
+                    total: 17
+                }
+            )
+            .unwrap()
+            .measurements
+            .unwrap()
+            .collectors
+            .is_empty()
         );
     }
 }
