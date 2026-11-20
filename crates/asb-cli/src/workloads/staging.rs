@@ -134,8 +134,21 @@ mod linux {
                 .zip(&owner.prefixes)
                 .zip(PREFIXES)
                 .any(|((pin, identity), path)| {
-                    *identity != pin.identity
+                    // Docker may remount an unchanged container root between
+                    // staging and the stopped application gate. Device and
+                    // inode values are mount-local, so preserve them in the
+                    // receipt for diagnostics but do not require them to
+                    // survive that remount. The fixed path, ownership and
+                    // permissions remain the guest-side custody contract.
+                    pin.identity.path != path
                         || identity.path != path
+                        || pin.identity.schema_version != 1
+                        || pin.identity.scope != "owned-asb-instrumentation-prefix-v1"
+                        || identity.schema_version != pin.identity.schema_version
+                        || identity.scope != pin.identity.scope
+                        || pin.identity.uid != identity.uid
+                        || pin.identity.gid != identity.gid
+                        || pin.identity.mode != identity.mode
                         || identity.uid != unsafe { libc::geteuid() }
                         || identity.gid != unsafe { libc::getegid() }
                         || identity.mode != 0o700
@@ -298,24 +311,25 @@ mod tests {
     }
 
     #[test]
-    fn fixed_prefix_receipt_pins_identity_and_rejects_replacement_with_identical_bytes() {
+    fn fixed_prefix_receipt_accepts_remounted_identity_but_rejects_changed_permissions() {
         let fixture = Fixture::new();
-        let owner = fixture.owner();
+        let mut owner = fixture.owner();
+        // A Docker remount may change only device/inode values while keeping
+        // the fixed prefix, owner and mode intact.
+        for prefix in &mut owner.prefixes {
+            prefix.parent_device = prefix.parent_device.wrapping_add(1);
+            prefix.parent_inode = prefix.parent_inode.wrapping_add(1);
+            prefix.device = prefix.device.wrapping_add(1);
+            prefix.inode = prefix.inode.wrapping_add(1);
+        }
         fixture.write(&owner);
         let guard = verify_at(&fixture.0, &owner).unwrap();
         guard.revalidate(&owner).unwrap();
-        fs::rename(
-            fixture.0.join("asb-private"),
-            fixture.0.join("retained-original"),
-        )
-        .unwrap();
-        fs::create_dir(fixture.0.join("asb-private")).unwrap();
         fs::set_permissions(
             fixture.0.join("asb-private"),
-            fs::Permissions::from_mode(0o700),
+            fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-        fixture.write(&owner);
         assert!(guard.revalidate(&owner).is_err());
         assert!(verify_at(&fixture.0, &owner).is_err());
     }
