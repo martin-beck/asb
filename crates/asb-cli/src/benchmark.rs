@@ -163,6 +163,37 @@ pub struct MeasurementConfig {
     pub enabled: bool,
     pub directory: String,
     pub collectors: Vec<String>,
+    /// Maximum replica count that starts the high-overhead trace collectors.
+    /// Later replicas retain every other selected measurement.
+    #[serde(
+        default = "default_dense_collector_replica_limit",
+        deserialize_with = "deserialize_dense_collector_replica_limit",
+        skip_serializing_if = "is_default_dense_collector_replica_limit"
+    )]
+    pub dense_collector_replica_limit: usize,
+}
+
+pub const DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT: usize = 16;
+
+fn default_dense_collector_replica_limit() -> usize {
+    DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT
+}
+
+fn is_default_dense_collector_replica_limit(value: &usize) -> bool {
+    *value == DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT
+}
+
+fn deserialize_dense_collector_replica_limit<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    if value > MAX_CONCURRENCY {
+        return Err(serde::de::Error::custom(format!(
+            "dense_collector_replica_limit must not exceed {MAX_CONCURRENCY}"
+        )));
+    }
+    Ok(value)
 }
 
 fn default_workspace() -> String {
@@ -344,6 +375,46 @@ mod tests {
         )
         .expect("positive concurrency parses");
         assert_eq!(config.concurrency, 3);
+    }
+
+    #[test]
+    fn dense_collector_limit_defaults_serializes_only_when_changed_and_is_bounded() {
+        let base = "agent='pi'\nworkload='bug-fix'\nprovider='openrouter'\nmodel='tool-model'\n[measurements]\nenabled=true\ndirectory='measurements'\ncollectors=['perfetto']\n";
+        let default: BenchmarkConfig = toml::from_str(base).unwrap();
+        assert_eq!(
+            default
+                .measurements
+                .as_ref()
+                .unwrap()
+                .dense_collector_replica_limit,
+            super::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT
+        );
+        assert!(
+            !toml::to_string(&default)
+                .unwrap()
+                .contains("dense_collector_replica_limit")
+        );
+        let configured: BenchmarkConfig =
+            toml::from_str(&format!("{base}dense_collector_replica_limit=2\n")).unwrap();
+        assert_eq!(
+            configured
+                .measurements
+                .as_ref()
+                .unwrap()
+                .dense_collector_replica_limit,
+            2
+        );
+        assert!(
+            toml::to_string(&configured)
+                .unwrap()
+                .contains("dense_collector_replica_limit = 2")
+        );
+        assert!(
+            toml::from_str::<BenchmarkConfig>(&format!(
+                "{base}dense_collector_replica_limit=513\n"
+            ))
+            .is_err()
+        );
     }
 
     #[test]

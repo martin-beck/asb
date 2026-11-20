@@ -60,10 +60,12 @@ pub(super) fn source_bound(config: &BenchmarkConfig) -> Result<(), Error> {
         enabled,
         directory,
         collectors,
+        dense_collector_replica_limit,
     }) = measurements
     {
         let _: &bool = enabled;
         string(directory)?;
+        let _: &usize = dense_collector_replica_limit;
         for value in collectors {
             string(value)?;
         }
@@ -415,6 +417,7 @@ mod tests {
             enabled: false,
             directory: String::new(),
             collectors: vec![String::new(); 40_000],
+            dense_collector_replica_limit: crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
         });
         assert!(source_bound(&candidate).is_err());
         candidate.measurements = None;

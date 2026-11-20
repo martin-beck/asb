@@ -256,7 +256,7 @@ _asb_config_file_complete() {
         fi
         case "$word" in
             --*=*) continue ;;
-            --repeat|--max-steps|--track|--seed|--cassette|--measurements|--cassette-root|--concurrency|--jobs|--max-active-attempts)
+            --repeat|--max-steps|--track|--seed|--cassette|--measurements|--cassette-root|--concurrency|--dense-collector-replica-limit|--jobs|--max-active-attempts)
                 skip_value=1
                 continue
                 ;;

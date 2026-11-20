@@ -224,6 +224,7 @@ fn configuration_at(options: SetupOptions, directory: &Path) -> Result<Benchmark
             } else {
                 crate::collectors::expand_dependencies(&measure)
             },
+            dense_collector_replica_limit: crate::benchmark::DEFAULT_DENSE_COLLECTOR_REPLICA_LIMIT,
         }),
         retention,
         mcp_servers: Vec::new(),

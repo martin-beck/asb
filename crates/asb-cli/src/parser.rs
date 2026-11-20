@@ -332,6 +332,9 @@ pub(crate) fn run_with_interactive(
                     ignore_compatibility: options.ignore_compatibility,
                     interactive: interactive && !options.json,
                     replay_concurrency: options.concurrency.map(usize::from),
+                    dense_collector_replica_limit: options
+                        .dense_collector_replica_limit
+                        .map(usize::from),
                     report_source: Some(&report_source),
                     ..Default::default()
                 },
@@ -454,6 +457,9 @@ pub(crate) fn run_with_interactive(
                     interactive: interactive && !options.json,
                     mode: tape.carrier,
                     replay_concurrency: options.concurrency.map(usize::from),
+                    dense_collector_replica_limit: options
+                        .dense_collector_replica_limit
+                        .map(usize::from),
                     tool_mode: tape.tool,
                     tool_mode_explicit: tape.tool_explicit,
                     mcp_mode: tape.mcp,
@@ -1466,6 +1472,9 @@ struct RunArgs {
     /// Replay with this many isolated replicas instead of the TOML concurrency.
     #[arg(long, value_name = "N", requires = "replay-direction", value_parser = clap::value_parser!(u16).range(1..=512))]
     concurrency: Option<u16>,
+    /// Start Perfetto and bpftrace only for the first N replicas (default from TOML: 16; 0 disables them).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(0..=512))]
+    dense_collector_replica_limit: Option<u16>,
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
     cassette: Option<String>,
     /// Capture a bounded native workspace capsule beside an LLM recording.
@@ -1600,6 +1609,9 @@ struct SweepArgs {
     /// Replay every configuration with this many isolated replicas instead of its TOML concurrency.
     #[arg(long, value_name = "N", requires = "replay-direction", value_parser = clap::value_parser!(u16).range(1..=512))]
     concurrency: Option<u16>,
+    /// Start Perfetto and bpftrace only for the first N replicas (default from TOML: 16; 0 disables them).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(0..=512))]
+    dense_collector_replica_limit: Option<u16>,
     #[arg(long)]
     json: bool,
     /// Print execution evidence paths, replay selections, cassette details, and report links.
@@ -2178,6 +2190,30 @@ mod tests {
                     "{command} must reject concurrency {value}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn dense_collector_limit_is_available_for_run_and_sweep() {
+        for command in ["run", "sweep"] {
+            let path = if command == "run" {
+                "benchmark.toml"
+            } else {
+                "suite.toml"
+            };
+            Cli::try_parse_from(["asb", command, path, "--dense-collector-replica-limit", "0"])
+                .expect("dense collector limit accepts zero to disable dense traces");
+            assert!(
+                Cli::try_parse_from([
+                    "asb",
+                    command,
+                    path,
+                    "--dense-collector-replica-limit",
+                    "513",
+                ])
+                .is_err(),
+                "{command} must keep the shared bound"
+            );
         }
     }
 

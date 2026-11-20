@@ -105,6 +105,9 @@ pub(crate) struct Options<'a> {
     /// Replay-only replica count replacing every referenced benchmark TOML's
     /// value for this invocation without modifying those source files.
     pub replay_concurrency: Option<usize>,
+    /// Ephemeral cap for high-overhead Perfetto and bpftrace collection in
+    /// every referenced benchmark configuration.
+    pub dense_collector_replica_limit: Option<usize>,
     pub tool_mode: Option<crate::tape::Mode>,
     pub tool_mode_explicit: bool,
     pub mcp_mode: Option<crate::tape::Mode>,
@@ -160,6 +163,7 @@ impl Default for Options<'_> {
             interactive: false,
             mode: None,
             replay_concurrency: None,
+            dense_collector_replica_limit: None,
             tool_mode: None,
             tool_mode_explicit: false,
             mcp_mode: None,

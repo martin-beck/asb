@@ -81,6 +81,10 @@ impl<'a> PreparedSweep<'a> {
                 options.mode,
                 options.replay_concurrency,
             )?;
+            crate::runner::apply_dense_collector_replica_limit(
+                &mut entry.configuration,
+                options.dense_collector_replica_limit,
+            )?;
         }
         // A sweep is one invocation: reject every statically invalid MCP
         // selection before capacity/dependency preflight or old-result
