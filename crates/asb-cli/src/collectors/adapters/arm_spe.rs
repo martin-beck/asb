@@ -144,7 +144,7 @@ impl CollectorAdapter for ArmSpe {
             // Dense cohorts stop one SPE recorder per replica.  Keep the
             // drain bounded, but give perf enough time to flush and close its
             // owned descriptors after all replicas request cancellation.
-            graceful: (name == self.id()).then_some(Duration::from_secs(300)),
+            graceful: (name == self.id()).then_some(Duration::from_secs(900)),
         }
     }
     fn accepts_termination(&self, _: &str, completion: &measurements::ProducerCompletion) -> bool {
