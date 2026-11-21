@@ -17,7 +17,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).parents[1] / "assets/benchmarks"))
 from asb_execution import ExecutionError
-from asb_guest import (execute_agent, export_agent_artifacts, preparation_failure_code, preparation_failure_origin, preparation_failure_phase, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout,
+from asb_guest import (execute_agent, export_agent_artifacts, preparation_failure_code, preparation_failure_origin, preparation_failure_phase, stage_npm_package_tree, stage_python_package_tree, stage_private_inputs, stage_auxiliary_tools, prepare_agent, propagate_guest_timeout, run_guest_install,
                        stage_public_cache, stage_bootstrap, PreparationBudget)
 from asb_runtime import elf as inspect_elf
 from asb_guest import experimental_snapshot_roots, isolate_snapshot_replay_network
@@ -107,6 +107,49 @@ class ArchiveContainer:
 
 
 class GuestBootstrapTests(unittest.TestCase):
+    def test_guest_install_holds_shared_bootstrap_gate_for_nested_cli(self):
+        calls, lock_events = [], []
+
+        class Gate:
+            def acquire(self, timeout):
+                lock_events.append(("acquire", timeout))
+                return True
+
+            def release(self):
+                lock_events.append(("release",))
+
+        def execute(arguments, **options):
+            calls.append((arguments, options))
+            return {"stdout": b"", "stderr": b"", "exit_code": 0,
+                    "timed_out": False, "cancelled": False}
+
+        task = SimpleNamespace(workspace=SimpleNamespace(execute=execute))
+        with patch("asb_guest._GUEST_INSTALL_LOCK", Gate()):
+            result = run_guest_install(task, "node", {"ASB_TEST": "1"}, None, None, [])
+
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(lock_events, [("acquire", 0.1), ("release",)])
+        self.assertEqual(calls, [(
+            ["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"',
+             "asb", "node"],
+            {"environment": {"ASB_TEST": "1"}, "timeout": 900, "output_limit": 256 * 1024,
+             "preparation_timeout": None, "cancelled": unittest.mock.ANY,
+             "on_preparation_failure": None},
+        )])
+
+    def test_guest_install_stops_while_waiting_for_shared_bootstrap_gate(self):
+        class BusyGate:
+            def acquire(self, timeout):
+                if timeout != 0.1:
+                    raise AssertionError("unexpected bootstrap gate wait interval")
+                return False
+
+        cancelled = SimpleNamespace(is_set=lambda: True)
+        task = SimpleNamespace(workspace=SimpleNamespace(execute=lambda *_args, **_kwargs: None))
+        with patch("asb_guest._GUEST_INSTALL_LOCK", BusyGate()):
+            with self.assertRaisesRegex(ExecutionError, "bootstrap turn"):
+                run_guest_install(task, "node", {}, cancelled, None, [])
+
     def test_preparation_failure_code_classifies_pre_target_gate_errors(self):
         cases = {
             "cannot safely coordinate concurrent Docker gate resumes": "gate-lock",
@@ -125,6 +168,7 @@ class GuestBootstrapTests(unittest.TestCase):
             "Docker did not create application gate resume control": "gate-release",
             "execution was cancelled before collector attachment completed": "collector-attachment",
             "execution release was accepted without a valid target identity": "release-identity",
+            "guest runtime installation was cancelled before its bootstrap turn": "guest-install-gate",
             "ASB controller disconnected": "controller-disconnected",
             "ASB controller did not respond before the protocol deadline": "controller-timeout",
         }
