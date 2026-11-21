@@ -27,6 +27,43 @@ from asb_relay import HostRelay, ForwardingCancellation, forward_request
 MAX_EXPORTED_ARTIFACTS = 8
 MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
 
+# Guest images receive immutable runtime archives, but expanding an archive is
+# still a Docker exec operation.  A dense cohort must not start hundreds of
+# those short-lived installers concurrently: that can exhaust the controller's
+# custody budget before any agent is allowed to run.  This gate intentionally
+# covers only installation; staged execution remains fully concurrent.
+_GUEST_INSTALL_LOCK = threading.Lock()
+
+
+def run_guest_install(task, selected, environment, cancelled, preparation_budget, relays):
+    """Install one staged tool after acquiring the bounded shared bootstrap turn."""
+    while not _GUEST_INSTALL_LOCK.acquire(timeout=0.1):
+        if ((cancelled is not None and cancelled.is_set()) or
+                (preparation_budget is not None and preparation_budget.expired())):
+            raise ExecutionError("guest runtime installation was cancelled before its bootstrap turn")
+    try:
+        if preparation_budget is not None:
+            preparation_budget.remaining()
+        result = task.workspace.execute(
+            ["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
+            environment=environment,
+            timeout=min(900, preparation_budget.remaining()) if preparation_budget else 900,
+            output_limit=256 * 1024,
+            # Docker exec startup participates in the same cohort-wide
+            # preparation queue as the later stopped application gate. Keep
+            # the installer command bounded to 15 minutes, but do not silently
+            # restore Workspace.execute's shorter startup deadline here.
+            preparation_timeout=preparation_budget.remaining() if preparation_budget else None,
+            cancelled=ForwardingCancellation(cancelled, relays),
+            on_preparation_failure=preparation_budget.fail if preparation_budget else None)
+        if preparation_budget is not None:
+            preparation_budget.remaining()
+        for relay in relays:
+            relay.check()
+        return result
+    finally:
+        _GUEST_INSTALL_LOCK.release()
+
 
 def write_preparation_budget_artifact(task, name, value):
     artifacts = getattr(task, "artifacts", None)
@@ -74,6 +111,7 @@ def preparation_failure_code(error):
         ("application gate resume control", "gate-release"),
         ("Docker did not create application gate resume control", "gate-release"),
         ("execution was cancelled before collector attachment completed", "collector-attachment"),
+        ("guest runtime installation was cancelled before its bootstrap turn", "guest-install-gate"),
         ("execution release was accepted without a valid target identity", "release-identity"),
         ("ASB controller disconnected", "controller-disconnected"),
         ("ASB controller did not respond before the protocol deadline", "controller-timeout"),
@@ -638,20 +676,8 @@ def prepare_agent(task, request, cancelled, resources=None, relays=None, prepara
     if auxiliary:
         environment['ASB_AUXILIARY_TOOLS'] = json.dumps(auxiliary,sort_keys=True,separators=(',',':'))
     for selected in [*runtimes, *([] if package_tree is not None or python_tree is not None or tool in native_tools else [tool])]:
-        result = task.workspace.execute(["/bin/sh", "-c", 'cd /opt/asb-project && exec /opt/asb-runtime/asb tool install "$1"', "asb", selected],
-                                        environment=environment, timeout=min(900,preparation_budget.remaining()) if preparation_budget else 900, output_limit=256 * 1024,
-                                        # Docker exec startup participates in the same
-                                        # cohort-wide preparation queue as the later
-                                        # stopped application gate. Keep the installer
-                                        # command itself bounded to 15 minutes, but do
-                                        # not silently restore Workspace.execute's
-                                        # shorter default startup deadline here.
-                                        preparation_timeout=preparation_budget.remaining() if preparation_budget else None,
-                                        cancelled=ForwardingCancellation(cancelled, relays),
-                                        on_preparation_failure=preparation_budget.fail if preparation_budget else None)
+        result = run_guest_install(task, selected, environment, cancelled, preparation_budget, relays)
         check_budget()
-        for relay in relays:
-            relay.check()
         for stream in ["stdout", "stderr"]:
             path = task.artifacts / f"install-{selected}.{stream}"
             path.write_bytes(result[stream])
