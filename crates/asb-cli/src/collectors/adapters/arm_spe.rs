@@ -141,7 +141,10 @@ impl CollectorAdapter for ArmSpe {
     fn producer_policy(&self, name: &str) -> measurements::ProducerPolicy {
         measurements::ProducerPolicy {
             stream_bytes: 2 * MIB,
-            graceful: (name == self.id()).then_some(Duration::from_secs(5)),
+            // Dense cohorts stop one SPE recorder per replica.  Keep the
+            // drain bounded, but give perf enough time to flush and close its
+            // owned descriptors after all replicas request cancellation.
+            graceful: (name == self.id()).then_some(Duration::from_secs(300)),
         }
     }
     fn accepts_termination(&self, _: &str, completion: &measurements::ProducerCompletion) -> bool {

@@ -134,7 +134,11 @@ impl CollectorAdapter for BpftraceCollector {
     fn producer_policy(&self, _: &str) -> measurements::ProducerPolicy {
         measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
-            graceful: Some(std::time::Duration::from_secs(5)),
+            // Probe output is drained through the same proof-aware producer
+            // path as perf.  A dense cohort can delay that drain after the
+            // probes have already been interrupted, so retain a bounded
+            // window rather than publishing an incomplete capture.
+            graceful: Some(std::time::Duration::from_secs(300)),
         }
     }
     fn process(

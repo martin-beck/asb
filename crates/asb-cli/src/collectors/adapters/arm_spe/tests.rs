@@ -18,6 +18,15 @@ fn selection_is_bounded_and_does_not_accept_unknown_or_duplicate_options() {
         assert!(!ADAPTER.accepts_selection(invalid), "{invalid}");
     }
 }
+
+#[test]
+fn dense_spe_capture_has_a_bounded_graceful_drain_window() {
+    assert_eq!(
+        ADAPTER.producer_policy("arm-spe").graceful,
+        Some(Duration::from_secs(300))
+    );
+    assert_eq!(ADAPTER.producer_policy("other").graceful, None);
+}
 #[test]
 fn record_selection_never_expands_to_host_or_cpu_wide_scope() {
     let args = args("arm_spe_0", 42, &Options::default());

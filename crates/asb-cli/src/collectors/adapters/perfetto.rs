@@ -153,7 +153,10 @@ impl CollectorAdapter for PerfettoCollector {
     fn producer_policy(&self, _: &str) -> measurements::ProducerPolicy {
         measurements::ProducerPolicy {
             stream_bytes: 256 * 1024 * 1024,
-            graceful: Some(Duration::from_secs(5)),
+            // A shared trace service can still be draining after many
+            // replicas stop together.  Match the bounded perf drain window
+            // so the producer retains custody until that service quiesces.
+            graceful: Some(Duration::from_secs(300)),
         }
     }
     fn process(
