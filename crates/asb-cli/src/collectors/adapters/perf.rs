@@ -299,7 +299,7 @@ impl CollectorAdapter for PerfCollector {
                 // old 30-second drain could reject an otherwise completed
                 // replay solely while the final writer descriptor closed.
                 "perf-symbol-custody" | "perf" | "perf-stat" => {
-                    Some(std::time::Duration::from_secs(300))
+                    Some(std::time::Duration::from_secs(900))
                 }
                 _ => None,
             },
