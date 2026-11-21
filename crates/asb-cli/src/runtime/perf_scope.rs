@@ -33,7 +33,10 @@ pub fn cpu_wide_record_args(cpus: &[u32]) -> Result<Vec<String>, String> {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    Ok(["record", "-e", "cpu-clock", "-g", "-F", "199", "-a", "-C"]
+    // A dense CPU-wide cohort records every task on every assigned CPU.  Keep
+    // call-graph sampling bounded below the process-tree rate so recorder and
+    // symbol-custody teardown remains viable at high replica counts.
+    Ok(["record", "-e", "cpu-clock", "-g", "-F", "99", "-a", "-C"]
         .into_iter()
         .map(str::to_owned)
         .chain([list, "--num-thread-synthesize".into(), "4".into()])
@@ -81,7 +84,7 @@ mod tests {
                 "cpu-clock",
                 "-g",
                 "-F",
-                "199",
+                "99",
                 "-a",
                 "-C",
                 "1,3,4",
