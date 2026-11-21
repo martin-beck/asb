@@ -797,6 +797,18 @@ fn record_activation_timeout(cpu_wide: bool) -> Duration {
     }
 }
 
+/// CPU-wide symbol custody starts one gated helper per replica.  Under a
+/// dense cohort the helpers can be scheduler-delayed before they publish
+/// their gate receipt, so use the same bounded admission window as recording.
+/// Process-scoped runs retain the short default to avoid hiding real failures.
+pub(super) fn symbol_startup_timeout(cpu_wide: bool) -> Duration {
+    if cpu_wide {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn validate_agent_target(
     pid: u32,
@@ -1496,6 +1508,14 @@ mod tests {
         );
         assert_eq!(
             super::record_activation_timeout(true),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            super::symbol_startup_timeout(false),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::symbol_startup_timeout(true),
             std::time::Duration::from_secs(60)
         );
     }
