@@ -49,6 +49,21 @@ pub(crate) fn lock_admission_for(
     lock_named_admission_for(root, "perfetto", "Perfetto service", timeout)
 }
 
+/// Serializes only the expensive private-service bootstrap. Instance selection
+/// remains concurrent, but starting many `traced_probes` processes at once can
+/// make tracefs miss Perfetto's fixed data-source startup window.
+pub(crate) fn lock_bootstrap_for(
+    root: &Path,
+    timeout: std::time::Duration,
+) -> Result<std::fs::File, Error> {
+    lock_named_admission_for(
+        root,
+        "perfetto-bootstrap",
+        "Perfetto service bootstrap",
+        timeout,
+    )
+}
+
 pub(crate) fn lock_bpftrace_admission_for(
     root: &Path,
     timeout: std::time::Duration,
@@ -641,6 +656,24 @@ mod tests {
         drop(bpftrace);
         let bpftrace = lock_bpftrace_admission_for(&root, Duration::from_secs(1)).unwrap();
         drop(bpftrace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn perfetto_bootstrap_is_exclusive_without_blocking_instance_admission() {
+        use std::fs;
+        use std::time::Duration;
+        let root = std::env::temp_dir().join(
+            crate::workloads::TaskIdentity::local("perfetto-bootstrap-admission", None).attempt_id,
+        );
+        fs::create_dir_all(&root).unwrap();
+        let bootstrap = lock_bootstrap_for(&root, Duration::ZERO).unwrap();
+        assert!(lock_bootstrap_for(&root, Duration::ZERO).is_err());
+        let admission = lock_admission_for(&root, Duration::ZERO).unwrap();
+        drop(admission);
+        drop(bootstrap);
+        let bootstrap = lock_bootstrap_for(&root, Duration::from_secs(1)).unwrap();
+        drop(bootstrap);
         fs::remove_dir_all(root).unwrap();
     }
 }
