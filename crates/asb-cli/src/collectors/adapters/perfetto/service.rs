@@ -20,7 +20,10 @@ const DENSE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 // normal interactive startup window even though traced and traced_probes are
 // healthy. Keep this finite and leave the owner enough time to report it.
 const PRODUCER_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
-const OWNER_STARTUP_TIMEOUT: Duration = Duration::from_secs(105);
+// Under a full CPU-pinned cohort, the privileged traced_probes bootstrap can
+// be scheduled substantially later than traced itself. Keep the service owner
+// bounded while allowing that kernel-facing initialization to complete.
+const OWNER_STARTUP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[cfg(test)]
 #[path = "probe_tests.rs"]
@@ -628,6 +631,7 @@ mod tests {
     #[test]
     fn dense_registration_budget_remains_bounded_and_covers_its_query() {
         assert_eq!(PRODUCER_REGISTRATION_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(OWNER_STARTUP_TIMEOUT, Duration::from_secs(5 * 60));
         assert!(OWNER_STARTUP_TIMEOUT > PRODUCER_REGISTRATION_TIMEOUT);
     }
 
