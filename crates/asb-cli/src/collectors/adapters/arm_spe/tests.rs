@@ -23,7 +23,7 @@ fn selection_is_bounded_and_does_not_accept_unknown_or_duplicate_options() {
 fn dense_spe_capture_has_a_bounded_graceful_drain_window() {
     assert_eq!(
         ADAPTER.producer_policy("arm-spe").graceful,
-        Some(Duration::from_secs(300))
+        Some(Duration::from_secs(900))
     );
     assert_eq!(ADAPTER.producer_policy("other").graceful, None);
 }
