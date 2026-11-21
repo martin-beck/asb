@@ -14,6 +14,10 @@ use std::time::Instant;
 const DENSE_PROFILE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const DENSE_PROFILE_ADMISSION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
+// A busy dense cohort can delay a newly spawned privileged gate beyond the
+// ordinary short receipt window. This only extends gate admission, not probe
+// readiness, execution, or collector shutdown.
+const DENSE_PROFILE_GATE_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 mod custom_scope;
 mod snapshots;
 #[cfg(test)]
@@ -367,12 +371,13 @@ impl measurements::Session {
                 crate::evidence::Capture::create(&stdout_path)?,
                 crate::evidence::Capture::create(&stderr_path)?,
             ];
-            let mut collector = Collector::spawn(
+            let mut collector = Collector::spawn_with_startup_timeout(
                 &format!("bpftrace-{index}"),
                 &ADAPTER,
                 command,
                 route,
                 captures,
+                DENSE_PROFILE_GATE_STARTUP_TIMEOUT,
             )?;
             if let Err(error) = wait_for_profile_ready(
                 || collector.producer.poll(),
@@ -414,7 +419,14 @@ impl measurements::Session {
                         .args(["-B", "line"])
                         .args(["-e", &format!("{prelude}\n{}", profile.program)])
                         .arg(pid.to_string());
-                    Collector::spawn(&name, &ADAPTER, command, route, captures)
+                    Collector::spawn_with_startup_timeout(
+                        &name,
+                        &ADAPTER,
+                        command,
+                        route,
+                        captures,
+                        DENSE_PROFILE_GATE_STARTUP_TIMEOUT,
+                    )
                 });
             match admitted {
                 Ok(mut collector) => {

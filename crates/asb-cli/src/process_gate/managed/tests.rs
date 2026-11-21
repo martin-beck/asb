@@ -1074,6 +1074,41 @@ fn verified_stopped_guardian_cancels_without_launching_the_application() {
 }
 
 #[test]
+fn bounded_startup_override_extends_only_gate_admission() {
+    let scope = test_support::Scope::new();
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("asb");
+
+    let (mut invalid_command, invalid_route) =
+        command(&binary, "/bin/sh", &["-c".into(), "exit 0".into()]);
+    let error = Admission::new(invalid_route.validate_gate(&mut invalid_command).unwrap())
+        .unwrap()
+        .spawn_with_startup_timeout(Duration::from_secs(61))
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+    let (mut command, route) = command(&binary, "/bin/sh", &["-c".into(), "exit 0".into()]);
+    let before = Instant::now();
+    let mut gate = Admission::new(route.validate_gate(&mut command).unwrap())
+        .unwrap()
+        .spawn_with_startup_timeout(Duration::from_secs(60))
+        .unwrap();
+    assert!(
+        gate.startup_deadline >= before + Duration::from_secs(59),
+        "the explicit bounded budget must replace only the gate receipt deadline"
+    );
+    gate.stop().unwrap();
+    drop(gate);
+    scope.wait_finished();
+}
+
+#[test]
 fn adopted_descendant_exit_does_not_abort_traced_principal() {
     for exit in ["os._exit(0)", "os.kill(os.getpid(), signal.SIGTERM)"] {
         let root = root().join(format!("adopted-orphan-{}", std::process::id()));
