@@ -125,6 +125,22 @@ impl<'a> Admission<'a> {
     }
 
     pub(crate) fn spawn(self) -> io::Result<ManagedGate> {
+        self.spawn_with_startup_timeout(STARTUP)
+    }
+
+    /// Use a bounded startup allowance when an owned principal must enter a
+    /// kernel-serialized initialization path before it can publish its gate
+    /// receipt. Ordinary launches retain the short default through `spawn`.
+    pub(crate) fn spawn_with_startup_timeout(
+        self,
+        startup_timeout: Duration,
+    ) -> io::Result<ManagedGate> {
+        if !(STARTUP..=MEASURED_PRINCIPAL_STARTUP).contains(&startup_timeout) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process gate startup timeout must be between 5 and 60 seconds",
+            ));
+        }
         let child = self.command.spawn()?;
         let Self {
             receiver,
@@ -148,7 +164,7 @@ impl<'a> Admission<'a> {
             admitted: false,
             complete: None,
             observed: None,
-            startup_deadline: Instant::now() + STARTUP,
+            startup_deadline: Instant::now() + startup_timeout,
             control,
             observation_only,
             role,

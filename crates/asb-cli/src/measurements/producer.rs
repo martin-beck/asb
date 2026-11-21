@@ -107,6 +107,19 @@ impl Producer {
         files: [File; 2],
         dependency: Option<Arc<dyn Send + Sync>>,
     ) -> Result<Self, String> {
+        Self::spawn_with_dependency_and_startup_timeout(
+            command, route, policy, files, dependency, None,
+        )
+    }
+
+    pub(crate) fn spawn_with_dependency_and_startup_timeout(
+        command: &mut Command,
+        route: crate::launch::CommandRoute,
+        policy: Policy,
+        files: [File; 2],
+        dependency: Option<Arc<dyn Send + Sync>>,
+        startup_timeout: Option<Duration>,
+    ) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
         {
             // Privileged launchers may suppress forwarding a targeted SIGINT
@@ -129,7 +142,10 @@ impl Producer {
                     .validate_gate(command)
                     .map_err(|error| error.to_string())?,
             )
-            .and_then(|admission| admission.spawn())
+            .and_then(|admission| match startup_timeout {
+                Some(timeout) => admission.spawn_with_startup_timeout(timeout),
+                None => admission.spawn(),
+            })
             .map_err(|error| error.to_string())?;
             let stopped = Arc::new(AtomicBool::new(false));
             let request = Arc::clone(&stopped);

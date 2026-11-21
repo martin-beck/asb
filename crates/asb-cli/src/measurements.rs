@@ -34,9 +34,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, atomic::AtomicBool};
-#[cfg(test)]
-use std::time::Duration;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_CAPTURE: usize = 256 * 1024;
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(0);
@@ -314,6 +312,32 @@ impl Collector {
         captures: [crate::evidence::Capture; 2],
     ) -> Result<Self, String> {
         Self::spawn_with_dependency(name, adapter, command, route, captures, None)
+    }
+
+    pub(crate) fn spawn_with_startup_timeout(
+        name: &str,
+        adapter: &'static dyn collectors::CollectorAdapter,
+        mut command: Command,
+        route: crate::launch::CommandRoute,
+        captures: [crate::evidence::Capture; 2],
+        startup_timeout: Duration,
+    ) -> Result<Self, String> {
+        let files = [captures[0].writer()?, captures[1].writer()?];
+        let producer = Producer::spawn_with_dependency_and_startup_timeout(
+            &mut command,
+            route,
+            adapter.producer_policy(name),
+            files,
+            None,
+            Some(startup_timeout),
+        )?;
+        Ok(Self {
+            name: name.into(),
+            adapter,
+            producer,
+            started: Instant::now(),
+            captures,
+        })
     }
     pub(crate) fn spawn_with_dependency(
         name: &str,
