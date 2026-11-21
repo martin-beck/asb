@@ -4,7 +4,7 @@ No provider/agent registry lives here. Selection, package recipes, endpoint
 configuration and output interpretation remain in the same Rust adapters used
 by native execution. Host homes, venvs and project directories are not mounted.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import math
@@ -13,6 +13,7 @@ from pathlib import Path
 import posixpath
 import re
 import subprocess
+import stat
 import tarfile
 import tempfile
 import time
@@ -22,6 +23,11 @@ from asb_execution import ExecutionError, _gate_resume_section, principal_observ
 from asb_runtime import bundle, bundle_tool
 from asb_staging import upload, upload_files, stage_runtime, root_execute, prepare_guest_roots
 from asb_relay import HostRelay, ForwardingCancellation, forward_request
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - guest execution requires Linux in production.
+    fcntl = None
 
 
 MAX_EXPORTED_ARTIFACTS = 8
@@ -35,13 +41,63 @@ MAX_EXPORTED_ARTIFACT_BYTES = 16 * 1024 * 1024
 _GUEST_INSTALL_LOCK = threading.Lock()
 
 
-def run_guest_install(task, selected, environment, cancelled, preparation_budget, relays):
-    """Install one staged tool after acquiring the bounded shared bootstrap turn."""
+def _guest_install_lock_path():
+    """Return the user-private cross-worker gate for nested guest installers."""
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    return Path(tempfile.gettempdir()) / f"asb-guest-install-{uid}.lock"
+
+
+@contextmanager
+def guest_install_section(cancelled, preparation_budget):
+    """Serialize guest extraction across all local sweep worker processes."""
     while not _GUEST_INSTALL_LOCK.acquire(timeout=0.1):
         if ((cancelled is not None and cancelled.is_set()) or
                 (preparation_budget is not None and preparation_budget.expired())):
             raise ExecutionError("guest runtime installation was cancelled before its bootstrap turn")
     try:
+        if fcntl is None:
+            yield
+            return
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise ExecutionError("cannot safely coordinate guest runtime installation")
+        flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(_guest_install_lock_path(), flags, 0o600)
+        except OSError as error:
+            raise ExecutionError("cannot open guest runtime installation coordination lock") from error
+        try:
+            metadata = os.fstat(descriptor)
+            expected_uid = os.geteuid() if hasattr(os, "geteuid") else metadata.st_uid
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != expected_uid:
+                raise ExecutionError("guest runtime installation coordination lock is not a private regular file")
+            os.fchmod(descriptor, 0o600)
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if ((cancelled is not None and cancelled.is_set()) or
+                            (preparation_budget is not None and preparation_budget.expired())):
+                        raise ExecutionError("guest runtime installation was cancelled before its bootstrap turn")
+                    time.sleep(0.1)
+                except OSError as error:
+                    raise ExecutionError("cannot acquire guest runtime installation coordination lock") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+    finally:
+        _GUEST_INSTALL_LOCK.release()
+
+
+def run_guest_install(task, selected, environment, cancelled, preparation_budget, relays):
+    """Install one staged tool after acquiring the bounded shared bootstrap turn."""
+    with guest_install_section(cancelled, preparation_budget):
         if preparation_budget is not None:
             preparation_budget.remaining()
         result = task.workspace.execute(
@@ -61,8 +117,6 @@ def run_guest_install(task, selected, environment, cancelled, preparation_budget
         for relay in relays:
             relay.check()
         return result
-    finally:
-        _GUEST_INSTALL_LOCK.release()
 
 
 def write_preparation_budget_artifact(task, name, value):
