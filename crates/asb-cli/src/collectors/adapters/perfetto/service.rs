@@ -70,75 +70,89 @@ impl Service {
     ) -> Result<Arc<Self>, String> {
         let root = project_root.canonicalize().map_err(|e| e.to_string())?;
         before_admission();
-        let _admission = super::project::lock_admission_for(&root, DENSE_ADMISSION_TIMEOUT)
-            .map_err(|e| e.to_string())?;
-        let mut services = registry
-            .lock()
-            .map_err(|_| "Perfetto service registry is unavailable")?;
-        // Reset can finish between initial project discovery and admission.
-        // Reload under the stable lock and never fall back to a parent project.
-        let (current_root, settings) = crate::project::load(&root).map_err(|e| e.to_string())?;
-        if current_root.canonicalize().map_err(|e| e.to_string())? != root {
-            return Err("benchmark project changed during Perfetto admission; retry after initialization completes".into());
-        }
-        if settings.perfetto_instances.is_empty() {
-            return Err("Perfetto needs delegated, isolated tracefs instances. Run `asb init --configure-host` in this benchmark project and approve the printed Perfetto commands (or use --yes after reviewing them). Existing project data will not be reset.".into());
-        }
-        let expected = super::project::instance_names(&root)?;
-        if settings
-            .perfetto_instances
-            .iter()
-            .any(|name| !expected.contains(name))
-        {
-            return Err("Perfetto instance configuration does not belong to this project. Run `asb init --configure-host` to create its own instances; do not reuse another project's tracing instance.".into());
-        }
-        services.retain(|_, service| service.strong_count() != 0);
-        let directory = root.join(".asb/perfetto");
-        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        let tracefs = if Path::new("/sys/kernel/tracing/instances").is_dir() {
-            Path::new("/sys/kernel/tracing")
-        } else {
-            Path::new("/sys/kernel/debug/tracing")
-        };
-        for instance in settings.perfetto_instances {
-            let lease_path = directory.join(format!("{instance}.lease"));
-            if services.get(&lease_path).and_then(Weak::upgrade).is_some() {
-                continue;
+        let (directory, lease_path, instance, marker, lock, helper) = {
+            // Hold admission only while selecting and leasing an instance.
+            // The lease itself prevents reuse while expensive private-service
+            // startup proceeds, allowing independent dense sessions to start
+            // concurrently instead of serializing behind one registry lock.
+            let _admission = super::project::lock_admission_for(&root, DENSE_ADMISSION_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            let mut services = registry
+                .lock()
+                .map_err(|_| "Perfetto service registry is unavailable")?;
+            // Reset can finish between initial project discovery and admission.
+            // Reload under the stable lock and never fall back to a parent project.
+            let (current_root, settings) =
+                crate::project::load(&root).map_err(|e| e.to_string())?;
+            if current_root.canonicalize().map_err(|e| e.to_string())? != root {
+                return Err("benchmark project changed during Perfetto admission; retry after initialization completes".into());
             }
-            let Some(lock) = try_lease(&lease_path)? else {
-                continue;
-            };
-            let marker = tracefs
-                .join("instances")
-                .join(&instance)
-                .join("trace_marker");
-            let instance_root = marker.parent().expect("instance marker parent");
-            let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
-            if !fs::symlink_metadata(instance_root)
-                .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid)
-                || !super::project::delegated_ready(instance_root)
+            if settings.perfetto_instances.is_empty() {
+                return Err("Perfetto needs delegated, isolated tracefs instances. Run `asb init --configure-host` in this benchmark project and approve the printed commands (or use --yes after reviewing them). Existing project data will not be reset.".into());
+            }
+            let expected = super::project::instance_names(&root)?;
+            if settings
+                .perfetto_instances
+                .iter()
+                .any(|name| !expected.contains(name))
             {
-                return Err("Perfetto instance delegation is incomplete or foreign-owned; run `asb init --configure-host` and review the exact scoped repair commands. No instance was modified by benchmarking.".into());
+                return Err("Perfetto instance configuration does not belong to this project. Run `asb init --configure-host` to create its own instances; do not reuse another project's tracing instance.".into());
             }
-            OpenOptions::new().write(true).open(&marker).map_err(|e| format!("delegated Perfetto instance is missing or not writable ({e}); run `asb init --configure-host` after reboot or repair the printed instance permissions"))?;
+            services.retain(|_, service| service.strong_count() != 0);
+            let directory = root.join(".asb/perfetto");
+            fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            let tracefs = if Path::new("/sys/kernel/tracing/instances").is_dir() {
+                Path::new("/sys/kernel/tracing")
+            } else {
+                Path::new("/sys/kernel/debug/tracing")
+            };
+            let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
+            let mut selected = None;
+            for instance in settings.perfetto_instances {
+                let lease_path = directory.join(format!("{instance}.lease"));
+                if services.get(&lease_path).and_then(Weak::upgrade).is_some() {
+                    continue;
+                }
+                let Some(lock) = try_lease(&lease_path)? else {
+                    continue;
+                };
+                let marker = tracefs
+                    .join("instances")
+                    .join(&instance)
+                    .join("trace_marker");
+                let instance_root = marker.parent().expect("instance marker parent");
+                if !fs::symlink_metadata(instance_root)
+                    .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid)
+                    || !super::project::delegated_ready(instance_root)
+                {
+                    return Err("Perfetto instance delegation is incomplete or foreign-owned; run `asb init --configure-host` and review the exact scoped repair commands. No instance was modified by benchmarking.".into());
+                }
+                OpenOptions::new().write(true).open(&marker).map_err(|e| format!("delegated Perfetto instance is missing or not writable ({e}); run `asb init --configure-host` after reboot or repair the printed instance permissions"))?;
+                selected = Some((lease_path, instance, marker, lock));
+                break;
+            }
+            let (lease_path, instance, marker, lock) = selected.ok_or_else(|| "all of this project's Perfetto instances are in use. Wait for a capture to finish or run `asb init --configure-host` to configure the available project instances; no running capture was stopped.".to_owned())?;
             let helper = std::env::current_exe().map_err(|e| e.to_string())?;
             #[cfg(test)]
             let helper = std::env::var_os("ASB_TEST_PERFETTO_HELPER")
                 .map(PathBuf::from)
                 .unwrap_or(helper);
-            let service = Arc::new(Self::start(
-                executable,
-                instance,
-                marker,
-                lock,
-                &directory,
-                Some(&helper),
-            )?);
-            service.check_alive()?;
-            services.insert(lease_path, Arc::downgrade(&service));
-            return Ok(service);
-        }
-        Err("all of this project's Perfetto instances are in use. Wait for a capture to finish or run `asb init --configure-host` to configure the available project instances; no running capture was stopped.".into())
+            (directory, lease_path, instance, marker, lock, helper)
+        };
+        let service = Arc::new(Self::start(
+            executable,
+            instance,
+            marker,
+            lock,
+            &directory,
+            Some(&helper),
+        )?);
+        service.check_alive()?;
+        registry
+            .lock()
+            .map_err(|_| "Perfetto service registry is unavailable")?
+            .insert(lease_path, Arc::downgrade(&service));
+        Ok(service)
     }
 
     fn start(
