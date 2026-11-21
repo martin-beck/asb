@@ -139,14 +139,23 @@ impl Service {
                 .unwrap_or(helper);
             (directory, lease_path, instance, marker, lock, helper)
         };
-        let service = Arc::new(Self::start(
-            executable,
-            instance,
-            marker,
-            lock,
-            &directory,
-            Some(&helper),
-        )?);
+        // Lease selection remains short and concurrent. Serializing only the
+        // daemon bootstrap prevents a dense cohort from overwhelming tracefs
+        // while Perfetto's ftrace/process-stats sources have a fixed startup
+        // deadline. The lease keeps this selected instance unavailable while
+        // its owner waits for the bounded bootstrap turn.
+        let service = {
+            let _bootstrap = super::project::lock_bootstrap_for(&root, DENSE_ADMISSION_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            Arc::new(Self::start(
+                executable,
+                instance,
+                marker,
+                lock,
+                &directory,
+                Some(&helper),
+            )?)
+        };
         service.check_alive()?;
         registry
             .lock()
