@@ -119,6 +119,10 @@ fn adapter_metadata_only_recognizes_owned_profile_artifacts() {
             .graceful
             .is_some()
     );
+    assert_eq!(
+        ADAPTER.producer_policy("bpftrace-custom").graceful,
+        Some(std::time::Duration::from_secs(300))
+    );
     assert!(ADAPTER.prioritizes_artifact("bpftrace-custom.json"));
     assert!(!ADAPTER.prioritizes_artifact("perfetto-custom.svg"));
     assert!(ADAPTER.display_artifact("bpftrace-custom.svg").is_some());

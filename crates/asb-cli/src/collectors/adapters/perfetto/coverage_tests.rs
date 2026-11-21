@@ -451,7 +451,10 @@ fn missing_capture_context_remains_diagnostic_and_owned_svg_errors_propagate() {
     assert_eq!(ADAPTER.tool_id(), Some("perfetto"));
     assert!(ADAPTER.requires_pid());
     assert!(!ADAPTER.stop_at_execution_end());
-    assert!(ADAPTER.producer_policy("perfetto").graceful.is_some());
+    assert_eq!(
+        ADAPTER.producer_policy("perfetto").graceful,
+        Some(Duration::from_secs(300))
+    );
     assert!(ADAPTER.prioritizes_artifact("perfetto-state-timeline.svg"));
     assert!(ADAPTER.prioritizes_artifact("perfetto-metric-events.svg"));
     assert!(!ADAPTER.prioritizes_artifact("foreign.svg"));
