@@ -15,6 +15,13 @@ static SERVICES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<Service>>>> = OnceLock::n
 // leaves enough time for all selected replicas to acquire isolated instances.
 const DENSE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+// A private-service query starts a short-lived client process. Under a dense,
+// CPU-pinned cohort the kernel can defer that client long enough to exceed the
+// normal interactive startup window even though traced and traced_probes are
+// healthy. Keep this finite and leave the owner enough time to report it.
+const PRODUCER_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
+const OWNER_STARTUP_TIMEOUT: Duration = Duration::from_secs(105);
+
 #[cfg(test)]
 #[path = "probe_tests.rs"]
 mod probe_tests;
@@ -213,7 +220,7 @@ impl Service {
             let mut daemons = Daemons { children, readers: Vec::new() };
             let result = (|| -> Result<(), String> {
                 daemons.start(traced, &directory.join(format!("{instance}-{nonce:x}-traced.log")))?;
-                let deadline = Instant::now() + Duration::from_secs(30);
+                let deadline = Instant::now() + PRODUCER_REGISTRATION_TIMEOUT;
                 while !socket_ready(&producer) || !socket_ready(&consumer) {
                     daemons.check_alive()?;
                     if Instant::now() >= deadline { return Err("owned Perfetto service did not open private sockets within 30 seconds; inspect .asb/perfetto service logs".into()); }
@@ -237,7 +244,7 @@ impl Service {
         }).map_err(|e| format!("cannot start Perfetto owner thread: {e}"))?;
         service.owner = Some(Owner { stop, thread });
         started
-            .recv_timeout(Duration::from_secs(75))
+            .recv_timeout(OWNER_STARTUP_TIMEOUT)
             .map_err(|_| "Perfetto service startup timed out or owner exited".to_owned())??;
         Ok(service)
     }
@@ -329,7 +336,7 @@ fn producer_registered(command: &mut Command) -> Result<bool, String> {
         let mut bytes = Vec::new();
         stdout.take(65537).read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PRODUCER_REGISTRATION_TIMEOUT;
     let success = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
@@ -593,6 +600,14 @@ mod coverage_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_registration_budget_remains_bounded_and_covers_its_query() {
+        assert_eq!(PRODUCER_REGISTRATION_TIMEOUT, Duration::from_secs(60));
+        assert!(OWNER_STARTUP_TIMEOUT > PRODUCER_REGISTRATION_TIMEOUT);
+    }
+
     #[test]
     fn concurrent_sessions_hold_distinct_instance_leases() {
         let root = std::env::temp_dir()
@@ -627,8 +642,6 @@ mod tests {
         drop(leases);
         std::fs::remove_dir_all(root).unwrap();
     }
-    use super::*;
-
     #[test]
     fn waiting_for_project_admission_does_not_lock_other_projects_registry() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
