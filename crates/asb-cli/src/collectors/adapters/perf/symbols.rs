@@ -84,15 +84,21 @@ impl measurements::Session {
             crate::evidence::Capture::create(&directory.join("perf-symbol-custody.stdout"))?,
             crate::evidence::Capture::create(&directory.join("perf-symbol-custody.stderr"))?,
         ];
-        let mut collector =
-            Collector::spawn("perf-symbol-custody", &ADAPTER, command, route, captures)?;
+        let cpu_wide = self.state::<super::PerfState>().borrow().cpu_wide.is_some();
+        let mut collector = Collector::spawn_with_startup_timeout(
+            "perf-symbol-custody",
+            &ADAPTER,
+            command,
+            route,
+            captures,
+            super::symbol_startup_timeout(cpu_wide),
+        )?;
         // CPU-wide recording starts one symbol helper per pinned replica.  At
         // high concurrency those short-lived Python helpers can be queued
         // behind other admitted replicas even after perf itself has enabled
         // successfully.  Use the same bounded allowance as CPU-wide perf
         // activation rather than treating scheduler pressure as a collector
         // failure.
-        let cpu_wide = self.state::<super::PerfState>().borrow().cpu_wide.is_some();
         if let Err(error) = ready.enable(super::record_activation_timeout(cpu_wide), || {
             collector.startup_exit()
         }) {
