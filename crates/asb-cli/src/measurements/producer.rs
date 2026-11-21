@@ -129,7 +129,7 @@ impl Producer {
                 || policy.stream_bytes > 256 * 1024 * 1024
                 || policy
                     .graceful
-                    .is_some_and(|grace| grace.is_zero() || grace > Duration::from_secs(300))
+                    .is_some_and(|grace| grace.is_zero() || grace > Duration::from_secs(900))
             {
                 return Err("invalid collector capture policy".into());
             }
