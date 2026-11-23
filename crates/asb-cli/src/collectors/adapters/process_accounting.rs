@@ -166,8 +166,14 @@ pub(super) struct SeriesSampler {
 }
 
 impl SeriesSampler {
-    pub(super) fn start(root: ProcessIdentity, interval_ms: u64) -> Option<Self> {
-        let initial = read_tree(root)?;
+    /// Start a CPU-only process-tree sampler.
+    ///
+    /// CPU observations require `/proc/<pid>/stat` and `schedstat`, whereas
+    /// reading `/proc/<pid>/io` can be denied for an otherwise observable
+    /// root-owned workload container. I/O collection has its own cgroup-v2
+    /// path, so a permission failure there must not suppress CPU metrics.
+    pub(super) fn start_cpu(root: ProcessIdentity, interval_ms: u64) -> Option<Self> {
+        let initial = read_cpu_tree(root)?;
         if initial.len() > MAX_OBSERVED_PROCESSES {
             return None;
         }
@@ -186,7 +192,7 @@ impl SeriesSampler {
                     {
                         break;
                     }
-                    let Some(current) = read_tree(root) else {
+                    let Some(current) = read_cpu_tree(root) else {
                         break;
                     };
                     let delta = tree_delta(&previous, &current);
@@ -198,7 +204,7 @@ impl SeriesSampler {
                         });
                     }
                 }
-                if let Some(current) = read_tree(root) {
+                if let Some(current) = read_cpu_tree(root) {
                     let delta = tree_delta(&previous, &current);
                     if let Ok(mut values) = thread_samples.lock() {
                         values.push(TimedSample {
@@ -262,11 +268,43 @@ fn read_tree(root: ProcessIdentity) -> Option<BTreeMap<Identity, Sample>> {
     (!processes.is_empty() && root.matches()).then_some(processes)
 }
 
+fn read_cpu_tree(root: ProcessIdentity) -> Option<BTreeMap<Identity, Sample>> {
+    if !root.matches() {
+        return None;
+    }
+    let mut processes = BTreeMap::new();
+    for pid in crate::measurements::process_tree_pids(root.pid) {
+        let Some(identity) = ProcessIdentity::read(pid) else {
+            continue;
+        };
+        if !identity.in_tree(root) {
+            continue;
+        }
+        let Some(sample) = read_cpu_process(pid) else {
+            if identity.matches() {
+                return None;
+            }
+            continue;
+        };
+        if !identity.in_tree(root) {
+            continue;
+        }
+        processes.insert((identity.pid, identity.start_time_ticks), sample);
+    }
+    (!processes.is_empty() && root.matches()).then_some(processes)
+}
+
 fn read_process(pid: u32) -> Option<Sample> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let schedstat = fs::read_to_string(format!("/proc/{pid}/schedstat")).ok()?;
     let io = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
     parse_sample(&stat, &schedstat, &io)
+}
+
+fn read_cpu_process(pid: u32) -> Option<Sample> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let schedstat = fs::read_to_string(format!("/proc/{pid}/schedstat")).ok()?;
+    parse_cpu_sample(&stat, &schedstat)
 }
 
 fn parse_sample(stat: &str, schedstat: &str, io: &str) -> Option<Sample> {
@@ -291,6 +329,24 @@ fn parse_sample(stat: &str, schedstat: &str, io: &str) -> Option<Sample> {
         read_bytes: io_value("read_bytes:")?,
         write_bytes: io_value("write_bytes:")?,
         cancelled_write_bytes: io_value("cancelled_write_bytes:")?,
+    })
+}
+
+fn parse_cpu_sample(stat: &str, schedstat: &str) -> Option<Sample> {
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    Some(Sample {
+        user_ticks: fields.get(11)?.parse().ok()?,
+        system_ticks: fields.get(12)?.parse().ok()?,
+        io_delay_ticks: fields
+            .get(39)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        runqueue_ns: schedstat.split_whitespace().nth(1)?.parse().ok()?,
+        ..Sample::default()
     })
 }
 
@@ -344,6 +400,22 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn cpu_only_sample_does_not_require_proc_io() {
+        let mut fields = vec!["0"; 40];
+        fields[11] = "13";
+        fields[12] = "5";
+        fields[39] = "7";
+        let sample =
+            parse_cpu_sample(&format!("123 (agent) {}", fields.join(" ")), "1 11 2").unwrap();
+        assert_eq!(sample.user_ticks, 13);
+        assert_eq!(sample.system_ticks, 5);
+        assert_eq!(sample.io_delay_ticks, 7);
+        assert_eq!(sample.runqueue_ns, 11);
+        assert_eq!(sample.read_bytes, 0);
+        assert!(parse_cpu_sample("not a proc stat", "1 2 3").is_none());
     }
 
     #[test]

@@ -36,8 +36,8 @@ pub(super) fn activate(session: &mut measurements::Session, pid: u32) {
         .measurement_target()
         .or_else(|| ProcessIdentity::read(pid));
     state.task_delayacct_enabled = super::process_accounting::task_delayacct_enabled();
-    state.sampler =
-        root.and_then(|root| SeriesSampler::start(root, measurements::measurement_interval_ms()));
+    state.sampler = root
+        .and_then(|root| SeriesSampler::start_cpu(root, measurements::measurement_interval_ms()));
     if state.sampler.is_none() {
         state.reason = Some("cannot start direct /proc process-tree sampler".into());
     }
