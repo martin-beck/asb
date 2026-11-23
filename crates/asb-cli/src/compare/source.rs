@@ -85,10 +85,24 @@ pub(super) fn read_svg(path: &Path, artifact: &str) -> Result<String, Error> {
     read_svg_limit(path, artifact, MAX_BYTES)
 }
 
-/// Read a selected flamegraph for the self-contained report. The bound matches
-/// the existing external flamegraph policy while retaining a finite limit.
-pub(super) fn read_flamegraph_svg(path: &Path, artifact: &str) -> Result<String, Error> {
-    read_svg_limit(path, artifact, 512 * 1024 * 1024)
+/// Load a flamegraph only when it is small enough to inline safely. Larger
+/// graphs remain validated external assets so report generation cannot fail
+/// after a successful benchmark merely because an SVG is too large to embed.
+pub(super) fn read_flamegraph_preview(
+    path: &Path,
+    artifact: &str,
+) -> Result<Option<String>, Error> {
+    const MAX_INLINE_FLAMEGRAPH_BYTES: u64 = 64 * 1024 * 1024;
+    let metadata = fs::metadata(path).map_err(|error| {
+        Error::Run(format!(
+            "cannot inspect embedded SVG artifact {artifact}: {error}"
+        ))
+    })?;
+    if metadata.len() > MAX_INLINE_FLAMEGRAPH_BYTES {
+        validate_external_svg(path, artifact)?;
+        return Ok(None);
+    }
+    read_svg_limit(path, artifact, MAX_INLINE_FLAMEGRAPH_BYTES).map(Some)
 }
 
 fn read_svg_limit(path: &Path, artifact: &str, limit: u64) -> Result<String, Error> {
@@ -113,10 +127,11 @@ fn read_svg_limit(path: &Path, artifact: &str, limit: u64) -> Result<String, Err
 /// their regular-file shape and SVG prefix without retaining the whole document
 /// in memory.
 pub(super) fn validate_external_svg(path: &Path, artifact: &str) -> Result<(), Error> {
-    // Derived aggregate flamegraphs can legitimately exceed the former 256 MiB
-    // ceiling at high replay concurrency. Keep a finite bound while allowing
-    // the largest supported aggregate to remain an external, sandboxed asset.
-    const MAX_EXTERNAL_SVG_BYTES: u64 = 512 * 1024 * 1024;
+    // Derived aggregate flamegraphs can legitimately exceed 512 MiB at high
+    // replay concurrency. Keep a finite 4 GiB bound while allowing the largest
+    // supported aggregate to remain an external, sandboxed asset; files above
+    // the 64 MiB inline limit are never retained in report memory.
+    const MAX_EXTERNAL_SVG_BYTES: u64 = 4 * 1024 * 1024 * 1024;
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -157,6 +172,30 @@ pub(super) fn validate_external_svg(path: &Path, artifact: &str) -> Result<(), E
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_flamegraph_is_validated_without_being_inlined() {
+        let path = std::env::temp_dir().join(format!(
+            "asb-large-flamegraph-{}-{}.svg",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let mut file = fs::File::create(&path).unwrap();
+        use std::io::Write;
+        file.write_all(b"<svg xmlns=\"http://www.w3.org/2000/svg\">")
+            .unwrap();
+        file.set_len(64 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+        let result = read_flamegraph_preview(&path, "flamegraph.svg");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(result.unwrap().is_none());
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub(super) struct Request {
@@ -407,8 +446,11 @@ pub(super) fn load_at(
             ) && !previews.contains_key(href)
             {
                 if name == "flamegraph.svg" {
-                    if row.id.replica == 1 && row.replica_index.is_none_or(|replica| replica == 1) {
-                        previews.insert(href.clone(), read_flamegraph_svg(physical, href)?);
+                    if row.id.replica == 1
+                        && row.replica_index.is_none_or(|replica| replica == 1)
+                        && let Some(svg) = read_flamegraph_preview(physical, href)?
+                    {
+                        previews.insert(href.clone(), svg);
                     }
                 } else {
                     previews.insert(href.clone(), read_svg(physical, href)?);
