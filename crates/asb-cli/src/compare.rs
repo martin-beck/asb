@@ -971,6 +971,12 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
                 flamegraph_data_uri(previews.get(artifact).expect("selected preview exists"))
             );
             body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
+        } else {
+            body.push_str(&format!(
+                "<p>Flamegraph is too large to inline; the validated SVG remains available as an external report asset. <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a></p>",
+                escape(artifact),
+                escape(artifact)
+            ));
         }
     } else {
         body.push_str("<p>Flamegraph unavailable or not recorded.</p>");

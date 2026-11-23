@@ -1241,16 +1241,31 @@ fn derived_flamegraph_figure(
     svg: &str,
     folded: &str,
 ) -> Result<String, Error> {
-    let svg_document = source::read_flamegraph_svg(&stage.join(svg), svg)?;
-    let document = format!(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
-        flamegraph_data_uri(&svg_document)
-    );
+    let svg_path = stage.join(svg);
+    let body = match source::read_flamegraph_preview(&svg_path, svg)? {
+        Some(svg_document) => {
+            let document = format!(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
+                flamegraph_data_uri(&svg_document)
+            );
+            format!(
+                "<iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe>",
+                escape(title),
+                escape(&document)
+            )
+        }
+        None => {
+            source::validate_external_svg(&svg_path, svg)?;
+            format!(
+                "<img class=\"flamegraph-external\" src=\"{}\" alt=\"Aggregate flamegraph\" loading=\"lazy\">",
+                escape(svg)
+            )
+        }
+    };
     Ok(format!(
-        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div><iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details></figure>",
+        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{}<a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details></figure>",
         escape(title),
-        escape(title),
-        escape(&document),
+        body,
         escape(svg),
         escape(folded)
     ))
