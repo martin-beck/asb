@@ -194,10 +194,11 @@ pub(super) fn rows(
             ) && !previews.contains_key(href)
             {
                 if name == "flamegraph.svg" {
-                    if row.id.replica == 1 && row.replica_index.is_none_or(|replica| replica == 1) {
-                        if let Some(svg) = super::read_flamegraph_preview(physical, href)? {
-                            previews.insert(href.clone(), svg);
-                        }
+                    if row.id.replica == 1
+                        && row.replica_index.is_none_or(|replica| replica == 1)
+                        && let Some(svg) = super::read_flamegraph_preview(physical, href)?
+                    {
+                        previews.insert(href.clone(), svg);
                     }
                 } else {
                     previews.insert(href.clone(), read_svg(physical, href)?);
