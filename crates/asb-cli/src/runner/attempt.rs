@@ -2,6 +2,13 @@
 //! phase; live provider custody surrounds the whole workload pipeline.
 use super::*;
 
+/// An explicitly approximate replay must prepare the locally available native
+/// workload material before it can report the recorded/material difference.
+/// Strict replay keeps the cassette-bound offline material requirement.
+fn requires_recorded_material(mode: Option<tape::Mode>, ignore_compatibility: bool) -> bool {
+    mode == Some(tape::Mode::Replay) && !ignore_compatibility
+}
+
 struct Context<'a> {
     config_path: PathBuf,
     publication_config: PathBuf,
@@ -558,17 +565,18 @@ impl<'a> ReadyAttempt<'a> {
         };
 
         let mut workload_session = None;
-        let expected_material = if options.mode == Some(tape::Mode::Replay) {
-            if let Some(expected) = options.replay_expected_compatibility {
-                Some(expected.material_sha256.clone())
-            } else if let Some(gate) = options.preparation_gate {
-                gate.expected_material()?
+        let expected_material =
+            if requires_recorded_material(options.mode, options.ignore_compatibility) {
+                if let Some(expected) = options.replay_expected_compatibility {
+                    Some(expected.material_sha256.clone())
+                } else if let Some(gate) = options.preparation_gate {
+                    gate.expected_material()?
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
         let preparation = instrument_phase(
             measurement_session.as_mut(),
             LifecyclePhase::WorkloadPreparation,
@@ -2290,6 +2298,22 @@ impl Publication<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approximate_replay_prepares_local_material_before_reporting_the_difference() {
+        assert!(super::requires_recorded_material(
+            Some(crate::tape::Mode::Replay),
+            false,
+        ));
+        assert!(!super::requires_recorded_material(
+            Some(crate::tape::Mode::Replay),
+            true,
+        ));
+        assert!(!super::requires_recorded_material(
+            Some(crate::tape::Mode::Record),
+            false,
+        ));
+    }
+
     #[test]
     fn snapshot_recording_requires_both_workspace_and_native_evidence() {
         assert!(super::missing_snapshot_evidence(true, true).is_empty());

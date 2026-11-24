@@ -328,7 +328,7 @@ def resolve_image(client, name, build, host_arch=None, offline=False, material_s
         # to the same cassette material, task, and clean base revision, so it
         # is a sufficient offline replay source. Never build or pull here.
         listing = getattr(client.images, "list", None)
-        if callable(listing):
+        if material_sha256 is not None and callable(listing):
             try:
                 candidates = listing(filters={"label": "asb.material-sha256=" + material_sha256})
             except docker.errors.DockerException as error:
