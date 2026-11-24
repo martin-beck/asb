@@ -515,6 +515,11 @@ impl Inputs {
             current.initial = saved.initial.clone();
             current.stability = Some(repaired_stability);
         } else if metadata_only_executable_drift {
+            // Receipt reconciliation never executes an agent. Preserve the
+            // original seal for provenance, while using the verified repaired
+            // executable closure as the stability baseline for its final
+            // read-only reuse check.
+            current.stability = Some(current.initial.clone());
             current.initial = saved.initial.clone();
         }
         if plan.execution.is_some() {
