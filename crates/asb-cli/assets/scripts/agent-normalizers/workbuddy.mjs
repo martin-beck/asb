@@ -8,6 +8,9 @@ export function normalizeRequest(request) {
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-(?:sweep-(?:record|replay)-[A-Za-z0-9_.-]+|workspaces(?:-replay)?-[A-Za-z0-9_.-]+)/g, "<asb-project-workspace>")
     .replace(/srv-data-projects-[A-Za-z0-9_.-]+-results-asb-executions-[A-Za-z0-9-]+-batch-\d+-workspace/g, "<asb-project-workspace>")
     .replace(/(<codebuddy_background_info>[\s\S]*?model named ).*?(\. The exact model ID is ).*?(?=\.(?:\n|$))/i, "$1<asb-workbuddy-model>$2<asb-workbuddy-model>");
+  const normalizeEnvironment = (value) => typeof value === "string"
+    ? value.replace(/(<env>[\s\S]*?\nOS Version: )[^\r\n]+/, "$1<asb-workbuddy-os-version>")
+    : value;
   const visit = (value) => {
     if (typeof value === "string") return normalizeString(value);
     if (Array.isArray(value)) return value.map(visit);
@@ -30,6 +33,7 @@ export function normalizeRequest(request) {
     for (const key of ["conversationRequestId", "messageId", "requestModelId", "requestModelName"]) {
       if (typeof next[key] === "string") next[key] = `<asb-workbuddy-${key}>`;
     }
+    if (next.role === "system") next.content = normalizeEnvironment(next.content);
     if (!request.profileActive) next.content = visit(next.content);
     if (next.role === "tool") next.content = normalizeResultPath(next.content);
     return next;
