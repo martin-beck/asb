@@ -873,6 +873,19 @@ fn flamegraph_plans(rows: &[BenchmarkData]) -> FlamegraphPlans {
 }
 
 fn folded_source(row: &BenchmarkData) -> Option<PathBuf> {
+    // A timed-out post-processing pipeline intentionally retains its partial
+    // folded stream for diagnosis. It is not a completed FlameGraph and must
+    // not become an input to a derived aggregate or diff report.
+    if row
+        .collector_documents
+        .get("flamegraph")
+        .is_some_and(|document| {
+            document.get("status").and_then(Value::as_str) != Some("completed")
+                || document.get("artifact").and_then(Value::as_str) != Some("flamegraph.svg")
+        })
+    {
+        return None;
+    }
     row.artifact_sources
         .iter()
         .find(|(name, _)| name.rsplit('/').next() == Some("flamegraph.folded"))
@@ -1319,6 +1332,10 @@ mod tests {
             (result.artifacts[0].clone(), folded),
             (result.artifacts[1].clone(), svg),
         ]);
+        result.collector_documents.insert(
+            "flamegraph".into(),
+            serde_json::json!({"status":"completed", "artifact":"flamegraph.svg"}),
+        );
         result
     }
 
@@ -1541,6 +1558,60 @@ mod tests {
             before, after,
             "post-processing leaves continuation evidence unchanged"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aggregate_flamegraphs_ignore_retained_output_from_unavailable_collectors() {
+        let root = std::env::temp_dir().join(format!(
+            "asb-concurrency-unavailable-flamegraph-{}-{}",
+            std::process::id(),
+            crate::tools::runtime::unique_id()
+        ));
+        let sources = root.join("campaign");
+        let stage = root.join("comparison");
+        fs::create_dir_all(&sources).unwrap();
+        fs::create_dir_all(&stage).unwrap();
+
+        let c1_folded = sources.join("c1.folded");
+        let c1_svg = sources.join("c1.svg");
+        let c2_folded = sources.join("c2.folded");
+        let c2_svg = sources.join("c2.svg");
+        let partial_folded = sources.join("partial.folded");
+        let partial_svg = sources.join("partial.svg");
+        fs::write(&c1_folded, "root;c1 1\n").unwrap();
+        fs::write(&c1_svg, "<svg><title>c1</title></svg>\n").unwrap();
+        fs::write(&c2_folded, "root;c2 2\n").unwrap();
+        fs::write(&c2_svg, "<svg><title>c2</title></svg>\n").unwrap();
+        fs::write(&partial_folded, "root;partial").unwrap();
+        fs::write(&partial_svg, "<svg><title>partial</title></svg>\n").unwrap();
+
+        let mut unavailable = flame_row("pi", 2, 0, 1, partial_folded.clone(), partial_svg);
+        unavailable.collector_documents.insert(
+            "flamegraph".into(),
+            serde_json::json!({
+                "status":"unavailable",
+                "artifact":null,
+                "reason":"perf script timed out"
+            }),
+        );
+        let rows = vec![
+            flame_row("pi", 1, 0, 0, c1_folded, c1_svg),
+            flame_row("pi", 2, 0, 0, c2_folded.clone(), c2_svg),
+            unavailable,
+        ];
+        let plans = flamegraph_plans(&rows);
+        let c2 = plans
+            .profiles
+            .iter()
+            .find(|profile| profile.concurrency == 2 && profile.statistic == FlameStatistic::Mean)
+            .unwrap();
+        assert_eq!(c2.inputs, vec![c2_folded]);
+
+        render_flamegraphs(&stage, &plans, Some(&differential_tools(&root))).unwrap();
+        assert!(stage.join(&c2.svg).is_file());
+        assert_eq!(fs::read(&partial_folded).unwrap(), b"root;partial");
         fs::remove_dir_all(root).unwrap();
     }
 
