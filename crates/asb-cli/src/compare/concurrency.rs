@@ -1255,31 +1255,38 @@ fn derived_flamegraph_figure(
     folded: &str,
 ) -> Result<String, Error> {
     let svg_path = stage.join(svg);
-    let body = match source::read_flamegraph_preview(&svg_path, svg)? {
+    let (body, download) = match source::read_flamegraph_preview(&svg_path, svg)? {
         Some(svg_document) => {
-            let document = format!(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Aggregate flamegraph\">",
-                flamegraph_data_uri(&svg_document)
-            );
-            format!(
-                "<iframe title=\"{}\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe>",
-                escape(title),
-                escape(&document)
+            let embedded = flamegraph_data_uri(&svg_document);
+            (
+                format!(
+                    "<iframe title=\"{}\" sandbox=\"allow-scripts\" src=\"{}\"></iframe>",
+                    escape(title),
+                    escape(&embedded)
+                ),
+                format!(
+                    "<a href=\"{}\" download=\"{}\">Download embedded SVG</a>",
+                    escape(&embedded),
+                    escape(svg),
+                ),
             )
         }
         None => {
             source::validate_external_svg(&svg_path, svg)?;
-            format!(
-                "<img class=\"flamegraph-external\" src=\"{}\" alt=\"Aggregate flamegraph\" loading=\"lazy\">",
-                escape(svg)
+            (
+                format!(
+                    "<iframe title=\"{}\" sandbox=\"allow-scripts\" src=\"{}\" loading=\"lazy\"></iframe>",
+                    escape(title),
+                    escape(svg)
+                ),
+                format!("<a href=\"{}\" download>Download SVG</a>", escape(svg)),
             )
         }
     };
     Ok(format!(
-        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{}<a href=\"{}\" download>Download SVG</a> · <a href=\"{}\" download>Download folded stacks</a><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details></figure>",
+        "<figure class=\"flamegraph-chart\" data-collector=\"Flamegraph aggregate\"><div class=\"flamegraph-toolbar\"><strong>{}</strong><button type=\"button\" class=\"flamegraph-expand\">Enlarge</button><button type=\"button\" class=\"flamegraph-close\" hidden>Close</button></div>{}{download} · <a href=\"{}\" download>Download folded stacks</a><details class=\"chart-description\"><summary>What this measures</summary><p>Aggregated sampled process-tree call stacks for the selected population. Diff colors show relative sampled-stack growth or shrinkage, not an exact wall-time breakdown.</p></details></figure>",
         escape(title),
         body,
-        escape(svg),
         escape(folded)
     ))
 }
@@ -1630,11 +1637,11 @@ mod tests {
         fs::write(root.join(svg), document).unwrap();
 
         let html = derived_flamegraph_figure(&root, "aggregate", svg, "aggregate.folded").unwrap();
-        assert!(html.contains("srcdoc="), "{html}");
-        assert!(html.contains("img-src data:"), "{html}");
+        assert!(html.contains("sandbox=\"allow-scripts\""), "{html}");
+        assert!(html.contains("src=\"data:image/svg+xml;base64,"), "{html}");
         assert!(html.contains("data:image/svg+xml;base64,"), "{html}");
-        assert!(html.contains("aggregate.svg"), "{html}");
-        assert!(!html.contains("allow-scripts"), "{html}");
+        assert!(html.contains("download=\"aggregate.svg\""), "{html}");
+        assert!(!html.contains("allow-same-origin"), "{html}");
 
         fs::remove_dir_all(root).unwrap();
     }

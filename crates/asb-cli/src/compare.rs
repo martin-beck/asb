@@ -963,19 +963,23 @@ fn flamegraph_figure(benchmark: &BenchmarkData, previews: &BTreeMap<String, Stri
     if let Some(artifact) =
         graph.filter(|_| benchmark.result_source != ResultSource::RecoveredOfficialGrade)
     {
-        if previews.contains_key(artifact) {
-            // The selected SVG is contained in a CSP-constrained image wrapper
-            // so the report remains self-contained and SVG scripts never run.
-            let document = format!(
-                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\"><style>body{{margin:0}}img{{display:block;min-width:900px;width:100%;height:auto}}</style><img src=\"{}\" alt=\"Flamegraph\">",
-                flamegraph_data_uri(previews.get(artifact).expect("selected preview exists"))
-            );
-            body.push_str(&format!("<iframe title=\"Flamegraph\" sandbox=\"allow-same-origin\" srcdoc=\"{}\"></iframe><a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a>", escape(&document), escape(artifact), escape(artifact)));
+        if let Some(preview) = previews.get(artifact) {
+            // Preserve the upstream FlameGraph SVG document. Its own embedded
+            // controls provide search, zoom, and reset behavior inside an
+            // opaque-origin frame, while the identical data URL makes this
+            // report self-contained and downloadable.
+            let embedded = flamegraph_data_uri(preview);
+            body.push_str(&format!(
+                "<iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" src=\"{}\"></iframe><a href=\"{}\" download=\"{}\">Download embedded SVG</a>",
+                escape(&embedded),
+                escape(&embedded),
+                escape(artifact.rsplit('/').next().unwrap_or("flamegraph.svg")),
+            ));
         } else {
             body.push_str(&format!(
-                "<p>Flamegraph is too large to inline; the validated SVG remains available as an external report asset. <a href=\"{}\" target=\"_blank\" rel=\"noopener\">Open original SVG</a> · <a href=\"{}\" download>Download original SVG</a></p>",
+                "<p>Flamegraph is too large to embed; the validated SVG is shown from the report asset and remains downloadable.</p><iframe title=\"Flamegraph\" sandbox=\"allow-scripts\" src=\"{}\" loading=\"lazy\"></iframe><a href=\"{}\" download>Download SVG</a>",
                 escape(artifact),
-                escape(artifact)
+                escape(artifact),
             ));
         }
     } else {
@@ -2560,6 +2564,7 @@ mod tests {
     #[test]
     fn concurrent_flamegraphs_have_a_dedicated_collapsible_section() {
         let root = std::env::temp_dir().join(crate::tools::runtime::unique_id());
+        let flamegraph = "<svg><title>flame</title><script>function search(){}function unzoom(){}</script></svg>";
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("one.toml"),
@@ -2576,11 +2581,7 @@ mod tests {
                 r#"{"status":"completed","elapsed_ms":12}"#,
             )
             .unwrap();
-            std::fs::write(
-                measurement.join("flamegraph.svg"),
-                "<svg><title>flame</title></svg>",
-            )
-            .unwrap();
+            std::fs::write(measurement.join("flamegraph.svg"), flamegraph).unwrap();
             std::fs::write(
                 measurement.join("flamegraph.json"),
                 r#"{"status":"completed","artifact":"flamegraph.svg"}"#,
@@ -2613,17 +2614,14 @@ mod tests {
         ));
         assert_eq!(html.matches("class=\"flamegraph-chart\"").count(), 1);
         assert_eq!(html.matches("<iframe title=\"Flamegraph\"").count(), 1);
-        assert!(html.contains("&lt;img src=&quot;"));
-        assert!(html.contains("data:image/svg+xml;base64,"));
-        assert!(html.contains("srcdoc="));
+        let embedded = super::flamegraph_data_uri(flamegraph);
+        assert!(html.contains(&embedded));
+        assert!(html.contains("src=\"data:image/svg+xml;base64,"));
         assert!(!html.contains("<title>flame</title>"));
-        assert_eq!(html.matches("sandbox=\"allow-same-origin\"").count(), 1);
-        assert_eq!(
-            html.matches("default-src 'none'; img-src data:; style-src 'unsafe-inline'")
-                .count(),
-            1
-        );
-        assert_eq!(html.matches("Download original SVG").count(), 1);
+        assert_eq!(html.matches("sandbox=\"allow-scripts\"").count(), 1);
+        assert_eq!(html.matches("sandbox=\"allow-same-origin\"").count(), 0);
+        assert_eq!(html.matches("Download embedded SVG").count(), 1);
+        assert!(html.contains("download=\"flamegraph.svg\""));
         assert_eq!(html.matches("Download folded stacks").count(), 1);
         assert_eq!(html.matches("Collector status: completed").count(), 1);
         let table = &html[..flamegraphs];
@@ -2910,7 +2908,9 @@ mod tests {
         assert!(report.contains("bpftrace profiles"));
         assert!(report.contains("class=\"flamegraph-chart\""));
         assert!(report.contains("flamegraph.svg"));
-        assert!(report.contains("sandbox=\"allow-same-origin\""));
+        assert!(report.contains("sandbox=\"allow-scripts\""));
+        assert!(!report.contains("sandbox=\"allow-same-origin\""));
+        assert!(report.contains("Download embedded SVG"));
         assert!(report.contains("Collector status: completed"));
         assert!(!report.contains("class=\"embedded-svg flamegraph\""));
         assert!(!report.contains("<object class=\"flamegraph\""));
