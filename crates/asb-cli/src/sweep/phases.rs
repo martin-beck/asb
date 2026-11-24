@@ -302,7 +302,11 @@ impl<'a> PreparedSweep<'a> {
                     invocation_dir: options.invocation_dir.unwrap_or_else(|| Path::new(".")),
                     allow_collector_teardown_repair: options.allow_collector_teardown_repair,
                     prior_asb_executable: options.prior_asb_executable,
-                    metadata_only_executable_drift: false,
+                    // Receipt reconciliation is metadata-only: it never
+                    // starts an agent or evaluator. Permit a replacement ASB
+                    // executable only when the caller supplies the preserved
+                    // executable that reproduces the original input seal.
+                    metadata_only_executable_drift: options.reconcile_completed,
                 },
             )?;
             if options.reconcile_completed {
