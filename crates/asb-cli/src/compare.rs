@@ -1356,10 +1356,7 @@ fn chart_subgroups_html_with_outer_collector(
         let subgroup = display_dotted_prefixes(&presentation.title, outer_collector)
             .into_iter()
             .rev()
-            .find(|prefix| {
-                prefix_counts.get(prefix).copied().unwrap_or_default() >= 2
-                    && !outer_collector.is_some_and(|collector| same_group_name(prefix, collector))
-            });
+            .find(|prefix| prefix_counts.get(prefix).copied().unwrap_or_default() >= 2);
         if let Some(prefix) = subgroup {
             grouped.entry(prefix).or_default().push(figure);
         } else {
@@ -1381,75 +1378,87 @@ fn chart_subgroups_html_with_outer_collector(
 }
 
 /// Presentation-only dotted prefixes. Metric identities retain escaping, but
-/// group labels omit them and any root already shown by the outer collector.
+/// report headings are a hierarchy: a label already visible in an outer group
+/// or earlier in the same path must not be repeated by a nested subgroup.
+///
+/// The aliases cover legacy metric roots and their user-facing collector
+/// labels. They are deliberately handled by the same path sanitizer so a
+/// later alias is removed just like any other repeated ancestor segment.
 fn display_dotted_prefixes(title: &str, outer_collector: Option<&str>) -> Vec<String> {
-    let mut parts = title
+    let parts = title
         .split(" (per-replica series mean)")
         .next()
         .unwrap_or(title)
         .split('.')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if let Some(collector) = outer_collector {
-        parts = strip_collector_roots(parts, collector);
-    }
+    let parts = sanitize_group_path(parts, outer_collector);
     let mut prefixes = BTreeSet::new();
     for length in 1..parts.len() {
-        prefixes.insert(collapse_repeated_segments(&parts[..length].join(".")));
+        prefixes.insert(parts[..length].join("."));
     }
     prefixes.into_iter().collect()
 }
 
-fn strip_collector_roots<'a>(mut parts: Vec<&'a str>, collector: &str) -> Vec<&'a str> {
-    let roots: &[&[&str]] = match collector {
-        "ASB derived metrics" => &[&["asb", "derived", "metrics"], &["asb", "derived"]],
-        "Component timings" => &[&["component"]],
-        "Kernel pressure" => &[&["analysis", "pressure"], &["kernel", "pressure"]],
-        "Arm SPE" => &[&["analysis", "arm_spe"], &["arm", "spe"]],
-        "Arm PMU" => &[&["arm", "pmu"]],
-        "Agent process observation" => &[&["agent"]],
-        "Tool calls" => &[&["tool_calls"]],
-        "AgentSysPerf" => &[&["agentsysperf"]],
-        "bpftrace" => &[&["bpftrace"]],
-        "Perfetto" => &[&["perfetto"]],
-        "perf" => &[&["perf"]],
-        "mpstat" => &[&["process", "cpu"]],
-        "iostat" => &[&["process", "io"]],
-        _ => &[],
-    };
+fn sanitize_group_path<'a>(parts: Vec<&'a str>, outer_collector: Option<&str>) -> Vec<&'a str> {
+    let aliases = outer_collector.map(collector_group_aliases).unwrap_or(&[]);
+    let mut visible = Vec::with_capacity(parts.len());
+    let mut seen = BTreeSet::new();
+    if let Some(collector) = outer_collector {
+        let normalized = normalize_group_name(collector);
+        if !normalized.is_empty() {
+            seen.insert(normalized);
+        }
+    }
     let mut index = 0;
     while index < parts.len() {
-        let mut removed = false;
-        for root in roots {
-            if parts.len().saturating_sub(index) >= root.len()
+        if let Some(alias) = aliases.iter().find(|alias| {
+            parts.len().saturating_sub(index) >= alias.len()
                 && parts[index..]
                     .iter()
-                    .zip(root.iter())
-                    .all(|(part, root)| part.eq_ignore_ascii_case(root))
-            {
-                parts.drain(index..index + root.len());
-                removed = true;
-                break;
-            }
+                    .zip(alias.iter())
+                    .all(|(part, alias)| same_group_segment(part, alias))
+        }) {
+            index += alias.len();
+            continue;
         }
-        if !removed {
-            index += 1;
+        let normalized = normalize_group_name(parts[index]);
+        if !normalized.is_empty() && seen.insert(normalized) {
+            visible.push(parts[index]);
         }
+        index += 1;
     }
-    parts
+    visible
 }
 
-fn collapse_repeated_segments(prefix: &str) -> String {
-    let mut segments = Vec::new();
-    for segment in prefix.split('.') {
-        if segments.last().copied() != Some(segment) {
-            segments.push(segment);
-        }
+fn collector_group_aliases(collector: &str) -> &'static [&'static [&'static str]] {
+    match collector {
+        "ASB derived metrics" => &[
+            &["ASB derived metrics"],
+            &["asb", "derived", "metrics"],
+            &["asb", "derived"],
+        ],
+        "Component timings" => &[&["Component timings"], &["component"]],
+        "Kernel pressure" => &[
+            &["Kernel pressure"],
+            &["analysis", "pressure"],
+            &["kernel", "pressure"],
+        ],
+        "Arm SPE" => &[&["Arm SPE"], &["analysis", "arm_spe"], &["arm", "spe"]],
+        "Arm PMU" => &[&["Arm PMU"], &["arm", "pmu"]],
+        "Agent process observation" => &[&["Agent process observation"], &["agent"]],
+        "Tool calls" => &[&["Tool calls"], &["tool_calls"]],
+        "AgentSysPerf" => &[&["AgentSysPerf"], &["agentsysperf"]],
+        "bpftrace" => &[&["bpftrace"]],
+        "Perfetto" => &[&["Perfetto"], &["perfetto"]],
+        "perf" => &[&["perf"]],
+        "mpstat" => &[&["mpstat"], &["process", "cpu"]],
+        "iostat" => &[&["iostat"], &["process", "io"]],
+        _ => &[],
     }
-    segments.join(".")
 }
 
-fn same_group_name(left: &str, right: &str) -> bool {
+fn same_group_segment(left: &str, right: &str) -> bool {
     normalize_group_name(left) == normalize_group_name(right)
 }
 
@@ -2311,7 +2320,7 @@ mod pipeline_tests;
 mod tests {
     use super::{
         ChartPresentation, GraphNames, chart_presentation, chart_subgroups_html_for_collector,
-        component_timing_flow_html, run,
+        component_timing_flow_html, display_dotted_prefixes, run, sanitize_group_path,
     };
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
@@ -3591,6 +3600,50 @@ mod tests {
         );
         assert!(pressure.contains("<summary>cpu (2 graphs)</summary>"));
         assert!(!pressure.contains("analysis.pressure"));
+    }
+
+    #[test]
+    fn subgroup_paths_remove_outer_aliases_and_all_repeated_ancestors() {
+        assert_eq!(
+            sanitize_group_path(
+                vec![
+                    "Component timings",
+                    "component",
+                    "agent",
+                    "Component timings",
+                    "execute",
+                    "agent",
+                    "cpu_user_ms",
+                ],
+                Some("Component timings"),
+            ),
+            vec!["agent", "execute", "cpu_user_ms"]
+        );
+        assert_eq!(
+            sanitize_group_path(
+                vec!["Custom group", "service", "Custom group", "latency_ms"],
+                Some("Custom group"),
+            ),
+            vec!["service", "latency_ms"]
+        );
+        assert_eq!(
+            display_dotted_prefixes(
+                "Component timings.component.agent.Component timings.execute.agent.cpu_user_ms",
+                Some("Component timings"),
+            ),
+            vec!["agent", "agent.execute"]
+        );
+        assert_eq!(
+            display_dotted_prefixes(
+                "ASB.derived.metrics.container.ASB.derived.container.io.read_bytes",
+                Some("ASB derived metrics"),
+            ),
+            vec!["container", "container.io"]
+        );
+        assert_eq!(
+            display_dotted_prefixes("first.second.first.third.second.value", None),
+            vec!["first", "first.second", "first.second.third"]
+        );
     }
 
     #[test]
