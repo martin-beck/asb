@@ -341,16 +341,17 @@ impl ProxyAdapter for LlmtapeAdapter {
     }
 
     fn input_files(&self, invocation_dir: &Path) -> Result<Vec<PathBuf>, Error> {
-        execution_input_files(configured_override(invocation_dir).as_deref())
+        execution_input_files(invocation_dir)
     }
     fn runtime_inputs(
         &self,
         invocation_dir: &Path,
     ) -> Result<Vec<crate::runtime_inputs::Dependency>, Error> {
-        // Retain the logical command, not just its initial PATH resolution,
-        // so a new earlier PATH candidate is detectable at final discovery.
         Ok(vec![crate::runtime_inputs::Dependency::program(
-            configured_override(invocation_dir).unwrap_or_else(|| "node".into()),
+            execution_input_files(invocation_dir)?
+                .into_iter()
+                .next()
+                .expect("tape proxy declares one executable"),
         )])
     }
 
@@ -465,7 +466,7 @@ impl ProxyAdapter for LlmtapeAdapter {
             .transpose()?;
         let port = if builtin { 0 } else { free_port()? };
         let ready_file = scratch.path.join("ready.json");
-        let mut command = executable.command();
+        let mut command = executable.command(&request.invocation_dir)?;
         command.current_dir(&request.invocation_dir);
         command.env_remove("ASB_TAPE_READY_FILE");
         command.env_remove("ASB_TAPE_OWNER_PIPE");
@@ -1362,14 +1363,15 @@ enum ProxyExecutable {
 }
 
 impl ProxyExecutable {
-    fn command(&self) -> Command {
+    fn command(&self, invocation_dir: &Path) -> Result<Command, Error> {
         match self {
             Self::Builtin(script) => {
-                let mut command = Command::new("node");
+                let node = builtin_node(invocation_dir).unwrap_or_else(|| PathBuf::from("node"));
+                let mut command = Command::new(node);
                 command.arg(script);
-                command
+                Ok(command)
             }
-            Self::Override(executable) => Command::new(executable),
+            Self::Override(executable) => Ok(Command::new(executable)),
         }
     }
 }
@@ -1436,14 +1438,42 @@ fn configured_override(invocation_dir: &Path) -> Option<String> {
         })
 }
 
-fn execution_input_files(override_path: Option<&str>) -> Result<Vec<PathBuf>, Error> {
+fn execution_input_files(invocation_dir: &Path) -> Result<Vec<PathBuf>, Error> {
+    let override_path = configured_override(invocation_dir);
+    execution_input_files_for(override_path.as_deref(), invocation_dir)
+}
+
+fn execution_input_files_for(
+    override_path: Option<&str>,
+    invocation_dir: &Path,
+) -> Result<Vec<PathBuf>, Error> {
     // The built-in scripts are already bound by ASB's executable identity.
     // Keep the actual command's host runtime or explicit override separately.
-    let program = Path::new(override_path.unwrap_or("node"));
-    let path = crate::tools::host_executable(program).ok_or_else(|| {
-        Error::Input("selected tape proxy executable is unavailable for input binding".into())
-    })?;
+    let path = if let Some(override_path) = override_path {
+        crate::tools::host_executable(Path::new(override_path)).ok_or_else(|| {
+            Error::Input("selected tape proxy executable is unavailable for input binding".into())
+        })?
+    } else {
+        required_builtin_node(invocation_dir)?
+    };
     Ok(vec![path])
+}
+
+fn builtin_node(invocation_dir: &Path) -> Option<PathBuf> {
+    if let Ok((root, project)) = crate::project::require_initialized(invocation_dir)
+        && let Some(node) = crate::tools::resolve("node", &root, &project.tools_dir)
+    {
+        return Some(PathBuf::from(node));
+    }
+    crate::tools::host_executable(Path::new("node"))
+}
+
+fn required_builtin_node(invocation_dir: &Path) -> Result<PathBuf, Error> {
+    builtin_node(invocation_dir).ok_or_else(|| {
+        Error::Input(
+            "built-in tape proxy needs Node.js; run `asb tool install node` in this project or install Node.js on PATH".into(),
+        )
+    })
 }
 
 // Created exclusively, so teardown only removes files owned by this session.
@@ -2080,13 +2110,44 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let link = root.join("selected-proxy");
         symlink(&program, &link).unwrap();
-        let files = super::execution_input_files(link.to_str()).unwrap();
+        let files = super::execution_input_files_for(link.to_str(), Path::new(".")).unwrap();
         assert_eq!(files.as_slice(), std::slice::from_ref(&link));
         assert!(!marker.exists());
         assert!(!root.join(".asb-tape-proxy.mjs").exists());
         std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(super::execution_input_files(link.to_str()).is_err());
+        assert!(super::execution_input_files_for(link.to_str(), Path::new(".")).is_err());
         assert!(!marker.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn built_in_proxy_seals_the_project_local_node_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_root();
+        std::fs::create_dir_all(root.join(".asb")).unwrap();
+        std::fs::write(
+            root.join(".asb/project.toml"),
+            "tools_dir='tools'\nworkloads_dir='workloads'\nworkspace_dir='workspace'\n",
+        )
+        .unwrap();
+        let node = root.join("tools/node/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let files = super::execution_input_files(&root).unwrap();
+        assert_eq!(
+            files.as_slice(),
+            std::slice::from_ref(&node.canonicalize().unwrap())
+        );
+        let command = super::ProxyExecutable::Builtin(root.join("proxy.mjs"))
+            .command(&root)
+            .unwrap();
+        assert_eq!(
+            command.get_program(),
+            node.canonicalize().unwrap().as_os_str()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4698,7 +4759,9 @@ mod tests {
     fn explicit_proxy_override_remains_supported() {
         // Environment changes are process-global, so exercise the command shape
         // directly rather than changing ASB_LLM_TAPE in a parallel test.
-        let command = ProxyExecutable::Override("custom-tape".into()).command();
+        let command = ProxyExecutable::Override("custom-tape".into())
+            .command(Path::new("."))
+            .unwrap();
         assert_eq!(command.get_program(), "custom-tape");
     }
 
