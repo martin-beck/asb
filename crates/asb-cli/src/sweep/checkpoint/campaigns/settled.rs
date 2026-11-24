@@ -898,14 +898,20 @@ fn slot_roots(
         config.retention.compact_completed_attempts,
         evidence.summary,
     );
-    if workspace_artifacts_required
+    let actual: BTreeSet<_> = evidence.outputs.iter().cloned().collect();
+    // Older compact-success publication retained the workspace marker while
+    // newer publication may omit it. Accept only the exact declared workspace
+    // path when immutable completion evidence proves that it was retained.
+    let workspace_retained =
+        workspace_output_retained(workspace_artifacts_required, &actual, &workspace);
+    if workspace_retained
         && !std::fs::symlink_metadata(&workspace).is_ok_and(|metadata| metadata.is_dir())
     {
         return Err(resume_error("campaign workspace is missing or aliased"));
     }
     let runtime = crate::runner::replica::runtime_path(&workspace);
     let mut outputs = BTreeSet::from([layout.root.join(&slot.log)]);
-    if workspace_artifacts_required {
+    if workspace_retained {
         outputs.insert(workspace);
     }
     if std::fs::symlink_metadata(&runtime).is_ok() {
@@ -922,7 +928,6 @@ fn slot_roots(
             ));
         }
     }
-    let actual: BTreeSet<_> = evidence.outputs.iter().cloned().collect();
     if actual != outputs || actual.len() != evidence.outputs.len() {
         return Err(resume_error(
             "campaign output roots differ from the saved slot layout",
@@ -961,7 +966,7 @@ fn slot_roots(
                     "campaign allocation differs from original execution/selection/evidence",
                 ));
             }
-            if workspace_artifacts_required {
+            if workspace_retained {
                 let remembered = slot
                     .workspace
                     .join(".asb-attempts")
@@ -1032,6 +1037,14 @@ fn compacted_success(compact_enabled: bool, summary: &Value) -> bool {
 
 fn workspace_artifacts_required(compact_enabled: bool, summary: &Value) -> bool {
     !compacted_success(compact_enabled, summary)
+}
+
+fn workspace_output_retained(
+    artifacts_required: bool,
+    outputs: &BTreeSet<PathBuf>,
+    workspace: &Path,
+) -> bool {
+    artifacts_required || outputs.contains(workspace)
 }
 
 fn normalization_protocol_matches(
@@ -1115,6 +1128,17 @@ mod normalizer_tests {
         assert!(!workspace_artifacts_required(true, &summary));
         assert!(!compacted_success(false, &summary));
         assert!(workspace_artifacts_required(false, &summary));
+        let workspace = PathBuf::from("campaign/batch-1/workspace");
+        assert!(!workspace_output_retained(
+            false,
+            &BTreeSet::new(),
+            &workspace
+        ));
+        assert!(workspace_output_retained(
+            false,
+            &BTreeSet::from([workspace.clone()]),
+            &workspace
+        ));
 
         let mut failed = summary.clone();
         failed["failure_kind"] = serde_json::json!("collector_teardown");
