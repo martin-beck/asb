@@ -42,20 +42,36 @@ impl LogBudget {
         }
     }
     fn acquire(self: &Arc<Self>) -> Option<LogWriterPermit> {
-        self.active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < self.workers).then_some(active + 1)
-            })
-            .ok()?;
-        Some(LogWriterPermit(Arc::clone(self)))
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= self.workers {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(LogWriterPermit(Arc::clone(self))),
+                Err(observed) => active = observed,
+            }
+        }
     }
     fn reserve(&self, maximum: usize) -> usize {
-        self.remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                Some(remaining.saturating_sub(maximum))
-            })
-            .unwrap()
-            .min(maximum)
+        let mut remaining = self.remaining.load(Ordering::Acquire);
+        loop {
+            let reserved = remaining.min(maximum);
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                remaining - reserved,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return reserved,
+                Err(observed) => remaining = observed,
+            }
+        }
     }
     fn return_unaccepted(&self, bytes: usize) {
         // Only a SyncSender rejection proves these bytes were never accepted.
