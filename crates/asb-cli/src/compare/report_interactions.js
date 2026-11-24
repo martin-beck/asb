@@ -15,6 +15,20 @@ function foldReportTables(){
     details.append(summary,wrap);
   }
 }
+function normalizedGroupLabel(value){
+  const heading=String(value||'').replace(/\s*\(\d+\s+graphs?\)\s*$/i,'');
+  return heading.match(/[\p{L}\p{N}]+/gu)?.filter(word=>!/^metrics?$/i.test(word)).join('').toLocaleLowerCase()||'';
+}
+function ancestorGroupLabels(node){
+  const labels=new Set();
+  for(let parent=node.parentElement;parent;parent=parent.parentElement){
+    if(parent.tagName!=='DETAILS')continue;
+    const summary=[...(parent.children||[])].find(child=>child.tagName==='SUMMARY');
+    const label=normalizedGroupLabel(summary&&summary.textContent);
+    if(label)labels.add(label);
+  }
+  return labels;
+}
 function groupReportCharts(){
   for(const grid of [...(document.querySelectorAll('.charts')||[])]){
     if(grid.classList&&grid.classList.contains('collector-charts'))continue;
@@ -23,12 +37,19 @@ function groupReportCharts(){
       node.classList.contains('interactive-chart')||node.classList.contains('flamegraph-chart')));
     if(!figures.length)continue;
     const groups=new Map();
+    const direct=[];
+    const ancestors=ancestorGroupLabels(grid);
     for(const figure of figures){
       const collector=figure.dataset.collector||'Other measurements';
+      if(ancestors.has(normalizedGroupLabel(collector))){
+        direct.push(figure);
+        continue;
+      }
       if(!groups.has(collector))groups.set(collector,[]);
       groups.get(collector).push(figure);
     }
     grid.classList.add('collector-groups');
+    grid.append(...direct);
     for(const [collector,entries] of groups){
       const details=document.createElement('details');
       details.className='collector-graph-group';

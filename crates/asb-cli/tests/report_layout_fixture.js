@@ -37,6 +37,14 @@ const grid=node('div',{classes:['charts']});
 const perf=node('figure',{classes:['interactive-chart'],dataset:{collector:'perf'}});
 const pressure=node('figure',{classes:['interactive-chart'],dataset:{collector:'Kernel pressure'}});
 grid.append(perf,pressure);
+const outer=node('details',{classes:['collector-graph-group']});
+const outerSummary=node('summary');outerSummary.textContent='ASB derived metrics (2 graphs)';
+const subgroup=node('details',{classes:['metric-graph-subgroup']});
+const subgroupSummary=node('summary');subgroupSummary.textContent='container.io (2 graphs)';
+const nestedGrid=node('div',{classes:['charts','metric-subgroup-charts']});
+const read=node('figure',{classes:['interactive-chart'],dataset:{collector:'ASB derived metrics'}});
+const write=node('figure',{classes:['interactive-chart'],dataset:{collector:'ASB derived metrics'}});
+nestedGrid.append(read,write);subgroup.append(subgroupSummary,nestedGrid);outer.append(outerSummary,subgroup);section.append(outer);
 const documentEvents=new Map();
 global.document={
   body:node('body'),
@@ -44,7 +52,7 @@ global.document={
   addEventListener:(name,handler)=>documentEvents.set(name,handler),
   querySelectorAll:selector=>({
     table:[table],
-    '.charts':[grid],
+    '.charts':[grid,nestedGrid],
     '.interactive-chart':[],
     'input[data-highlight-graph]':[],
     '[data-highlight-row]':[],
@@ -54,7 +62,7 @@ global.document={
 
 eval(fs.readFileSync(process.argv[2],'utf8'));
 
-assert.equal(section.children.length,1);
+assert.equal(section.children.length,2);
 const folded=section.children[0];
 assert.equal(folded.tagName,'DETAILS');
 assert.notEqual(folded.open,true,'details must be closed by default');
@@ -68,4 +76,6 @@ for(const group of grid.children){
   assert.equal(group.children[1].className,'charts collector-charts');
   assert.equal(group.children[1].children.length,1);
 }
+assert.equal(nestedGrid.children.length,2,'an existing subgroup must retain its charts');
+assert.ok(nestedGrid.children.every(child=>child.tagName==='FIGURE'),'matching ancestor label must not create a duplicate nested collector group');
 console.log('report folding and collector grouping checks passed');
