@@ -829,9 +829,6 @@ pub(crate) fn runtime_inputs(
         },
         Dependency::program("docker"),
     ];
-    if crate::tools::host_executable(Path::new("sudo")).is_some() {
-        inputs.push(Dependency::program("sudo"));
-    }
     if let Some(home) = std::env::var_os("HOME") {
         for path in [
             ".docker/config.json",
@@ -2217,6 +2214,26 @@ mod execution_tests;
 #[cfg(test)]
 mod tests {
     use crate::workloads::session::LaunchReadiness;
+
+    #[test]
+    fn runtime_inputs_do_not_declare_an_unexecuted_sudo_binary() {
+        let project = crate::project::ProjectConfig::default();
+        let inputs = super::runtime_inputs(
+            "swebench",
+            &crate::runtime_inputs::Context {
+                root: std::path::Path::new("/fixture"),
+                invocation_dir: std::path::Path::new("/fixture"),
+                project: &project,
+            },
+        )
+        .unwrap();
+        assert!(!inputs.iter().any(|input| {
+            matches!(
+                input,
+                crate::runtime_inputs::Dependency::Program { path, .. } if path == "sudo"
+            )
+        }));
+    }
 
     struct OrderedLaunch<'a> {
         events: &'a std::cell::RefCell<Vec<&'static str>>,
