@@ -28,6 +28,24 @@ test("profile mode keeps historical recursive agent rewrites away from literal t
   }
 });
 
+test("WorkBuddy normalizes only the generated environment OS version", () => {
+  const generated = (version) => ({
+    profileActive: true,
+    body: {
+      messages: [{
+        role: "system",
+        content: `<env>\nPlatform: linux\nOS Version: ${version}\nDefault shell: sh\n</env>`,
+      }],
+    },
+  });
+  assert.deepEqual(
+    workbuddy(generated("#3 SMP PREEMPT Mon Jul 13 11:43:49 UTC 2026")),
+    workbuddy(generated("#1 SMP Mon Nov 9 19:32:10 CST 2026")),
+  );
+  const literal = { body: { messages: [{ role: "system", content: "OS Version: retain this literal" }] } };
+  assert.equal(workbuddy(literal).messages[0].content, literal.body.messages[0].content);
+});
+
 test("profile mode leaves Codex workload summaries for selected scripts", () => {
   const output = "Ran 2 tests in 1.20s\n\nOK\n";
   const body = { input: [{ type: "function_call_output", output }] };
