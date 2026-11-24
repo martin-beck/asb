@@ -236,15 +236,25 @@ impl Inputs {
             verify,
         )?;
         let mut remaining = 256 * 1024 * 1024;
-        let inherited = declarations
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.receipt_binding.is_some())
-            .map(|candidate| {
-                self.read_campaign_receipt(candidate, &mut remaining)
-                    .map(|(receipt, _)| ((candidate.configuration, candidate.slot), receipt))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut inherited = BTreeMap::new();
+        for candidate in &declarations.candidates {
+            let destination =
+                self.campaign_completion_path(candidate.configuration, candidate.slot);
+            let present = crate::runner::campaign::reading::present_relative(
+                &self.directory,
+                destination
+                    .strip_prefix(&self.directory)
+                    .expect("derived receipt path"),
+            )?;
+            // Reconciliation can create a validated receipt after the original
+            // generation catalog was sealed. Treat that direct receipt as
+            // inherited only after the same identity and evidence checks used
+            // for catalog-bound receipts.
+            if candidate.receipt_binding.is_some() || present {
+                let (receipt, _) = self.read_campaign_receipt(candidate, &mut remaining)?;
+                inherited.insert((candidate.configuration, candidate.slot), receipt);
+            }
+        }
         let Inspection {
             layouts,
             candidates,

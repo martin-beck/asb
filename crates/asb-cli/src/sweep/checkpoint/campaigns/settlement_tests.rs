@@ -587,7 +587,7 @@ fn native_false_grades_seal_without_invented_remote_allocations_or_replacement()
     }
     let path = results.join(".checkpoint/campaign-completed/000000/000001.json");
     let original = fs::read(&path).unwrap();
-    assert!(state.seal_campaigns(&fixture.0, &results, &plan).is_err());
+    state.seal_campaigns(&fixture.0, &results, &plan).unwrap();
     assert_eq!(fs::read(path).unwrap(), original);
 }
 
