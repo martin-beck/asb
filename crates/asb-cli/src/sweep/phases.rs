@@ -157,9 +157,6 @@ impl<'a> PreparedSweep<'a> {
             let saved = plan::SweepPlan::load(&results, parent, &sweep)?.ok_or_else(|| {
                 Error::Input("cannot resume: the original sweep plan is missing".into())
             })?;
-            if saved.execution.is_some() && options.reconcile_completed {
-                return Err(Error::Input("campaign continuation requires saved-slot validation; existing results were not changed".into()));
-            }
             campaigns::validate_resume_options(&results, &saved, options)?;
             if saved.execution_mode != plan.execution_mode
                 || saved.respect_record_timings != plan.respect_record_timings
@@ -309,7 +306,15 @@ impl<'a> PreparedSweep<'a> {
                 },
             )?;
             if options.reconcile_completed {
-                checkpoint.reconcile_completed(parent, &results, &plan)?;
+                if plan.execution.is_some() {
+                    // Campaign outcomes have their own immutable slot receipts.
+                    // Rebuild only those receipts after validating the retained
+                    // campaign population; never route them through the
+                    // non-campaign replica receipt format.
+                    checkpoint.seal_campaigns(parent, &results, &plan)?;
+                } else {
+                    checkpoint.reconcile_completed(parent, &results, &plan)?;
+                }
             }
             if plan.execution.is_some() {
                 match checkpoint.prepare_campaign_continuation(parent, &results, &plan)? {

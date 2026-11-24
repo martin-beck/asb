@@ -126,6 +126,7 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
             "campaign-admission",
             "campaign-settlement",
             "campaign-settlement-partial",
+            "campaign-reconcile",
             "pricing-preflight",
             "pricing-replay-offline",
         ] {
@@ -363,6 +364,53 @@ fn actual_sweeps_stop_after_presentation_failure_but_settle_groups_and_partial_r
         std::fs::write(root.join("release-b"), "release").unwrap();
         assert!(runner.join().unwrap().is_ok());
         assert_eq!(state.0.lock().unwrap().before_grading, 2);
+        return;
+    }
+    if case == "campaign-reconcile" {
+        run_with_options(
+            manifest.to_str().unwrap(),
+            Options {
+                json: true,
+                mode: Some(crate::tape::Mode::Replay),
+                cassette_root: Some(&inputs),
+                repeat: Some(2),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let completed = root.join("sweep-results/.checkpoint/campaign-completed");
+        assert_eq!(
+            std::fs::read_dir(&completed)
+                .unwrap()
+                .map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap().count())
+                .sum::<usize>(),
+            4
+        );
+        std::fs::remove_dir_all(&completed).unwrap();
+        let calls = std::fs::read_to_string(&counter).unwrap();
+        run_with_options(
+            manifest.to_str().unwrap(),
+            Options {
+                json: true,
+                resume: true,
+                reconcile_completed: true,
+                mode: Some(crate::tape::Mode::Replay),
+                cassette_root: Some(&inputs),
+                repeat: Some(2),
+                ..Default::default()
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&counter).unwrap(), calls);
+        assert_eq!(
+            std::fs::read_dir(&completed)
+                .unwrap()
+                .map(|entry| std::fs::read_dir(entry.unwrap().path()).unwrap().count())
+                .sum::<usize>(),
+            4
+        );
         return;
     }
     if case == "history" || case == "pricing-preflight" {
