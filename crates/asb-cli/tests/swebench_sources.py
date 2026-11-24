@@ -293,6 +293,35 @@ class SourceContracts(unittest.TestCase):
                     sources.resolve_image(client, 'swebench/sweb.eval.x86_64.example', forbidden, host_arch=arch, offline=True)
         self.assertEqual(len(calls), 2)
 
+    def test_approximate_replay_uses_a_local_image_without_material_cache_lookup(self):
+        class DockerFailure(Exception): pass
+        class ImageNotFound(DockerFailure): pass
+        docker, errors = ModuleType('docker'), ModuleType('docker.errors')
+        requests, exceptions = ModuleType('requests'), ModuleType('requests.exceptions')
+        docker.errors, requests.exceptions = errors, exceptions
+        errors.DockerException, errors.ImageNotFound = DockerFailure, ImageNotFound
+        exceptions.RequestException = Exception
+        image = SimpleNamespace(attrs={'Architecture': 'amd64', 'Os': 'linux'})
+        calls = []
+        def get(name):
+            calls.append(('get', name))
+            return image
+        def listing(**_kwargs):
+            raise AssertionError('approximate replay must not query a material cache without a digest')
+        def forbidden(*_args):
+            raise AssertionError('offline replay must not access network or build')
+        client = SimpleNamespace(images=SimpleNamespace(get=get, list=listing, pull=forbidden))
+        with patch.dict(sys.modules, {'docker': docker, 'docker.errors': errors,
+                                      'requests': requests, 'requests.exceptions': exceptions}):
+            found, receipt = sources.resolve_image(
+                client, 'swebench/sweb.eval.x86_64.fixture', forbidden,
+                host_arch='x86_64', offline=True,
+            )
+        self.assertIs(found, image)
+        self.assertEqual(receipt, {'source': 'prebuilt-local',
+                                   'declared_image': 'swebench/sweb.eval.x86_64.fixture'})
+        self.assertEqual(calls, [('get', 'swebench/sweb.eval.x86_64.fixture')])
+
     def test_arm64_uses_only_native_upstream_images_without_x86_fallback(self):
         class DockerFailure(Exception): pass
         class ImageNotFound(DockerFailure): pass
